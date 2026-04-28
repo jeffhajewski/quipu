@@ -1,10 +1,132 @@
-name: quipu_synthetic
-version: 0.1.0
-suites:
-  - temporal_truth
-  - selective_forgetting
-  - cross_scope_contamination
-  - procedural_learning
-  - entity_resolution
-  - evidence_faithfulness
-  - adversarial_memory
+{
+  "name": "quipu_synthetic",
+  "version": "0.1.0",
+  "suites": [
+    "temporal_truth",
+    "selective_forgetting",
+    "cross_scope_contamination",
+    "procedural_learning",
+    "entity_resolution",
+    "evidence_faithfulness",
+    "adversarial_memory"
+  ],
+  "scenarios": [
+    {
+      "scenarioId": "scenario_package_manager_update",
+      "metadata": {
+        "source": "quipu_synthetic",
+        "license": "MIT",
+        "suite": "temporal_truth",
+        "description": "Package manager update and forgetting test"
+      },
+      "actors": [
+        { "id": "user", "type": "user", "name": "User" },
+        { "id": "assistant", "type": "agent", "name": "Assistant" }
+      ],
+      "events": [
+        {
+          "eventId": "e_pkg_1",
+          "time": "2026-01-01T10:00:00Z",
+          "type": "message",
+          "messages": [
+            { "role": "user", "content": "This repo uses npm." }
+          ],
+          "scope": { "projectId": "repo:test" },
+          "groundTruthMemories": ["m_pkg_1"]
+        },
+        {
+          "eventId": "e_pkg_2",
+          "time": "2026-02-01T10:00:00Z",
+          "type": "message",
+          "messages": [
+            { "role": "user", "content": "We migrated this repo to pnpm. Use pnpm now." }
+          ],
+          "scope": { "projectId": "repo:test" },
+          "groundTruthMemories": ["m_pkg_2"]
+        }
+      ],
+      "queries": [
+        {
+          "queryId": "q_pkg_current",
+          "time": "2026-03-01T10:00:00Z",
+          "query": "What package manager should I use?",
+          "scope": { "projectId": "repo:test" },
+          "expectedAnswer": "pnpm",
+          "expectedEvidenceEventIds": ["e_pkg_2"],
+          "mustNotUseEventIds": ["e_pkg_1"],
+          "category": "knowledge_update",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "q_pkg_historical",
+          "time": "2026-01-15T10:00:00Z",
+          "query": "What package manager did we use in mid January?",
+          "scope": { "projectId": "repo:test" },
+          "expectedAnswer": "npm",
+          "expectedEvidenceEventIds": ["e_pkg_1"],
+          "mustNotUseEventIds": [],
+          "category": "temporal",
+          "shouldAbstain": false
+        }
+      ],
+      "forgetOps": [
+        {
+          "forgetId": "f_pkg_1",
+          "afterEventId": "e_pkg_2",
+          "selector": { "eventIds": ["e_pkg_1"] },
+          "mode": "hard_delete",
+          "expectedNotRetrievableText": ["This repo uses npm"]
+        }
+      ]
+    },
+    {
+      "scenarioId": "scenario_cross_scope_tools",
+      "metadata": {
+        "source": "quipu_synthetic",
+        "license": "MIT",
+        "suite": "cross_scope_contamination",
+        "description": "Same user has different test commands in two projects"
+      },
+      "actors": [
+        { "id": "user", "type": "user", "name": "User" },
+        { "id": "assistant", "type": "agent", "name": "Assistant" }
+      ],
+      "events": [
+        {
+          "eventId": "e_scope_a",
+          "time": "2026-04-01T10:00:00Z",
+          "type": "message",
+          "messages": [
+            { "role": "user", "content": "In repo alpha, run just test before committing." }
+          ],
+          "scope": { "userId": "user-local", "projectId": "repo:alpha" },
+          "groundTruthMemories": ["m_scope_a"]
+        },
+        {
+          "eventId": "e_scope_b",
+          "time": "2026-04-01T11:00:00Z",
+          "type": "message",
+          "messages": [
+            { "role": "user", "content": "In repo beta, run npm test before committing." }
+          ],
+          "scope": { "userId": "user-local", "projectId": "repo:beta" },
+          "groundTruthMemories": ["m_scope_b"]
+        }
+      ],
+      "queries": [
+        {
+          "queryId": "q_scope_alpha",
+          "time": "2026-04-02T10:00:00Z",
+          "query": "What test command should I run before committing?",
+          "scope": { "userId": "user-local", "projectId": "repo:alpha" },
+          "expectedAnswer": "just test",
+          "expectedEvidenceEventIds": ["e_scope_a"],
+          "mustNotUseEventIds": ["e_scope_b"],
+          "category": "cross_scope",
+          "shouldAbstain": false
+        }
+      ],
+      "forgetOps": []
+    }
+  ]
+}
