@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quipu.local/schemas/json-rpc.schema.json",
+  "title": "Quipu JSON-RPC Envelope",
+  "$defs": {
+    "jsonRpcId": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "integer" },
+        { "type": "null" }
+      ]
+    },
+    "method": {
+      "type": "string",
+      "enum": [
+        "system.health",
+        "memory.remember",
+        "memory.retrieve",
+        "memory.search",
+        "memory.inspect",
+        "memory.forget",
+        "memory.feedback",
+        "memory.core.get",
+        "memory.core.update"
+      ]
+    },
+    "errorCode": {
+      "type": "string",
+      "enum": [
+        "invalid_request",
+        "unauthorized",
+        "forbidden",
+        "not_found",
+        "conflict",
+        "provider_error",
+        "embedding_error",
+        "llm_error",
+        "storage_error",
+        "schema_error",
+        "migration_required",
+        "version_mismatch",
+        "rate_limited",
+        "cancelled",
+        "internal_error"
+      ]
+    },
+    "request": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcId" },
+        "method": { "$ref": "#/$defs/method" },
+        "params": { "type": "object" }
+      }
+    },
+    "successResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcId" },
+        "result": { "type": "object" }
+      }
+    },
+    "errorResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcId" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "additionalProperties": false,
+          "properties": {
+            "code": { "$ref": "#/$defs/errorCode" },
+            "message": { "type": "string", "minLength": 1 },
+            "details": { "type": "object" }
+          }
+        }
+      }
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/successResponse" },
+    { "$ref": "#/$defs/errorResponse" }
+  ]
+}

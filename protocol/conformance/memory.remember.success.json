@@ -1,0 +1,42 @@
+{
+  "name": "memory.remember success",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_remember_001",
+    "method": "memory.remember",
+    "params": {
+      "sessionId": "session-local-1",
+      "scope": {
+        "tenantId": null,
+        "userId": "user-local",
+        "agentId": "agent-default",
+        "projectId": "repo:quipu"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "For this repo, use pnpm, not npm.",
+          "createdAt": "2026-04-28T10:15:00-07:00"
+        }
+      ],
+      "toolCalls": [],
+      "observations": [],
+      "metadata": {},
+      "extract": true,
+      "importanceHint": 0.7,
+      "privacyClass": "normal",
+      "idempotencyKey": "idem-remember-001"
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_remember_001",
+    "result": {
+      "sessionQid": "q_sess_local1",
+      "turnQid": "q_turn_local1",
+      "messageQids": ["q_msg_local1"],
+      "queuedJobs": ["q_job_extract1"],
+      "status": "stored"
+    }
+  }
+}

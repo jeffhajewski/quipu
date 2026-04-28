@@ -1,0 +1,25 @@
+{
+  "name": "system.health success",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_health_001",
+    "method": "system.health",
+    "params": {}
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_health_001",
+    "result": {
+      "status": "ok",
+      "version": "0.1.0",
+      "protocolVersion": "2026-04-quipu-v1",
+      "dbPath": null,
+      "latticeVersion": null,
+      "schemaVersion": 1,
+      "workers": {
+        "extractor": "unavailable",
+        "consolidator": "unavailable"
+      }
+    }
+  }
+}

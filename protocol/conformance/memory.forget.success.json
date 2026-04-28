@@ -1,0 +1,36 @@
+{
+  "name": "memory.forget dry run success",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_forget_001",
+    "method": "memory.forget",
+    "params": {
+      "mode": "hard_delete",
+      "selector": {
+        "qids": ["q_msg_local1"],
+        "query": null,
+        "scope": { "userId": "user-local" },
+        "timeWindow": null
+      },
+      "propagate": true,
+      "dryRun": true,
+      "reason": "user_request"
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_forget_001",
+    "result": {
+      "deletionRequestQid": "q_del_local1",
+      "status": "planned",
+      "dryRun": true,
+      "rootsMatched": 1,
+      "nodesDeleted": 0,
+      "nodesRedacted": 0,
+      "factsInvalidated": 2,
+      "summariesContaminated": 1,
+      "jobsQueued": [],
+      "report": []
+    }
+  }
+}

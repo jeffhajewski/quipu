@@ -1,0 +1,38 @@
+{
+  "name": "memory.inspect success",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_inspect_001",
+    "method": "memory.inspect",
+    "params": {
+      "qid": "q_fact_local1",
+      "includeProvenance": true,
+      "includeDependents": true,
+      "includeRaw": true
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_inspect_001",
+    "result": {
+      "node": {
+        "qid": "q_fact_local1",
+        "type": "fact",
+        "properties": {
+          "text": "The repo uses pnpm rather than npm."
+        }
+      },
+      "provenance": [
+        {
+          "edge": "EVIDENCED_BY",
+          "node": {
+            "qid": "q_msg_local1",
+            "text": "For this repo, use pnpm, not npm."
+          }
+        }
+      ],
+      "dependents": [],
+      "audit": []
+    }
+  }
+}

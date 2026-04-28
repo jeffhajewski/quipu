@@ -1,0 +1,30 @@
+{
+  "name": "memory.search success",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_search_001",
+    "method": "memory.search",
+    "params": {
+      "query": "pnpm",
+      "mode": "hybrid",
+      "labels": ["Fact", "MemoryCard", "Episode"],
+      "scope": { "projectId": "repo:quipu" },
+      "limit": 20,
+      "includeDeleted": false
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_search_001",
+    "result": {
+      "results": [
+        {
+          "qid": "q_fact_local1",
+          "type": "fact",
+          "text": "The repo uses pnpm rather than npm.",
+          "score": 0.88
+        }
+      ]
+    }
+  }
+}

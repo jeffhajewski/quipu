@@ -1,0 +1,28 @@
+{
+  "name": "memory.core.get success",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_core_get_001",
+    "method": "memory.core.get",
+    "params": {
+      "scope": { "projectId": "repo:quipu" },
+      "blockKey": "project_state"
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_core_get_001",
+    "result": {
+      "blocks": [
+        {
+          "qid": "q_core_local1",
+          "blockKey": "project_state",
+          "scope": { "projectId": "repo:quipu" },
+          "text": "Quipu is a Zig daemon over LatticeDB with TypeScript/Python SDKs.",
+          "managedBy": "user",
+          "evidenceQids": ["q_fact_local1"]
+        }
+      ]
+    }
+  }
+}

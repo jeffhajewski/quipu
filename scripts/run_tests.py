@@ -34,7 +34,7 @@ def maybe_run_typescript_build() -> None:
     if not has_deps and not os.environ.get("CI"):
         print("Skipping TypeScript build: sdk/typescript/node_modules is missing")
         return
-    run(["npm", "run", "build"], cwd=sdk)
+    run(["npm", "test"], cwd=sdk)
 
 
 def maybe_run_zig_build() -> None:

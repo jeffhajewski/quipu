@@ -1,0 +1,24 @@
+{
+  "name": "memory.core.update success",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_core_update_001",
+    "method": "memory.core.update",
+    "params": {
+      "blockKey": "project_state",
+      "scope": { "projectId": "repo:quipu" },
+      "text": "Quipu is a Zig daemon over LatticeDB with TypeScript/Python SDKs.",
+      "mode": "replace",
+      "evidenceQids": ["q_fact_local1"],
+      "managedBy": "user"
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_core_update_001",
+    "result": {
+      "blockQid": "q_core_local1",
+      "status": "stored"
+    }
+  }
+}

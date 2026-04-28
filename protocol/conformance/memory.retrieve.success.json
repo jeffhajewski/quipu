@@ -1,0 +1,67 @@
+{
+  "name": "memory.retrieve success",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_001",
+    "method": "memory.retrieve",
+    "params": {
+      "query": "What should I know before editing this repo?",
+      "task": "coding_assistance",
+      "scope": {
+        "userId": "user-local",
+        "projectId": "repo:quipu"
+      },
+      "budgetTokens": 1200,
+      "needs": ["current_facts", "preferences", "procedural", "recent_episodes"],
+      "time": {
+        "validAt": null,
+        "eventWindowStart": null,
+        "eventWindowEnd": null
+      },
+      "options": {
+        "includeEvidence": true,
+        "includeDebug": false,
+        "logTrace": true,
+        "abstainIfWeak": true,
+        "format": "prompt"
+      }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_001",
+    "result": {
+      "retrievalId": "q_retr_local1",
+      "prompt": "<memory>Use pnpm for this repository.</memory>",
+      "context": {
+        "core": [],
+        "currentFacts": [],
+        "preferences": [],
+        "procedural": [],
+        "episodes": [],
+        "warnings": []
+      },
+      "items": [
+        {
+          "qid": "q_fact_local1",
+          "type": "fact",
+          "text": "The repo uses pnpm rather than npm.",
+          "score": 0.91,
+          "confidence": 0.94,
+          "state": "current",
+          "validFrom": "2026-04-28T10:15:00-07:00",
+          "evidence": [
+            {
+              "qid": "q_msg_local1",
+              "quote": "For this repo, use pnpm, not npm.",
+              "timestamp": "2026-04-28T10:15:00-07:00"
+            }
+          ]
+        }
+      ],
+      "tokenEstimate": 48,
+      "confidence": 0.82,
+      "warnings": []
+    }
+  }
+}

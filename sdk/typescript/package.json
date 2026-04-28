@@ -6,7 +6,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "echo TODO"
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "license": "MIT",
   "devDependencies": {

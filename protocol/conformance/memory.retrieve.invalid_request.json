@@ -1,0 +1,23 @@
+{
+  "name": "memory.retrieve invalid request",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_bad_001",
+    "method": "memory.retrieve",
+    "params": {
+      "query": "",
+      "budgetTokens": 0
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_bad_001",
+    "error": {
+      "code": "invalid_request",
+      "message": "query must be a non-empty string and budgetTokens must be positive",
+      "details": {
+        "fields": ["query", "budgetTokens"]
+      }
+    }
+  }
+}

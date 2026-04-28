@@ -1,0 +1,25 @@
+{
+  "name": "memory.feedback success",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_feedback_001",
+    "method": "memory.feedback",
+    "params": {
+      "retrievalId": "q_retr_local1",
+      "rating": "helpful",
+      "usedItemQids": ["q_fact_local1"],
+      "ignoredItemQids": [],
+      "corrections": [],
+      "metadata": {}
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_feedback_001",
+    "result": {
+      "feedbackQid": "q_fb_local1",
+      "queuedJobs": [],
+      "status": "stored"
+    }
+  }
+}

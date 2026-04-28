@@ -1,0 +1,436 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quipu.local/schemas/methods.schema.json",
+  "title": "Quipu JSON-RPC Methods",
+  "$defs": {
+    "qid": {
+      "type": "string",
+      "pattern": "^q_[a-z0-9]+_[A-Za-z0-9_-]+$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tenantId": { "type": ["string", "null"] },
+        "userId": { "type": ["string", "null"] },
+        "agentId": { "type": ["string", "null"] },
+        "projectId": { "type": ["string", "null"] }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "workerState": {
+      "type": "string",
+      "enum": ["running", "stopped", "unavailable"]
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["qid"],
+      "additionalProperties": false,
+      "properties": {
+        "qid": { "$ref": "#/$defs/qid" },
+        "quote": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      }
+    },
+    "memoryItem": {
+      "type": "object",
+      "required": ["qid", "type", "text", "score"],
+      "additionalProperties": false,
+      "properties": {
+        "qid": { "$ref": "#/$defs/qid" },
+        "type": {
+          "type": "string",
+          "enum": ["raw", "message", "episode", "fact", "preference", "procedure", "core", "summary"]
+        },
+        "text": { "type": "string" },
+        "score": { "type": "number", "minimum": 0 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "state": {
+          "type": "string",
+          "enum": ["current", "historical", "superseded", "deleted", "redacted"]
+        },
+        "validFrom": { "type": ["string", "null"], "format": "date-time" },
+        "validTo": { "type": ["string", "null"], "format": "date-time" },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidence" }
+        }
+      }
+    },
+    "systemHealthParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "systemHealthResult": {
+      "type": "object",
+      "required": ["status", "version", "protocolVersion", "schemaVersion", "workers"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["ok", "degraded", "error"] },
+        "version": { "type": "string" },
+        "protocolVersion": { "type": "string" },
+        "dbPath": { "type": ["string", "null"] },
+        "latticeVersion": { "type": ["string", "null"] },
+        "schemaVersion": { "type": "integer", "minimum": 0 },
+        "workers": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/workerState" }
+        }
+      }
+    },
+    "memoryRememberParams": {
+      "type": "object",
+      "required": ["messages"],
+      "additionalProperties": false,
+      "properties": {
+        "sessionId": { "type": "string" },
+        "scope": { "$ref": "#/$defs/scope" },
+        "messages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["role", "content"],
+            "additionalProperties": false,
+            "properties": {
+              "role": {
+                "type": "string",
+                "enum": ["system", "developer", "user", "assistant", "tool"]
+              },
+              "content": { "type": "string", "minLength": 1 },
+              "createdAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        },
+        "toolCalls": { "type": "array" },
+        "observations": { "type": "array" },
+        "metadata": { "$ref": "#/$defs/metadata" },
+        "extract": { "type": "boolean" },
+        "importanceHint": { "type": "number", "minimum": 0, "maximum": 1 },
+        "privacyClass": {
+          "type": "string",
+          "enum": ["public", "normal", "private", "secret"]
+        },
+        "idempotencyKey": { "type": "string" }
+      }
+    },
+    "memoryRememberResult": {
+      "type": "object",
+      "required": ["sessionQid", "turnQid", "messageQids", "queuedJobs", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "sessionQid": { "$ref": "#/$defs/qid" },
+        "turnQid": { "$ref": "#/$defs/qid" },
+        "messageQids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/qid" }
+        },
+        "queuedJobs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/qid" }
+        },
+        "status": { "type": "string", "enum": ["stored", "duplicate"] }
+      }
+    },
+    "memoryRetrieveParams": {
+      "type": "object",
+      "required": ["query"],
+      "additionalProperties": false,
+      "properties": {
+        "query": { "type": "string", "minLength": 1 },
+        "task": { "type": "string" },
+        "scope": { "$ref": "#/$defs/scope" },
+        "budgetTokens": { "type": "integer", "minimum": 1 },
+        "needs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["core", "current_facts", "preferences", "procedural", "recent_episodes", "raw"]
+          }
+        },
+        "time": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "validAt": { "type": ["string", "null"], "format": "date-time" },
+            "eventWindowStart": { "type": ["string", "null"], "format": "date-time" },
+            "eventWindowEnd": { "type": ["string", "null"], "format": "date-time" }
+          }
+        },
+        "options": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "includeEvidence": { "type": "boolean" },
+            "includeDebug": { "type": "boolean" },
+            "logTrace": { "type": "boolean" },
+            "abstainIfWeak": { "type": "boolean" },
+            "format": { "type": "string", "enum": ["prompt", "json"] }
+          }
+        }
+      }
+    },
+    "memoryRetrieveResult": {
+      "type": "object",
+      "required": ["retrievalId", "context", "items", "tokenEstimate", "confidence", "warnings"],
+      "additionalProperties": false,
+      "properties": {
+        "retrievalId": { "$ref": "#/$defs/qid" },
+        "prompt": { "type": "string" },
+        "context": {
+          "type": "object",
+          "required": ["core", "currentFacts", "preferences", "procedural", "episodes", "warnings"],
+          "additionalProperties": false,
+          "properties": {
+            "core": { "type": "array" },
+            "currentFacts": { "type": "array" },
+            "preferences": { "type": "array" },
+            "procedural": { "type": "array" },
+            "episodes": { "type": "array" },
+            "warnings": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/memoryItem" }
+        },
+        "tokenEstimate": { "type": "integer", "minimum": 0 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "memorySearchParams": {
+      "type": "object",
+      "required": ["query"],
+      "additionalProperties": false,
+      "properties": {
+        "query": { "type": "string", "minLength": 1 },
+        "mode": { "type": "string", "enum": ["fts", "vector", "hybrid", "graph"] },
+        "labels": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "scope": { "$ref": "#/$defs/scope" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "includeDeleted": { "type": "boolean" }
+      }
+    },
+    "memorySearchResult": {
+      "type": "object",
+      "required": ["results"],
+      "additionalProperties": false,
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/memoryItem" }
+        }
+      }
+    },
+    "memoryInspectParams": {
+      "type": "object",
+      "required": ["qid"],
+      "additionalProperties": false,
+      "properties": {
+        "qid": { "$ref": "#/$defs/qid" },
+        "includeProvenance": { "type": "boolean" },
+        "includeDependents": { "type": "boolean" },
+        "includeRaw": { "type": "boolean" }
+      }
+    },
+    "memoryInspectResult": {
+      "type": "object",
+      "required": ["node", "provenance", "dependents", "audit"],
+      "additionalProperties": false,
+      "properties": {
+        "node": {
+          "type": "object",
+          "required": ["qid", "type", "properties"],
+          "additionalProperties": false,
+          "properties": {
+            "qid": { "$ref": "#/$defs/qid" },
+            "type": { "type": "string" },
+            "properties": { "$ref": "#/$defs/metadata" }
+          }
+        },
+        "provenance": { "type": "array" },
+        "dependents": { "type": "array" },
+        "audit": { "type": "array" }
+      }
+    },
+    "memoryForgetParams": {
+      "type": "object",
+      "required": ["mode", "selector"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["hard_delete", "redact", "expire"] },
+        "selector": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "qids": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/qid" }
+            },
+            "query": { "type": ["string", "null"] },
+            "scope": { "$ref": "#/$defs/scope" },
+            "timeWindow": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "start": { "type": ["string", "null"], "format": "date-time" },
+                "end": { "type": ["string", "null"], "format": "date-time" }
+              }
+            }
+          }
+        },
+        "propagate": { "type": "boolean" },
+        "dryRun": { "type": "boolean" },
+        "reason": { "type": "string" }
+      }
+    },
+    "memoryForgetResult": {
+      "type": "object",
+      "required": [
+        "deletionRequestQid",
+        "status",
+        "dryRun",
+        "rootsMatched",
+        "nodesDeleted",
+        "nodesRedacted",
+        "factsInvalidated",
+        "summariesContaminated",
+        "jobsQueued",
+        "report"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "deletionRequestQid": { "$ref": "#/$defs/qid" },
+        "status": { "type": "string", "enum": ["planned", "completed"] },
+        "dryRun": { "type": "boolean" },
+        "rootsMatched": { "type": "integer", "minimum": 0 },
+        "nodesDeleted": { "type": "integer", "minimum": 0 },
+        "nodesRedacted": { "type": "integer", "minimum": 0 },
+        "factsInvalidated": { "type": "integer", "minimum": 0 },
+        "summariesContaminated": { "type": "integer", "minimum": 0 },
+        "jobsQueued": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/qid" }
+        },
+        "report": { "type": "array" }
+      }
+    },
+    "memoryFeedbackParams": {
+      "type": "object",
+      "required": ["retrievalId", "rating"],
+      "additionalProperties": false,
+      "properties": {
+        "retrievalId": { "$ref": "#/$defs/qid" },
+        "rating": { "type": "string", "enum": ["helpful", "not_helpful", "harmful"] },
+        "usedItemQids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/qid" }
+        },
+        "ignoredItemQids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/qid" }
+        },
+        "corrections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "text"],
+            "additionalProperties": false,
+            "properties": {
+              "type": { "type": "string" },
+              "text": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "metadata": { "$ref": "#/$defs/metadata" }
+      }
+    },
+    "memoryFeedbackResult": {
+      "type": "object",
+      "required": ["feedbackQid", "queuedJobs", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "feedbackQid": { "$ref": "#/$defs/qid" },
+        "queuedJobs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/qid" }
+        },
+        "status": { "type": "string", "enum": ["stored"] }
+      }
+    },
+    "memoryCoreGetParams": {
+      "type": "object",
+      "required": ["scope"],
+      "additionalProperties": false,
+      "properties": {
+        "scope": { "$ref": "#/$defs/scope" },
+        "blockKey": { "type": "string" }
+      }
+    },
+    "memoryCoreGetResult": {
+      "type": "object",
+      "required": ["blocks"],
+      "additionalProperties": false,
+      "properties": {
+        "blocks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["qid", "blockKey", "scope", "text", "managedBy"],
+            "additionalProperties": false,
+            "properties": {
+              "qid": { "$ref": "#/$defs/qid" },
+              "blockKey": { "type": "string" },
+              "scope": { "$ref": "#/$defs/scope" },
+              "text": { "type": "string" },
+              "managedBy": { "type": "string", "enum": ["user", "system"] },
+              "evidenceQids": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/qid" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "memoryCoreUpdateParams": {
+      "type": "object",
+      "required": ["blockKey", "scope", "text", "mode", "managedBy"],
+      "additionalProperties": false,
+      "properties": {
+        "blockKey": { "type": "string", "minLength": 1 },
+        "scope": { "$ref": "#/$defs/scope" },
+        "text": { "type": "string" },
+        "mode": { "type": "string", "enum": ["replace", "append"] },
+        "evidenceQids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/qid" }
+        },
+        "managedBy": { "type": "string", "enum": ["user", "system"] }
+      }
+    },
+    "memoryCoreUpdateResult": {
+      "type": "object",
+      "required": ["blockQid", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "blockQid": { "$ref": "#/$defs/qid" },
+        "status": { "type": "string", "enum": ["stored", "updated"] }
+      }
+    }
+  }
+}
