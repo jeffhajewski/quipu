@@ -1,0 +1,33 @@
+.DS_Store
+
+# Build outputs
+zig-cache/
+zig-out/
+dist/
+build/
+target/
+
+# Language/tool caches
+node_modules/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.py[cod]
+
+# Local environments
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# Coverage and reports
+coverage/
+.coverage
+htmlcov/
+
+# Editor and OS metadata
+.idea/
+.vscode/
+*.swp

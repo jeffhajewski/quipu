@@ -1,0 +1,10 @@
+name: quipu_synthetic
+version: 0.1.0
+suites:
+  - temporal_truth
+  - selective_forgetting
+  - cross_scope_contamination
+  - procedural_learning
+  - entity_resolution
+  - evidence_faithfulness
+  - adversarial_memory
