@@ -24,4 +24,5 @@ zig build test
 zig build
 ./zig-out/bin/quipu health
 ./zig-out/bin/quipu rpc-stdin < request.json
+printf '%s\n' '{"jsonrpc":"2.0","id":"1","method":"system.health","params":{}}' | ./zig-out/bin/quipu serve-stdio
 ```

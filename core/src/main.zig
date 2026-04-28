@@ -37,5 +37,33 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu health | quipu rpc-stdin\n", .{});
+    if (args.len > 1 and std.mem.eql(u8, args[1], "serve-stdio")) {
+        var stdin_buffer: [4096]u8 = undefined;
+        var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), init.io, &stdin_buffer);
+        while (true) {
+            const line = stdin_file_reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+                error.StreamTooLong => {
+                    const response = try runtime.dispatch(
+                        allocator,
+                        "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"system.invalid\",\"params\":{}}",
+                    );
+                    defer allocator.free(response);
+                    try stdout.print("{s}\n", .{response});
+                    try stdout.flush();
+                    return;
+                },
+                else => |e| return e,
+            };
+            const raw = line orelse break;
+            const request = std.mem.trim(u8, raw, " \t\r");
+            if (request.len == 0) continue;
+            const response = try runtime.dispatch(allocator, request);
+            defer allocator.free(response);
+            try stdout.print("{s}\n", .{response});
+            try stdout.flush();
+        }
+        return;
+    }
+
+    try stdout.print("quipu core scaffold\nusage: quipu health | quipu rpc-stdin | quipu serve-stdio\n", .{});
 }
