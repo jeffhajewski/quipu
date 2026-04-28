@@ -1,3 +1,6 @@
+import { spawn } from "node:child_process";
+import { createInterface, type Interface } from "node:readline";
+
 export type JsonValue =
   | null
   | boolean
@@ -449,16 +452,102 @@ function jsonParams(params: Record<string, unknown>): JsonObject {
   return params as JsonObject;
 }
 
-export class Quipu {
-  private transport?: QuipuTransport;
-  private nextId = 1;
+export class QuipuStdioTransport {
+  private command: string[];
+  private process?: ReturnType<typeof spawn>;
+  private lines?: Interface;
+  private queuedLines: string[] = [];
+  private waiters: Array<(line: string) => void> = [];
 
-  constructor(transport?: QuipuTransport) {
-    this.transport = transport;
+  constructor(command: string[]) {
+    this.command = command;
   }
 
-  static async local(): Promise<Quipu> {
+  async call(request: JsonRpcRequest): Promise<JsonRpcResponse> {
+    const process = this.ensureProcess();
+    process.stdin!.write(`${JSON.stringify(request)}\n`);
+    const line = await this.nextLine();
+    const response = JSON.parse(line) as unknown;
+    validateJsonRpcResponse(response);
+    return response;
+  }
+
+  close(): void {
+    if (this.process) {
+      this.process.stdin?.end();
+      if (!this.process.killed) {
+        this.process.kill();
+      }
+    }
+    this.lines?.close();
+    this.process = undefined;
+    this.lines = undefined;
+    this.queuedLines = [];
+    this.waiters = [];
+  }
+
+  private ensureProcess(): ReturnType<typeof spawn> {
+    if (this.process) return this.process;
+    const [command, ...args] = this.command;
+    if (!command) {
+      throw new Error("Quipu stdio command cannot be empty");
+    }
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = createInterface({ input: child.stdout });
+    lines.on("line", (line) => {
+      const waiter = this.waiters.shift();
+      if (waiter) {
+        waiter(line);
+      } else {
+        this.queuedLines.push(line);
+      }
+    });
+    this.process = child;
+    this.lines = lines;
+    return child;
+  }
+
+  private nextLine(timeoutMs = 5000): Promise<string> {
+    const queued = this.queuedLines.shift();
+    if (queued !== undefined) return Promise.resolve(queued);
+    return new Promise((resolve, reject) => {
+      let waiter: (line: string) => void;
+      const timer = setTimeout(() => {
+        const index = this.waiters.indexOf(waiter);
+        if (index >= 0) this.waiters.splice(index, 1);
+        reject(new Error("Timed out waiting for Quipu response"));
+      }, timeoutMs);
+      waiter = (line) => {
+        clearTimeout(timer);
+        resolve(line);
+      };
+      this.waiters.push(waiter);
+    });
+  }
+}
+
+export class Quipu {
+  private transport?: QuipuTransport;
+  private closeTransport?: () => void;
+  private nextId = 1;
+
+  constructor(transport?: QuipuTransport, closeTransport?: () => void) {
+    this.transport = transport;
+    this.closeTransport = closeTransport;
+  }
+
+  static async local(command?: string[]): Promise<Quipu> {
+    if (command) return Quipu.stdio(command);
     return new Quipu();
+  }
+
+  static stdio(command: string[]): Quipu {
+    const transport = new QuipuStdioTransport(command);
+    return new Quipu((request) => transport.call(request), () => transport.close());
+  }
+
+  close(): void {
+    this.closeTransport?.();
   }
 
   async call<T extends JsonObject = JsonObject>(method: QuipuMethod, params: Record<string, unknown> = {}): Promise<T> {

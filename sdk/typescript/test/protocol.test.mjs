@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -16,6 +17,8 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "../../..");
 const fixtureDir = path.join(root, "protocol", "conformance");
+const coreDir = path.join(root, "core");
+const coreBinary = path.join(coreDir, "zig-out", "bin", "quipu");
 
 function loadFixtures() {
   return readdirSync(fixtureDir)
@@ -71,4 +74,29 @@ test("client delegates valid requests to transport", async () => {
   assert.equal(result.status, "ok");
   assert.equal(calls[0].method, "system.health");
   validateJsonRpcRequest(calls[0]);
+});
+
+const hasZig = spawnSync("zig", ["version"], { stdio: "ignore" }).status === 0;
+
+test("stdio client calls core process", { skip: !hasZig }, async () => {
+  const build = spawnSync("zig", ["build"], {
+    cwd: coreDir,
+    env: { ...process.env, ZIG_GLOBAL_CACHE_DIR: "/tmp/quipu-zig-cache" },
+    stdio: "inherit",
+  });
+  assert.equal(build.status, 0);
+
+  const client = Quipu.stdio([coreBinary, "serve-stdio"]);
+  try {
+    const remembered = await client.remember({
+      scope: { projectId: "repo:test" },
+      messages: [{ role: "user", content: "Use pnpm from TypeScript." }],
+    });
+    const retrieved = await client.retrieve({ query: "pnpm", scope: { projectId: "repo:test" } });
+
+    assert.equal(remembered.status, "stored");
+    assert.match(String(retrieved.prompt), /Use pnpm from TypeScript/);
+  } finally {
+    client.close();
+  }
 });
