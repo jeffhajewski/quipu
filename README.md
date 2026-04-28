@@ -17,6 +17,7 @@ Implemented now:
 - Forgetting paths for dry-run reports, hard-delete tombstones, redaction state, and invalidation of derived memories backed by forgotten evidence.
 - JSON-RPC schemas and conformance fixtures shared by SDK tests.
 - Thin TypeScript and Python SDKs that validate protocol shape and can call a local `quipu serve-stdio` process.
+- Dependency-free MCP stdio tool adapter that forwards Quipu tool calls to the core JSON-RPC process.
 - Python eval harness with a raw fake baseline and a Zig core smoke baseline.
 
 Not implemented yet:
@@ -25,13 +26,13 @@ Not implemented yet:
 - Long-running socket or HTTP daemon process.
 - Real vector/BM25/reranking retrieval.
 - LLM-backed extraction, consolidation workers, and plugin provider loading.
-- MCP adapter implementation beyond the design placeholder.
+- MCP resources/prompts and richer host integrations beyond the tool bridge.
 
 ## Architecture
 
 ```text
 Agent runtime / app
-  -> TypeScript SDK, Python SDK, CLI, or future MCP adapter
+  -> TypeScript SDK, Python SDK, CLI, or MCP adapter
   -> JSON-RPC 2.0 protocol
   -> Zig core runtime
   -> storage adapter
@@ -97,7 +98,7 @@ PYTHONPATH=evals/src python3 -m quipu_evals.core_runner
 - `sdk/python/`: thin Python SDK and protocol tests.
 - `evals/`: synthetic scenario schema, fake baseline, Zig core runner, graders, and tests.
 - `docs/`: implementation notes for API, algorithms, data model, evals, architecture, security, and publication.
-- `mcp/`: MCP adapter placeholder.
+- `mcp/`: dependency-free MCP stdio tool adapter.
 - `examples/`: planned integration examples.
 
 ## Protocol

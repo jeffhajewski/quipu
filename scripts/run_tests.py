@@ -38,6 +38,16 @@ def maybe_run_typescript_build() -> None:
     run(["npm", "test"], cwd=sdk)
 
 
+def maybe_run_node_tests(path: Path) -> None:
+    if shutil.which("npm") is None:
+        print(f"Skipping Node tests: npm is not installed for {path.relative_to(ROOT)}")
+        return
+    if not (path / "package.json").exists():
+        print(f"Skipping Node tests: {path.relative_to(ROOT)}/package.json does not exist")
+        return
+    run(["npm", "test"], cwd=path)
+
+
 def maybe_run_zig_build() -> None:
     if shutil.which("zig") is None:
         print("Skipping Zig build: zig is not installed")
@@ -51,6 +61,7 @@ def main() -> int:
     maybe_run_python_tests(ROOT / "sdk" / "python" / "tests")
     maybe_run_python_tests(ROOT / "evals" / "tests")
     maybe_run_typescript_build()
+    maybe_run_node_tests(ROOT / "mcp")
     maybe_run_zig_build()
     return 0
 
