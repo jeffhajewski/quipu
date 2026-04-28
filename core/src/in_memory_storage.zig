@@ -52,8 +52,8 @@ pub const InMemoryAdapter = struct {
         return .{
             .allocator = allocator,
             .nodes = std.StringHashMap(NodeRecord).init(allocator),
-            .edges = std.ArrayList(EdgeRecord).init(allocator),
-            .streams = std.ArrayList(StreamRecord).init(allocator),
+            .edges = std.ArrayList(EdgeRecord).empty,
+            .streams = std.ArrayList(StreamRecord).empty,
         };
     }
 
@@ -67,12 +67,12 @@ pub const InMemoryAdapter = struct {
         for (self.edges.items) |edge| {
             edge.deinit(self.allocator);
         }
-        self.edges.deinit();
+        self.edges.deinit(self.allocator);
 
         for (self.streams.items) |entry| {
             entry.deinit(self.allocator);
         }
-        self.streams.deinit();
+        self.streams.deinit(self.allocator);
     }
 
     pub fn adapter(self: *InMemoryAdapter) storage.Adapter {
@@ -96,7 +96,7 @@ pub const InMemoryAdapter = struct {
 
     fn putEdge(context: *anyopaque, edge: storage.Edge) !void {
         const self = ctx(context);
-        try self.edges.append(.{
+        try self.edges.append(self.allocator, .{
             .qid = try self.allocator.dupe(u8, edge.qid),
             .from_qid = try self.allocator.dupe(u8, edge.from_qid),
             .to_qid = try self.allocator.dupe(u8, edge.to_qid),
@@ -107,18 +107,18 @@ pub const InMemoryAdapter = struct {
 
     fn fullTextSearch(context: *anyopaque, allocator: std.mem.Allocator, query: storage.FullTextQuery) ![]storage.SearchHit {
         const self = ctx(context);
-        var hits = std.ArrayList(storage.SearchHit).init(allocator);
+        var hits = std.ArrayList(storage.SearchHit).empty;
         var node_it = self.nodes.iterator();
         while (node_it.next()) |entry| {
             if (query.text.len == 0 or contains(entry.value_ptr.properties_json, query.text) or contains(entry.value_ptr.label, query.text)) {
-                try hits.append(.{
+                try hits.append(allocator, .{
                     .qid = try allocator.dupe(u8, entry.value_ptr.qid),
                     .score = 1.0,
                 });
                 if (hits.items.len >= query.limit) break;
             }
         }
-        return hits.toOwnedSlice();
+        return hits.toOwnedSlice(allocator);
     }
 
     fn vectorSearch(_: *anyopaque, allocator: std.mem.Allocator, _: storage.VectorQuery) ![]storage.SearchHit {
@@ -134,7 +134,7 @@ pub const InMemoryAdapter = struct {
             .sequence = sequence,
             .payload_json = try self.allocator.dupe(u8, payload_json),
         };
-        try self.streams.append(record);
+        try self.streams.append(self.allocator, record);
         return .{
             .stream = record.stream,
             .sequence = record.sequence,
@@ -150,10 +150,10 @@ pub const InMemoryAdapter = struct {
         limit: usize,
     ) ![]storage.StreamEntry {
         const self = ctx(context);
-        var entries = std.ArrayList(storage.StreamEntry).init(allocator);
+        var entries = std.ArrayList(storage.StreamEntry).empty;
         for (self.streams.items) |entry| {
             if (std.mem.eql(u8, entry.stream, stream) and entry.sequence > after_sequence) {
-                try entries.append(.{
+                try entries.append(allocator, .{
                     .stream = try allocator.dupe(u8, entry.stream),
                     .sequence = entry.sequence,
                     .payload_json = try allocator.dupe(u8, entry.payload_json),
@@ -161,7 +161,7 @@ pub const InMemoryAdapter = struct {
                 if (entries.items.len >= limit) break;
             }
         }
-        return entries.toOwnedSlice();
+        return entries.toOwnedSlice(allocator);
     }
 
     fn beginTransaction(context: *anyopaque) !storage.Transaction {
@@ -177,24 +177,24 @@ pub const InMemoryAdapter = struct {
 
     fn verify(context: *anyopaque, allocator: std.mem.Allocator) ![]storage.VerificationIssue {
         const self = ctx(context);
-        var issues = std.ArrayList(storage.VerificationIssue).init(allocator);
+        var issues = std.ArrayList(storage.VerificationIssue).empty;
         for (self.edges.items) |edge| {
             if (!self.nodes.contains(edge.from_qid)) {
-                try issues.append(.{
+                try issues.append(allocator, .{
                     .code = "missing_edge_source",
                     .message = "edge source node is missing",
                     .qid = try allocator.dupe(u8, edge.qid),
                 });
             }
             if (!self.nodes.contains(edge.to_qid)) {
-                try issues.append(.{
+                try issues.append(allocator, .{
                     .code = "missing_edge_target",
                     .message = "edge target node is missing",
                     .qid = try allocator.dupe(u8, edge.qid),
                 });
             }
         }
-        return issues.toOwnedSlice();
+        return issues.toOwnedSlice(allocator);
     }
 
     fn contains(haystack: []const u8, needle: []const u8) bool {

@@ -62,20 +62,27 @@ fn healthResponse(allocator: std.mem.Allocator, id: ?[]const u8, health: Health)
             },
         },
     };
-    return std.json.stringifyAlloc(allocator, response, .{});
+    return stringifyAlloc(allocator, response);
 }
 
 fn errorResponse(allocator: std.mem.Allocator, id: ?[]const u8, code: []const u8, message: []const u8) ![]u8 {
     const response = .{
         .jsonrpc = "2.0",
         .id = id,
-        .error = .{
+        .@"error" = .{
             .code = code,
             .message = message,
             .details = .{},
         },
     };
-    return std.json.stringifyAlloc(allocator, response, .{});
+    return stringifyAlloc(allocator, response);
+}
+
+fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    errdefer writer.deinit();
+    try std.json.Stringify.value(value, .{}, &writer.writer);
+    return writer.toOwnedSlice();
 }
 
 fn stringValue(value: ?std.json.Value) ?[]const u8 {

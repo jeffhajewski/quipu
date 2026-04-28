@@ -8,14 +8,15 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from typing import Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run(command: list[str], cwd: Path = ROOT) -> None:
+def run(command: list[str], cwd: Path = ROOT, env: Optional[dict[str, str]] = None) -> None:
     print(f"$ {' '.join(command)}", flush=True)
-    subprocess.run(command, cwd=str(cwd), check=True)
+    subprocess.run(command, cwd=str(cwd), check=True, env=env)
 
 
 def maybe_run_python_tests(path: Path) -> None:
@@ -41,7 +42,9 @@ def maybe_run_zig_build() -> None:
     if shutil.which("zig") is None:
         print("Skipping Zig build: zig is not installed")
         return
-    run(["zig", "build", "test"], cwd=ROOT / "core")
+    env = os.environ.copy()
+    env.setdefault("ZIG_GLOBAL_CACHE_DIR", "/tmp/quipu-zig-cache")
+    run(["zig", "build", "test"], cwd=ROOT / "core", env=env)
 
 
 def main() -> int:
