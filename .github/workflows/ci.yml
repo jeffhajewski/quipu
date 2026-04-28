@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scaffold:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install TypeScript SDK dependencies
+        working-directory: sdk/typescript
+        run: npm install
+
+      - name: Check formatting
+        run: python3 scripts/check_format.py --check
+
+      - name: Run tests
+        run: python3 scripts/run_tests.py

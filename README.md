@@ -14,6 +14,10 @@ Quipu is a local-first memory daemon built on top of LatticeDB. It stores raw in
 - Optional MCP adapter.
 - Python eval harness.
 
+## Development toolchain
+
+Target contributors should have Zig, Python 3.10 or newer, Node.js, npm, and `just`. Until every toolchain is installed locally, `python3 scripts/run_tests.py` skips unavailable optional checks and CI runs the checks with Python and Node configured.
+
 ## Target quickstart
 
 ```bash

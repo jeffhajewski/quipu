@@ -1,10 +1,14 @@
-# Placeholder commands. Wire these up as implementation lands.
+set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 fmt:
-    echo "TODO: zig fmt, prettier, ruff"
+    python3 scripts/check_format.py --fix
 
 test:
-    echo "TODO: run unit and integration tests"
+    python3 scripts/run_tests.py
+
+ci:
+    python3 scripts/check_format.py --check
+    python3 scripts/run_tests.py
 
 spec:
-    echo "See SPEC.md"
+    printf '%s\n' "See SPEC.md"

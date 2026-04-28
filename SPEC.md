@@ -1,11 +1,11 @@
 # Quipu Implementation Specification
 
-**Project:** Quipu  
-**Working tagline:** Evidence-backed temporal memory for long-horizon agents  
-**License:** MIT  
-**Status:** Implementation specification v0.1  
-**Audience:** core maintainers, SDK authors, benchmark authors, contributors, researchers  
-**Primary substrate:** LatticeDB by jeffhajewski/latticedb  
+**Project:** Quipu
+**Working tagline:** Evidence-backed temporal memory for long-horizon agents
+**License:** MIT
+**Status:** Implementation specification v0.1
+**Audience:** core maintainers, SDK authors, benchmark authors, contributors, researchers
+**Primary substrate:** LatticeDB by jeffhajewski/latticedb
 **Primary runtime recommendation:** native Zig daemon + CLI, thin TypeScript/Python SDKs, optional MCP server
 
 ---
