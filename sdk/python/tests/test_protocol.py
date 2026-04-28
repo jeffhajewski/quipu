@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -21,6 +24,8 @@ from quipu import (  # noqa: E402
 
 FIXTURE_DIR = ROOT / "protocol" / "conformance"
 SCHEMA_DIR = ROOT / "protocol" / "schemas"
+CORE_DIR = ROOT / "core"
+CORE_BINARY = CORE_DIR / "zig-out" / "bin" / "quipu"
 
 
 def load_fixtures():
@@ -108,6 +113,22 @@ class QuipuClientTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(calls[0]["method"], "system.health")
         validate_json_rpc_request(calls[0])
+
+    @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
+    def test_stdio_client_calls_core_process(self):
+        env = os.environ.copy()
+        env["ZIG_GLOBAL_CACHE_DIR"] = "/tmp/quipu-zig-cache"
+        subprocess.run(["zig", "build"], cwd=str(CORE_DIR), check=True, env=env)
+
+        with Quipu.stdio([str(CORE_BINARY), "serve-stdio"]) as client:
+            remembered = client.remember(
+                scope={"projectId": "repo:test"},
+                messages=[{"role": "user", "content": "Use pnpm through the SDK."}],
+            )
+            retrieved = client.retrieve(query="pnpm", scope={"projectId": "repo:test"})
+
+            self.assertEqual(remembered["status"], "stored")
+            self.assertIn("Use pnpm through the SDK.", retrieved["prompt"])
 
 
 if __name__ == "__main__":

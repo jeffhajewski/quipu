@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping, Optional
+import json
+import subprocess
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 
 JsonRpcTransport = Callable[[Mapping[str, Any]], Mapping[str, Any]]
@@ -52,6 +54,57 @@ class QuipuRpcError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.details = dict(details or {})
+
+
+class QuipuStdioTransport:
+    """Persistent NDJSON transport for a local `quipu serve-stdio` process."""
+
+    def __init__(self, command: Sequence[str]) -> None:
+        self.command = list(command)
+        self.process: Optional[subprocess.Popen[str]] = None
+
+    def __call__(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        process = self._ensure_process()
+        if process.stdin is None or process.stdout is None:
+            raise RuntimeError("Quipu process stdio is unavailable")
+        process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+        process.stdin.flush()
+        line = process.stdout.readline()
+        if not line:
+            stderr = process.stderr.read() if process.stderr is not None else ""
+            raise RuntimeError(f"Quipu process exited without a response: {stderr}")
+        response = json.loads(line)
+        if not isinstance(response, Mapping):
+            raise RuntimeError("Quipu process returned a non-object response")
+        return response
+
+    def close(self) -> None:
+        if self.process is None:
+            return
+        if self.process.stdin is not None:
+            self.process.stdin.close()
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+            self.process.wait(timeout=2)
+        if self.process.stdout is not None:
+            self.process.stdout.close()
+        if self.process.stderr is not None:
+            self.process.stderr.close()
+        self.process = None
+
+    def _ensure_process(self) -> subprocess.Popen[str]:
+        if self.process is None:
+            self.process = subprocess.Popen(
+                self.command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        return self.process
 
 
 def _ensure_object(value: Any, label: str) -> Mapping[str, Any]:
@@ -343,8 +396,25 @@ class Quipu:
     _next_id: int = field(default=1, init=False, repr=False)
 
     @classmethod
-    def local(cls) -> "Quipu":
-        return cls()
+    def local(cls, command: Optional[Sequence[str]] = None) -> "Quipu":
+        if command is None:
+            return cls()
+        return cls.stdio(command)
+
+    @classmethod
+    def stdio(cls, command: Sequence[str]) -> "Quipu":
+        return cls(transport=QuipuStdioTransport(command))
+
+    def close(self) -> None:
+        close = getattr(self.transport, "close", None)
+        if callable(close):
+            close()
+
+    def __enter__(self) -> "Quipu":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
 
     def call(self, method: str, params: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
         validate_rpc_params(method, params or {})
@@ -396,6 +466,7 @@ __all__ = [
     "Quipu",
     "QuipuProtocolError",
     "QuipuRpcError",
+    "QuipuStdioTransport",
     "SUPPORTED_METHODS",
     "validate_json_rpc_request",
     "validate_json_rpc_response",
