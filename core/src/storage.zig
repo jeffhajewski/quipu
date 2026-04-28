@@ -58,6 +58,7 @@ pub const Adapter = struct {
 
     pub const VTable = struct {
         put_node: *const fn (*anyopaque, Node) anyerror!void,
+        get_node: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!?Node,
         put_edge: *const fn (*anyopaque, Edge) anyerror!void,
         full_text_search: *const fn (*anyopaque, std.mem.Allocator, FullTextQuery) anyerror![]SearchHit,
         vector_search: *const fn (*anyopaque, std.mem.Allocator, VectorQuery) anyerror![]SearchHit,
@@ -71,6 +72,16 @@ pub const Adapter = struct {
 
     pub fn putNode(self: Adapter, node: Node) !void {
         try self.vtable.put_node(self.context, node);
+    }
+
+    pub fn getNode(self: Adapter, allocator: std.mem.Allocator, qid: []const u8) !?Node {
+        return self.vtable.get_node(self.context, allocator, qid);
+    }
+
+    pub fn freeNode(_: Adapter, allocator: std.mem.Allocator, node: Node) void {
+        allocator.free(node.qid);
+        allocator.free(node.label);
+        allocator.free(node.properties_json);
     }
 
     pub fn putEdge(self: Adapter, edge: Edge) !void {

@@ -1,20 +1,25 @@
 const std = @import("std");
+const in_memory_storage = @import("in_memory_storage.zig");
 const protocol = @import("protocol.zig");
+const runtime_mod = @import("runtime.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var adapter_state = in_memory_storage.InMemoryAdapter.init(allocator);
+    defer adapter_state.deinit();
+    var runtime = runtime_mod.Runtime.init(adapter_state.adapter(), protocol.Health.default());
 
-    const stdout = std.io.getStdOut().writer();
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
+    const stdout = &stdout_file_writer.interface;
+    defer stdout.flush() catch {};
+
     if (args.len > 1 and std.mem.eql(u8, args[1], "health")) {
-        const response = try protocol.dispatch(
+        const response = try runtime.dispatch(
             allocator,
             "{\"jsonrpc\":\"2.0\",\"id\":\"cli_health\",\"method\":\"system.health\",\"params\":{}}",
-            protocol.Health.default(),
         );
         defer allocator.free(response);
         try stdout.print("{s}\n", .{response});
@@ -22,10 +27,11 @@ pub fn main() !void {
     }
 
     if (args.len > 1 and std.mem.eql(u8, args[1], "rpc-stdin")) {
-        const stdin = std.io.getStdIn().reader();
-        const request = try stdin.readAllAlloc(allocator, 1024 * 1024);
+        var stdin_buffer: [4096]u8 = undefined;
+        var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), init.io, &stdin_buffer);
+        const request = try stdin_file_reader.interface.allocRemaining(allocator, .limited(1024 * 1024));
         defer allocator.free(request);
-        const response = try protocol.dispatch(allocator, request, protocol.Health.default());
+        const response = try runtime.dispatch(allocator, request);
         defer allocator.free(response);
         try stdout.print("{s}\n", .{response});
         return;

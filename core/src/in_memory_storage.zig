@@ -60,6 +60,7 @@ pub const InMemoryAdapter = struct {
     pub fn deinit(self: *InMemoryAdapter) void {
         var node_it = self.nodes.iterator();
         while (node_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
             entry.value_ptr.deinit(self.allocator);
         }
         self.nodes.deinit();
@@ -84,14 +85,31 @@ pub const InMemoryAdapter = struct {
 
     fn putNode(context: *anyopaque, node: storage.Node) !void {
         const self = ctx(context);
+        const key = try self.allocator.dupe(u8, node.qid);
+        errdefer self.allocator.free(key);
         const record = NodeRecord{
             .qid = try self.allocator.dupe(u8, node.qid),
             .label = try self.allocator.dupe(u8, node.label),
             .properties_json = try self.allocator.dupe(u8, node.properties_json),
         };
-        if (try self.nodes.fetchPut(record.qid, record)) |old| {
-            old.value.deinit(self.allocator);
+        errdefer record.deinit(self.allocator);
+
+        const entry = try self.nodes.getOrPut(key);
+        if (entry.found_existing) {
+            self.allocator.free(key);
+            entry.value_ptr.deinit(self.allocator);
         }
+        entry.value_ptr.* = record;
+    }
+
+    fn getNode(context: *anyopaque, allocator: std.mem.Allocator, qid: []const u8) !?storage.Node {
+        const self = ctx(context);
+        const record = self.nodes.get(qid) orelse return null;
+        return .{
+            .qid = try allocator.dupe(u8, record.qid),
+            .label = try allocator.dupe(u8, record.label),
+            .properties_json = try allocator.dupe(u8, record.properties_json),
+        };
     }
 
     fn putEdge(context: *anyopaque, edge: storage.Edge) !void {
@@ -110,10 +128,11 @@ pub const InMemoryAdapter = struct {
         var hits = std.ArrayList(storage.SearchHit).empty;
         var node_it = self.nodes.iterator();
         while (node_it.next()) |entry| {
-            if (query.text.len == 0 or contains(entry.value_ptr.properties_json, query.text) or contains(entry.value_ptr.label, query.text)) {
+            const score = scoreRecord(entry.value_ptr.*, query.text);
+            if (score > 0) {
                 try hits.append(allocator, .{
                     .qid = try allocator.dupe(u8, entry.value_ptr.qid),
-                    .score = 1.0,
+                    .score = score,
                 });
                 if (hits.items.len >= query.limit) break;
             }
@@ -197,8 +216,28 @@ pub const InMemoryAdapter = struct {
         return issues.toOwnedSlice(allocator);
     }
 
-    fn contains(haystack: []const u8, needle: []const u8) bool {
-        return std.mem.indexOf(u8, haystack, needle) != null;
+    fn scoreRecord(record: NodeRecord, query: []const u8) f32 {
+        if (query.len == 0) return 1.0;
+
+        var score: f32 = 0;
+        var tokens = std.mem.tokenizeAny(u8, query, " \t\r\n.,?!:;\"'()[]{}<>/\\|");
+        while (tokens.next()) |token| {
+            if (token.len < 2) continue;
+            if (containsIgnoreCase(record.properties_json, token) or containsIgnoreCase(record.label, token)) {
+                score += 1.0;
+            }
+        }
+        return score;
+    }
+
+    fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+        if (needle.len == 0) return true;
+        if (needle.len > haystack.len) return false;
+        var index: usize = 0;
+        while (index + needle.len <= haystack.len) : (index += 1) {
+            if (std.ascii.eqlIgnoreCase(haystack[index .. index + needle.len], needle)) return true;
+        }
+        return false;
     }
 
     fn ctx(context: *anyopaque) *InMemoryAdapter {
@@ -207,6 +246,7 @@ pub const InMemoryAdapter = struct {
 
     const vtable = storage.Adapter.VTable{
         .put_node = putNode,
+        .get_node = getNode,
         .put_edge = putEdge,
         .full_text_search = fullTextSearch,
         .vector_search = vectorSearch,
