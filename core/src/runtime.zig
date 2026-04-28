@@ -78,6 +78,13 @@ const CoreBlockResult = struct {
     evidenceQids: []const []const u8 = &.{},
 };
 
+const ExtractedMemory = struct {
+    label: []const u8,
+    slot_key: []const u8,
+    value: []const u8,
+    text: []const u8,
+};
+
 pub const Runtime = struct {
     store: storage.Adapter,
     health: protocol.Health,
@@ -217,6 +224,9 @@ pub const Runtime = struct {
             message_qids.deinit(allocator);
         }
 
+        const extract_enabled = boolField(params, "extract") orelse true;
+        var derived_count: usize = 0;
+
         for (messages.items) |message_value| {
             const message = objectValue(message_value) orelse {
                 return errorResponse(allocator, id, "invalid_request", "each message must be an object");
@@ -248,6 +258,15 @@ pub const Runtime = struct {
             defer allocator.free(message_props);
             try self.store.putNode(.{ .qid = message_qid, .label = "Message", .properties_json = message_props });
             try self.putEdge(allocator, turn_qid, message_qid, "HAS_MESSAGE");
+            if (extract_enabled) {
+                derived_count += try self.extractFromMessage(
+                    allocator,
+                    scope,
+                    message_qid,
+                    content,
+                    stringField(&message, "createdAt"),
+                );
+            }
         }
 
         var queued_jobs = std.ArrayList([]const u8).empty;
@@ -255,14 +274,14 @@ pub const Runtime = struct {
             for (queued_jobs.items) |qid| allocator.free(qid);
             queued_jobs.deinit(allocator);
         }
-        if (boolField(params, "extract") orelse false) {
+        if (extract_enabled and derived_count == 0) {
             const job_qid = try self.nextQid(allocator, "job");
             try queued_jobs.append(allocator, job_qid);
             const job_props = try stringifyAlloc(allocator, .{
                 .kind = "job",
                 .jobType = "extract",
                 .turnQid = turn_qid,
-                .status = "queued",
+                .status = "noop",
                 .deleted = false,
             });
             defer allocator.free(job_props);
@@ -397,21 +416,16 @@ pub const Runtime = struct {
 
         var roots_matched: usize = 0;
         var nodes_deleted: usize = 0;
+        var facts_invalidated: usize = 0;
         for (qids.items) |qid_value| {
             const qid = stringValue(qid_value) orelse continue;
             const node = (try self.store.getNode(allocator, qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
             roots_matched += 1;
             if (!dry_run) {
-                const tombstone = try stringifyAlloc(allocator, .{
-                    .kind = "tombstone",
-                    .deleted = true,
-                    .reason = reason,
-                    .previousLabel = node.label,
-                });
-                defer allocator.free(tombstone);
-                try self.store.putNode(.{ .qid = qid, .label = node.label, .properties_json = tombstone });
+                try self.tombstoneNode(allocator, qid, node.label, reason);
                 nodes_deleted += 1;
+                facts_invalidated += try self.tombstoneDerivedByEvidence(allocator, qid, reason);
             }
         }
 
@@ -427,7 +441,7 @@ pub const Runtime = struct {
                 .rootsMatched = roots_matched,
                 .nodesDeleted = nodes_deleted,
                 .nodesRedacted = @as(usize, 0),
-                .factsInvalidated = @as(usize, 0),
+                .factsInvalidated = facts_invalidated,
                 .summariesContaminated = @as(usize, 0),
                 .jobsQueued = &[_][]const u8{},
                 .report = &[_]u8{},
@@ -574,6 +588,165 @@ pub const Runtime = struct {
         });
     }
 
+    fn extractFromMessage(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        scope: Scope,
+        message_qid: []const u8,
+        content: []const u8,
+        created_at: ?[]const u8,
+    ) !usize {
+        var extracted: [2]ExtractedMemory = undefined;
+        var count: usize = 0;
+
+        if (extractPackageManager(content)) |package_manager| {
+            extracted[count] = .{
+                .label = "Fact",
+                .slot_key = "project.package_manager",
+                .value = package_manager,
+                .text = if (std.mem.eql(u8, package_manager, "pnpm"))
+                    "The repo uses pnpm as its package manager."
+                else
+                    "The repo uses npm as its package manager.",
+            };
+            count += 1;
+        }
+
+        if (extractTestCommand(content)) |test_command| {
+            extracted[count] = .{
+                .label = "Procedure",
+                .slot_key = "project.test_command",
+                .value = test_command,
+                .text = if (std.mem.eql(u8, test_command, "just test"))
+                    "Run just test before committing."
+                else if (std.mem.eql(u8, test_command, "pnpm test"))
+                    "Run pnpm test before committing."
+                else
+                    "Run npm test before committing.",
+            };
+            count += 1;
+        }
+
+        var written: usize = 0;
+        for (extracted[0..count]) |memory| {
+            try self.supersedeCurrentSlot(allocator, scope, memory.slot_key, created_at);
+            const qid = try self.nextQid(allocator, if (std.mem.eql(u8, memory.label, "Fact")) "fact" else "proc");
+            defer allocator.free(qid);
+            const props = try stringifyAlloc(allocator, .{
+                .kind = labelType(memory.label),
+                .text = memory.text,
+                .slotKey = memory.slot_key,
+                .value = memory.value,
+                .state = "current",
+                .validFrom = created_at,
+                .validTo = @as(?[]const u8, null),
+                .evidenceQid = message_qid,
+                .quote = content,
+                .tenantId = scope.tenant_id,
+                .userId = scope.user_id,
+                .agentId = scope.agent_id,
+                .projectId = scope.project_id,
+                .deleted = false,
+            });
+            defer allocator.free(props);
+            try self.store.putNode(.{ .qid = qid, .label = memory.label, .properties_json = props });
+            try self.putEdge(allocator, qid, message_qid, "EVIDENCED_BY");
+            written += 1;
+        }
+        return written;
+    }
+
+    fn supersedeCurrentSlot(self: *Runtime, allocator: std.mem.Allocator, scope: Scope, slot_key: []const u8, valid_to: ?[]const u8) !void {
+        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
+        defer freeHits(allocator, hits);
+
+        for (hits) |hit| {
+            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!std.mem.eql(u8, node.label, "Fact") and !std.mem.eql(u8, node.label, "Procedure")) continue;
+            if (!try scope.matchesNode(allocator, node)) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            if (!try propertyEquals(allocator, node.properties_json, "slotKey", slot_key)) continue;
+            if (!try propertyEquals(allocator, node.properties_json, "state", "current")) continue;
+            try self.rewriteDerivedState(allocator, node, "superseded", valid_to);
+        }
+    }
+
+    fn rewriteDerivedState(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        node: storage.Node,
+        state: []const u8,
+        valid_to: ?[]const u8,
+    ) !void {
+        const text = try readPropertyString(allocator, node.properties_json, "text");
+        defer allocator.free(text);
+        const slot_key = try readPropertyString(allocator, node.properties_json, "slotKey");
+        defer allocator.free(slot_key);
+        const value = try readPropertyString(allocator, node.properties_json, "value");
+        defer allocator.free(value);
+        const evidence_qid = try readPropertyString(allocator, node.properties_json, "evidenceQid");
+        defer allocator.free(evidence_qid);
+        const quote = try readPropertyString(allocator, node.properties_json, "quote");
+        defer allocator.free(quote);
+        const valid_from = try readOptionalPropertyString(allocator, node.properties_json, "validFrom");
+        defer if (valid_from) |value_to_free| allocator.free(value_to_free);
+        const tenant_id = try readOptionalPropertyString(allocator, node.properties_json, "tenantId");
+        defer if (tenant_id) |value_to_free| allocator.free(value_to_free);
+        const user_id = try readOptionalPropertyString(allocator, node.properties_json, "userId");
+        defer if (user_id) |value_to_free| allocator.free(value_to_free);
+        const agent_id = try readOptionalPropertyString(allocator, node.properties_json, "agentId");
+        defer if (agent_id) |value_to_free| allocator.free(value_to_free);
+        const project_id = try readOptionalPropertyString(allocator, node.properties_json, "projectId");
+        defer if (project_id) |value_to_free| allocator.free(value_to_free);
+
+        const props = try stringifyAlloc(allocator, .{
+            .kind = labelType(node.label),
+            .text = text,
+            .slotKey = slot_key,
+            .value = value,
+            .state = state,
+            .validFrom = valid_from,
+            .validTo = valid_to,
+            .evidenceQid = evidence_qid,
+            .quote = quote,
+            .tenantId = tenant_id,
+            .userId = user_id,
+            .agentId = agent_id,
+            .projectId = project_id,
+            .deleted = false,
+        });
+        defer allocator.free(props);
+        try self.store.putNode(.{ .qid = node.qid, .label = node.label, .properties_json = props });
+    }
+
+    fn tombstoneDerivedByEvidence(self: *Runtime, allocator: std.mem.Allocator, evidence_qid: []const u8, reason: []const u8) !usize {
+        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
+        defer freeHits(allocator, hits);
+        var invalidated: usize = 0;
+        for (hits) |hit| {
+            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!std.mem.eql(u8, node.label, "Fact") and !std.mem.eql(u8, node.label, "Procedure")) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            if (!try propertyEquals(allocator, node.properties_json, "evidenceQid", evidence_qid)) continue;
+            try self.tombstoneNode(allocator, node.qid, node.label, reason);
+            invalidated += 1;
+        }
+        return invalidated;
+    }
+
+    fn tombstoneNode(self: *Runtime, allocator: std.mem.Allocator, qid: []const u8, label: []const u8, reason: []const u8) !void {
+        const tombstone = try stringifyAlloc(allocator, .{
+            .kind = "tombstone",
+            .deleted = true,
+            .reason = reason,
+            .previousLabel = label,
+        });
+        defer allocator.free(tombstone);
+        try self.store.putNode(.{ .qid = qid, .label = label, .properties_json = tombstone });
+    }
+
     fn nextQid(self: *Runtime, allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
         const id = self.next_id;
         self.next_id += 1;
@@ -600,14 +773,20 @@ pub const Runtime = struct {
             if (!include_deleted and try propertyBool(allocator, node.properties_json, "deleted")) continue;
             if (!try scope.matchesNode(allocator, node)) continue;
             if (!labelAllowed(node.label, labels_value)) continue;
+            if (!include_deleted and isDerivedLabel(node.label)) {
+                if (!try propertyEquals(allocator, node.properties_json, "state", "current")) continue;
+            }
 
             const text = textForNode(allocator, node) catch continue;
             errdefer allocator.free(text);
+            const evidence = try evidenceForNode(allocator, node);
+            errdefer freeEvidence(allocator, evidence);
             try owned.items.append(allocator, .{
                 .qid = try allocator.dupe(u8, node.qid),
                 .@"type" = labelType(node.label),
                 .text = text,
                 .score = hit.score,
+                .evidence = evidence,
             });
             if (owned.items.items.len >= limit) break;
         }
@@ -641,6 +820,7 @@ const OwnedItems = struct {
         for (self.items.items) |item| {
             self.allocator.free(item.qid);
             self.allocator.free(item.text);
+            freeEvidence(self.allocator, item.evidence);
         }
         self.items.deinit(self.allocator);
     }
@@ -744,6 +924,21 @@ fn readPropertyString(allocator: std.mem.Allocator, properties_json: []const u8,
     };
 }
 
+fn readOptionalPropertyString(allocator: std.mem.Allocator, properties_json: []const u8, key: []const u8) !?[]u8 {
+    var parsed = try std.json.parseFromSlice(Value, allocator, properties_json, .{});
+    defer parsed.deinit();
+    const object = switch (parsed.value) {
+        .object => |object| object,
+        else => return null,
+    };
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .null => null,
+        .string => |string| try allocator.dupe(u8, string),
+        else => null,
+    };
+}
+
 fn propertyEquals(allocator: std.mem.Allocator, properties_json: []const u8, key: []const u8, expected: []const u8) !bool {
     var parsed = try std.json.parseFromSlice(Value, allocator, properties_json, .{});
     defer parsed.deinit();
@@ -776,6 +971,9 @@ fn textForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
     if (std.mem.eql(u8, node.label, "Core")) {
         return readPropertyString(allocator, node.properties_json, "text");
     }
+    if (isDerivedLabel(node.label)) {
+        return readPropertyString(allocator, node.properties_json, "text");
+    }
     if (std.mem.eql(u8, node.label, "Message")) {
         return readPropertyString(allocator, node.properties_json, "content");
     }
@@ -787,6 +985,8 @@ fn textForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
 
 fn labelType(label: []const u8) []const u8 {
     if (std.mem.eql(u8, label, "Message")) return "message";
+    if (std.mem.eql(u8, label, "Fact")) return "fact";
+    if (std.mem.eql(u8, label, "Procedure")) return "procedure";
     if (std.mem.eql(u8, label, "Session")) return "raw";
     if (std.mem.eql(u8, label, "Turn")) return "raw";
     if (std.mem.eql(u8, label, "Core")) return "core";
@@ -794,11 +994,68 @@ fn labelType(label: []const u8) []const u8 {
     return "raw";
 }
 
+fn isDerivedLabel(label: []const u8) bool {
+    return std.mem.eql(u8, label, "Fact") or std.mem.eql(u8, label, "Procedure");
+}
+
 fn labelAllowed(label: []const u8, labels_value: ?Value) bool {
     const labels = arrayValue(labels_value) orelse return true;
     for (labels.items) |label_value| {
         const wanted = stringValue(label_value) orelse continue;
         if (std.mem.eql(u8, wanted, label) or std.mem.eql(u8, wanted, labelType(label))) return true;
+    }
+    return false;
+}
+
+fn evidenceForNode(allocator: std.mem.Allocator, node: storage.Node) ![]EvidenceResult {
+    if (!isDerivedLabel(node.label)) {
+        return allocator.alloc(EvidenceResult, 0);
+    }
+    const evidence_qid = readPropertyString(allocator, node.properties_json, "evidenceQid") catch {
+        return allocator.alloc(EvidenceResult, 0);
+    };
+    errdefer allocator.free(evidence_qid);
+    const quote = readPropertyString(allocator, node.properties_json, "quote") catch {
+        allocator.free(evidence_qid);
+        return allocator.alloc(EvidenceResult, 0);
+    };
+    errdefer allocator.free(quote);
+    const evidence = try allocator.alloc(EvidenceResult, 1);
+    evidence[0] = .{
+        .qid = evidence_qid,
+        .quote = quote,
+        .timestamp = null,
+    };
+    return evidence;
+}
+
+fn freeEvidence(allocator: std.mem.Allocator, evidence: []const EvidenceResult) void {
+    for (evidence) |item| {
+        allocator.free(item.qid);
+        allocator.free(item.quote);
+    }
+    allocator.free(evidence);
+}
+
+fn extractPackageManager(content: []const u8) ?[]const u8 {
+    if (containsIgnoreCase(content, "pnpm")) return "pnpm";
+    if (containsIgnoreCase(content, "npm")) return "npm";
+    return null;
+}
+
+fn extractTestCommand(content: []const u8) ?[]const u8 {
+    if (containsIgnoreCase(content, "just test")) return "just test";
+    if (containsIgnoreCase(content, "pnpm test")) return "pnpm test";
+    if (containsIgnoreCase(content, "npm test")) return "npm test";
+    return null;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var index: usize = 0;
+    while (index + needle.len <= haystack.len) : (index += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[index .. index + needle.len], needle)) return true;
     }
     return false;
 }
@@ -922,4 +1179,59 @@ test "runtime stores and replaces core blocks" {
     );
     defer std.testing.allocator.free(get);
     try std.testing.expect(std.mem.indexOf(u8, get, "run zig build test") != null);
+}
+
+test "runtime extracts current package manager facts" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+
+    const first = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"This repo uses npm.\",\"createdAt\":\"2026-01-01T10:00:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(first);
+
+    const second = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"We migrated this repo to pnpm. Use pnpm now.\",\"createdAt\":\"2026-02-01T10:00:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(second);
+
+    const retrieve = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"package manager\",\"scope\":{\"projectId\":\"repo:test\"}}}",
+    );
+    defer std.testing.allocator.free(retrieve);
+
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "The repo uses pnpm as its package manager.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "The repo uses npm as its package manager.") == null);
+}
+
+test "runtime forgetting raw evidence invalidates derived facts" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+
+    const remember = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"This repo uses pnpm.\"}]}}",
+    );
+    defer std.testing.allocator.free(remember);
+
+    const forget = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"f1\",\"method\":\"memory.forget\",\"params\":{\"mode\":\"hard_delete\",\"selector\":{\"qids\":[\"q_msg_4\"]},\"dryRun\":false,\"reason\":\"test\"}}",
+    );
+    defer std.testing.allocator.free(forget);
+    try std.testing.expect(std.mem.indexOf(u8, forget, "\"factsInvalidated\":1") != null);
+
+    const retrieve = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"package manager\",\"scope\":{\"projectId\":\"repo:test\"}}}",
+    );
+    defer std.testing.allocator.free(retrieve);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "The repo uses pnpm as its package manager.") == null);
 }
