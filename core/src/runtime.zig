@@ -78,6 +78,18 @@ const CoreBlockResult = struct {
     evidenceQids: []const []const u8 = &.{},
 };
 
+const NodeRefResult = struct {
+    qid: []const u8,
+    @"type": []const u8,
+    relation: []const u8,
+};
+
+const ForgetReportItem = struct {
+    qid: []const u8,
+    @"type": []const u8,
+    action: []const u8,
+};
+
 const ExtractedMemory = struct {
     label: []const u8,
     slot_key: []const u8,
@@ -389,6 +401,11 @@ pub const Runtime = struct {
         };
         defer self.store.freeNode(allocator, node);
 
+        var provenance = try self.provenanceRefsForNode(allocator, node);
+        defer provenance.deinit();
+        var dependents = try self.derivedRefsByEvidence(allocator, qid);
+        defer dependents.deinit();
+
         const response = .{
             .jsonrpc = "2.0",
             .id = id,
@@ -398,8 +415,8 @@ pub const Runtime = struct {
                     .@"type" = labelType(node.label),
                     .properties = .{ .rawJson = node.properties_json },
                 },
-                .provenance = &[_]u8{},
-                .dependents = &[_]u8{},
+                .provenance = provenance.items.items,
+                .dependents = dependents.items.items,
                 .audit = &[_]u8{},
             },
         };
@@ -413,21 +430,52 @@ pub const Runtime = struct {
         const qids = arrayValue(selector.get("qids")) orelse {
             return errorResponse(allocator, id, "invalid_request", "selector.qids is required for the in-memory adapter");
         };
+        const mode = stringField(params, "mode") orelse {
+            return errorResponse(allocator, id, "invalid_request", "mode is required");
+        };
+        if (!std.mem.eql(u8, mode, "hard_delete") and !std.mem.eql(u8, mode, "redact") and !std.mem.eql(u8, mode, "expire")) {
+            return errorResponse(allocator, id, "invalid_request", "mode must be hard_delete, redact, or expire");
+        }
         const dry_run = boolField(params, "dryRun") orelse false;
         const reason = stringField(params, "reason") orelse "unspecified";
 
         var roots_matched: usize = 0;
         var nodes_deleted: usize = 0;
+        var nodes_redacted: usize = 0;
         var facts_invalidated: usize = 0;
+        var report = OwnedForgetReport{ .allocator = allocator };
+        defer report.deinit();
+
+        const root_action: []const u8 = if (dry_run)
+            if (std.mem.eql(u8, mode, "redact")) "would_redact" else "would_delete"
+        else if (std.mem.eql(u8, mode, "redact"))
+            "redacted"
+        else
+            "deleted";
+        const dependent_action: []const u8 = if (dry_run) "would_invalidate" else "invalidated";
+
         for (qids.items) |qid_value| {
             const qid = stringValue(qid_value) orelse continue;
             const node = (try self.store.getNode(allocator, qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
             roots_matched += 1;
+            try report.append(allocator, qid, labelType(node.label), root_action);
+
+            var dependents = try self.derivedRefsByEvidence(allocator, qid);
+            defer dependents.deinit();
+            facts_invalidated += dependents.items.items.len;
+            for (dependents.items.items) |dependent| {
+                try report.append(allocator, dependent.qid, dependent.@"type", dependent_action);
+            }
+
             if (!dry_run) {
-                try self.tombstoneNode(allocator, qid, node.label, reason);
-                nodes_deleted += 1;
-                facts_invalidated += try self.tombstoneDerivedByEvidence(allocator, qid, reason);
+                try self.tombstoneNode(allocator, qid, node.label, reason, mode);
+                if (std.mem.eql(u8, mode, "redact")) {
+                    nodes_redacted += 1;
+                } else {
+                    nodes_deleted += 1;
+                }
+                _ = try self.tombstoneDerivedByEvidence(allocator, qid, reason, "hard_delete");
             }
         }
 
@@ -442,11 +490,11 @@ pub const Runtime = struct {
                 .dryRun = dry_run,
                 .rootsMatched = roots_matched,
                 .nodesDeleted = nodes_deleted,
-                .nodesRedacted = @as(usize, 0),
+                .nodesRedacted = nodes_redacted,
                 .factsInvalidated = facts_invalidated,
                 .summariesContaminated = @as(usize, 0),
                 .jobsQueued = &[_][]const u8{},
-                .report = &[_]u8{},
+                .report = report.items.items,
             },
         };
         return stringifyAlloc(allocator, response);
@@ -722,7 +770,39 @@ pub const Runtime = struct {
         try self.store.putNode(.{ .qid = node.qid, .label = node.label, .properties_json = props });
     }
 
-    fn tombstoneDerivedByEvidence(self: *Runtime, allocator: std.mem.Allocator, evidence_qid: []const u8, reason: []const u8) !usize {
+    fn provenanceRefsForNode(self: *Runtime, allocator: std.mem.Allocator, node: storage.Node) !OwnedNodeRefs {
+        var refs = OwnedNodeRefs{ .allocator = allocator };
+        errdefer refs.deinit();
+
+        if (!isDerivedLabel(node.label)) return refs;
+        const evidence_qid = try readOptionalPropertyString(allocator, node.properties_json, "evidenceQid");
+        defer if (evidence_qid) |qid| allocator.free(qid);
+        if (evidence_qid) |qid| {
+            const evidence_node = (try self.store.getNode(allocator, qid)) orelse return refs;
+            defer self.store.freeNode(allocator, evidence_node);
+            try refs.append(allocator, qid, labelType(evidence_node.label), "evidenced_by");
+        }
+        return refs;
+    }
+
+    fn derivedRefsByEvidence(self: *Runtime, allocator: std.mem.Allocator, evidence_qid: []const u8) !OwnedNodeRefs {
+        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
+        defer freeHits(allocator, hits);
+
+        var refs = OwnedNodeRefs{ .allocator = allocator };
+        errdefer refs.deinit();
+        for (hits) |hit| {
+            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!isDerivedLabel(node.label)) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            if (!try propertyEquals(allocator, node.properties_json, "evidenceQid", evidence_qid)) continue;
+            try refs.append(allocator, node.qid, labelType(node.label), "derived_from");
+        }
+        return refs;
+    }
+
+    fn tombstoneDerivedByEvidence(self: *Runtime, allocator: std.mem.Allocator, evidence_qid: []const u8, reason: []const u8, mode: []const u8) !usize {
         const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
         defer freeHits(allocator, hits);
         var invalidated: usize = 0;
@@ -732,16 +812,18 @@ pub const Runtime = struct {
             if (!std.mem.eql(u8, node.label, "Fact") and !std.mem.eql(u8, node.label, "Procedure")) continue;
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
             if (!try propertyEquals(allocator, node.properties_json, "evidenceQid", evidence_qid)) continue;
-            try self.tombstoneNode(allocator, node.qid, node.label, reason);
+            try self.tombstoneNode(allocator, node.qid, node.label, reason, mode);
             invalidated += 1;
         }
         return invalidated;
     }
 
-    fn tombstoneNode(self: *Runtime, allocator: std.mem.Allocator, qid: []const u8, label: []const u8, reason: []const u8) !void {
+    fn tombstoneNode(self: *Runtime, allocator: std.mem.Allocator, qid: []const u8, label: []const u8, reason: []const u8, mode: []const u8) !void {
         const tombstone = try stringifyAlloc(allocator, .{
             .kind = "tombstone",
             .deleted = true,
+            .state = if (std.mem.eql(u8, mode, "redact")) "redacted" else "deleted",
+            .mode = mode,
             .reason = reason,
             .previousLabel = label,
         });
@@ -862,6 +944,50 @@ const OwnedItems = struct {
         self.allocator.free(item.text);
         self.allocator.free(item.state);
         freeEvidence(self.allocator, item.evidence);
+    }
+};
+
+const OwnedNodeRefs = struct {
+    allocator: std.mem.Allocator,
+    items: std.ArrayList(NodeRefResult) = .empty,
+
+    fn append(self: *OwnedNodeRefs, allocator: std.mem.Allocator, qid: []const u8, node_type: []const u8, relation: []const u8) !void {
+        const owned_qid = try allocator.dupe(u8, qid);
+        errdefer allocator.free(owned_qid);
+        try self.items.append(allocator, .{
+            .qid = owned_qid,
+            .@"type" = node_type,
+            .relation = relation,
+        });
+    }
+
+    fn deinit(self: *OwnedNodeRefs) void {
+        for (self.items.items) |item| {
+            self.allocator.free(item.qid);
+        }
+        self.items.deinit(self.allocator);
+    }
+};
+
+const OwnedForgetReport = struct {
+    allocator: std.mem.Allocator,
+    items: std.ArrayList(ForgetReportItem) = .empty,
+
+    fn append(self: *OwnedForgetReport, allocator: std.mem.Allocator, qid: []const u8, node_type: []const u8, action: []const u8) !void {
+        const owned_qid = try allocator.dupe(u8, qid);
+        errdefer allocator.free(owned_qid);
+        try self.items.append(allocator, .{
+            .qid = owned_qid,
+            .@"type" = node_type,
+            .action = action,
+        });
+    }
+
+    fn deinit(self: *OwnedForgetReport) void {
+        for (self.items.items) |item| {
+            self.allocator.free(item.qid);
+        }
+        self.items.deinit(self.allocator);
     }
 };
 
@@ -1028,14 +1154,10 @@ fn textForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
 }
 
 fn stateForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
-    if (try propertyBool(allocator, node.properties_json, "deleted")) {
-        return allocator.dupe(u8, "deleted");
+    if (try readOptionalPropertyString(allocator, node.properties_json, "state")) |state| {
+        return state;
     }
-    if (isDerivedLabel(node.label)) {
-        if (try readOptionalPropertyString(allocator, node.properties_json, "state")) |state| {
-            return state;
-        }
-    }
+    if (try propertyBool(allocator, node.properties_json, "deleted")) return allocator.dupe(u8, "deleted");
     return allocator.dupe(u8, "current");
 }
 
@@ -1312,6 +1434,32 @@ test "runtime forgetting raw evidence invalidates derived facts" {
     );
     defer std.testing.allocator.free(remember);
 
+    const inspect_message = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"i1\",\"method\":\"memory.inspect\",\"params\":{\"qid\":\"q_msg_4\",\"includeDependents\":true}}",
+    );
+    defer std.testing.allocator.free(inspect_message);
+    try std.testing.expect(std.mem.indexOf(u8, inspect_message, "\"relation\":\"derived_from\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inspect_message, "\"qid\":\"q_fact_6\"") != null);
+
+    const inspect_fact = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"i2\",\"method\":\"memory.inspect\",\"params\":{\"qid\":\"q_fact_6\",\"includeProvenance\":true}}",
+    );
+    defer std.testing.allocator.free(inspect_fact);
+    try std.testing.expect(std.mem.indexOf(u8, inspect_fact, "\"relation\":\"evidenced_by\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inspect_fact, "\"qid\":\"q_msg_4\"") != null);
+
+    const dry_run = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"f0\",\"method\":\"memory.forget\",\"params\":{\"mode\":\"hard_delete\",\"selector\":{\"qids\":[\"q_msg_4\"]},\"dryRun\":true,\"reason\":\"test\"}}",
+    );
+    defer std.testing.allocator.free(dry_run);
+    try std.testing.expect(std.mem.indexOf(u8, dry_run, "\"status\":\"planned\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dry_run, "\"nodesDeleted\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dry_run, "\"factsInvalidated\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dry_run, "\"action\":\"would_invalidate\"") != null);
+
     const forget = try runtime.dispatch(
         std.testing.allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":\"f1\",\"method\":\"memory.forget\",\"params\":{\"mode\":\"hard_delete\",\"selector\":{\"qids\":[\"q_msg_4\"]},\"dryRun\":false,\"reason\":\"test\"}}",
@@ -1325,4 +1473,49 @@ test "runtime forgetting raw evidence invalidates derived facts" {
     );
     defer std.testing.allocator.free(retrieve);
     try std.testing.expect(std.mem.indexOf(u8, retrieve, "The repo uses pnpm as its package manager.") == null);
+
+    const issues = try adapter_state.adapter().verify(std.testing.allocator);
+    defer freeVerificationIssues(std.testing.allocator, issues);
+    try std.testing.expectEqual(@as(usize, 0), issues.len);
+}
+
+test "runtime forget supports redaction state" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+
+    const remember = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"Redact this private note.\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(remember);
+
+    const forget = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"f1\",\"method\":\"memory.forget\",\"params\":{\"mode\":\"redact\",\"selector\":{\"qids\":[\"q_msg_4\"]},\"dryRun\":false,\"reason\":\"test\"}}",
+    );
+    defer std.testing.allocator.free(forget);
+    try std.testing.expect(std.mem.indexOf(u8, forget, "\"nodesDeleted\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forget, "\"nodesRedacted\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forget, "\"action\":\"redacted\"") != null);
+
+    const inspect = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"i1\",\"method\":\"memory.inspect\",\"params\":{\"qid\":\"q_msg_4\"}}",
+    );
+    defer std.testing.allocator.free(inspect);
+    try std.testing.expect(std.mem.indexOf(u8, inspect, "\\\"state\\\":\\\"redacted\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inspect, "Redact this private note.") == null);
+
+    const issues = try adapter_state.adapter().verify(std.testing.allocator);
+    defer freeVerificationIssues(std.testing.allocator, issues);
+    try std.testing.expectEqual(@as(usize, 0), issues.len);
+}
+
+fn freeVerificationIssues(allocator: std.mem.Allocator, issues: []const storage.VerificationIssue) void {
+    for (issues) |issue| {
+        if (issue.qid) |qid| allocator.free(qid);
+    }
+    allocator.free(issues);
 }

@@ -26,6 +26,22 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (args.len > 1 and std.mem.eql(u8, args[1], "verify")) {
+        const issues = try adapter_state.adapter().verify(allocator);
+        defer freeVerificationIssues(allocator, issues);
+        const default_checks = [_][]const u8{ "schema", "provenance", "temporal", "forgetting" };
+        const checks: []const []const u8 = if (args.len > 2) args[2..] else &default_checks;
+        const response = try stringifyAlloc(allocator, .{
+            .status = if (issues.len == 0) "ok" else "failed",
+            .checks = checks,
+            .issueCount = issues.len,
+            .issues = issues,
+        });
+        defer allocator.free(response);
+        try stdout.print("{s}\n", .{response});
+        return;
+    }
+
     if (args.len > 1 and std.mem.eql(u8, args[1], "rpc-stdin")) {
         var stdin_buffer: [4096]u8 = undefined;
         var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), init.io, &stdin_buffer);
@@ -65,5 +81,19 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu health | quipu rpc-stdin | quipu serve-stdio\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu health | quipu verify [schema|provenance|temporal|forgetting]... | quipu rpc-stdin | quipu serve-stdio\n", .{});
+}
+
+fn freeVerificationIssues(allocator: std.mem.Allocator, issues: []const @import("storage.zig").VerificationIssue) void {
+    for (issues) |issue| {
+        if (issue.qid) |qid| allocator.free(qid);
+    }
+    allocator.free(issues);
+}
+
+fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    errdefer writer.deinit();
+    try std.json.Stringify.value(value, .{}, &writer.writer);
+    return writer.toOwnedSlice();
 }

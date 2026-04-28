@@ -197,23 +197,94 @@ pub const InMemoryAdapter = struct {
     fn verify(context: *anyopaque, allocator: std.mem.Allocator) ![]storage.VerificationIssue {
         const self = ctx(context);
         var issues = std.ArrayList(storage.VerificationIssue).empty;
+        errdefer freeIssues(allocator, issues.items);
+        errdefer issues.deinit(allocator);
+
         for (self.edges.items) |edge| {
             if (!self.nodes.contains(edge.from_qid)) {
-                try issues.append(allocator, .{
-                    .code = "missing_edge_source",
-                    .message = "edge source node is missing",
-                    .qid = try allocator.dupe(u8, edge.qid),
-                });
+                try appendIssue(allocator, &issues, "missing_edge_source", "edge source node is missing", edge.qid);
             }
             if (!self.nodes.contains(edge.to_qid)) {
-                try issues.append(allocator, .{
-                    .code = "missing_edge_target",
-                    .message = "edge target node is missing",
-                    .qid = try allocator.dupe(u8, edge.qid),
-                });
+                try appendIssue(allocator, &issues, "missing_edge_target", "edge target node is missing", edge.qid);
             }
         }
+
+        var node_it = self.nodes.iterator();
+        while (node_it.next()) |entry| {
+            const node = entry.value_ptr.*;
+            if (isDerivedLabel(node.label)) {
+                try verifyDerivedNode(self, allocator, &issues, node);
+            }
+            if (propertyBool(allocator, node.properties_json, "deleted")) {
+                try verifyDeletedEvidenceClosure(self, allocator, &issues, node.qid);
+            }
+        }
+
         return issues.toOwnedSlice(allocator);
+    }
+
+    fn verifyDerivedNode(
+        self: *InMemoryAdapter,
+        allocator: std.mem.Allocator,
+        issues: *std.ArrayList(storage.VerificationIssue),
+        node: NodeRecord,
+    ) !void {
+        if (propertyBool(allocator, node.properties_json, "deleted")) return;
+
+        const state = try readOptionalString(allocator, node.properties_json, "state");
+        defer if (state) |value| allocator.free(value);
+        if (state == null or (!std.mem.eql(u8, state.?, "current") and !std.mem.eql(u8, state.?, "superseded") and !std.mem.eql(u8, state.?, "historical"))) {
+            try appendIssue(allocator, issues, "invalid_derived_state", "active derived node has invalid state", node.qid);
+        }
+
+        const valid_from = try readOptionalString(allocator, node.properties_json, "validFrom");
+        defer if (valid_from) |value| allocator.free(value);
+        const valid_to = try readOptionalString(allocator, node.properties_json, "validTo");
+        defer if (valid_to) |value| allocator.free(value);
+        if (state) |value| {
+            if (std.mem.eql(u8, value, "current") and valid_to != null) {
+                try appendIssue(allocator, issues, "current_derived_has_valid_to", "current derived node must not have validTo", node.qid);
+            }
+            if (std.mem.eql(u8, value, "superseded") and valid_to == null) {
+                try appendIssue(allocator, issues, "superseded_derived_missing_valid_to", "superseded derived node must have validTo", node.qid);
+            }
+        }
+        if (valid_from != null and valid_to != null and std.mem.order(u8, valid_to.?, valid_from.?) == .lt) {
+            try appendIssue(allocator, issues, "invalid_temporal_window", "derived node validTo is before validFrom", node.qid);
+        }
+
+        const evidence_qid = try readOptionalString(allocator, node.properties_json, "evidenceQid");
+        defer if (evidence_qid) |value| allocator.free(value);
+        if (evidence_qid == null) {
+            try appendIssue(allocator, issues, "missing_evidence_qid", "active derived node is missing evidenceQid", node.qid);
+            return;
+        }
+
+        _ = self.nodes.get(evidence_qid.?) orelse {
+            try appendIssue(allocator, issues, "missing_evidence_node", "active derived node references missing evidence", node.qid);
+            return;
+        };
+    }
+
+    fn verifyDeletedEvidenceClosure(
+        self: *InMemoryAdapter,
+        allocator: std.mem.Allocator,
+        issues: *std.ArrayList(storage.VerificationIssue),
+        evidence_qid: []const u8,
+    ) !void {
+        var node_it = self.nodes.iterator();
+        while (node_it.next()) |entry| {
+            const node = entry.value_ptr.*;
+            if (!isDerivedLabel(node.label)) continue;
+            if (propertyBool(allocator, node.properties_json, "deleted")) continue;
+            const evidence = try readOptionalString(allocator, node.properties_json, "evidenceQid");
+            defer if (evidence) |value| allocator.free(value);
+            if (evidence) |qid| {
+                if (std.mem.eql(u8, qid, evidence_qid)) {
+                    try appendIssue(allocator, issues, "active_derived_from_deleted_evidence", "active derived node references deleted evidence", node.qid);
+                }
+            }
+        }
     }
 
     fn scoreRecord(record: NodeRecord, query: []const u8) f32 {
@@ -238,6 +309,61 @@ pub const InMemoryAdapter = struct {
             if (std.ascii.eqlIgnoreCase(haystack[index .. index + needle.len], needle)) return true;
         }
         return false;
+    }
+
+    fn appendIssue(
+        allocator: std.mem.Allocator,
+        issues: *std.ArrayList(storage.VerificationIssue),
+        code: []const u8,
+        message: []const u8,
+        qid: []const u8,
+    ) !void {
+        const issue_qid = try allocator.dupe(u8, qid);
+        errdefer allocator.free(issue_qid);
+        try issues.append(allocator, .{
+            .code = code,
+            .message = message,
+            .qid = issue_qid,
+        });
+    }
+
+    fn freeIssues(allocator: std.mem.Allocator, issues: []const storage.VerificationIssue) void {
+        for (issues) |issue| {
+            if (issue.qid) |qid| allocator.free(qid);
+        }
+    }
+
+    fn isDerivedLabel(label: []const u8) bool {
+        return std.mem.eql(u8, label, "Fact") or std.mem.eql(u8, label, "Procedure");
+    }
+
+    fn readOptionalString(allocator: std.mem.Allocator, properties_json: []const u8, key: []const u8) !?[]u8 {
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, properties_json, .{});
+        defer parsed.deinit();
+        const object = switch (parsed.value) {
+            .object => |object| object,
+            else => return null,
+        };
+        const value = object.get(key) orelse return null;
+        return switch (value) {
+            .null => null,
+            .string => |string| try allocator.dupe(u8, string),
+            else => null,
+        };
+    }
+
+    fn propertyBool(allocator: std.mem.Allocator, properties_json: []const u8, key: []const u8) bool {
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, properties_json, .{}) catch return false;
+        defer parsed.deinit();
+        const object = switch (parsed.value) {
+            .object => |object| object,
+            else => return false,
+        };
+        const value = object.get(key) orelse return false;
+        return switch (value) {
+            .bool => |boolean| boolean,
+            else => false,
+        };
     }
 
     fn ctx(context: *anyopaque) *InMemoryAdapter {
@@ -302,4 +428,57 @@ test "in-memory verification reports dangling edges" {
     }
 
     try std.testing.expectEqual(@as(usize, 2), issues.len);
+}
+
+test "in-memory verification reports missing derived evidence" {
+    var adapter_state = InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    const adapter = adapter_state.adapter();
+
+    try adapter.putNode(.{
+        .qid = "q_fact_1",
+        .label = "Fact",
+        .properties_json = "{\"kind\":\"fact\",\"text\":\"The repo uses pnpm.\",\"slotKey\":\"project.package_manager\",\"value\":\"pnpm\",\"state\":\"current\",\"validFrom\":\"2026-01-01T00:00:00Z\",\"validTo\":null,\"evidenceQid\":\"q_msg_missing\",\"deleted\":false}",
+    });
+
+    const issues = try adapter.verify(std.testing.allocator);
+    defer freeVerificationIssues(std.testing.allocator, issues);
+
+    try std.testing.expect(hasIssueCode(issues, "missing_evidence_node"));
+}
+
+test "in-memory verification reports active derived memory from deleted evidence" {
+    var adapter_state = InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    const adapter = adapter_state.adapter();
+
+    try adapter.putNode(.{
+        .qid = "q_msg_1",
+        .label = "Message",
+        .properties_json = "{\"kind\":\"tombstone\",\"deleted\":true,\"state\":\"deleted\",\"previousLabel\":\"Message\"}",
+    });
+    try adapter.putNode(.{
+        .qid = "q_fact_1",
+        .label = "Fact",
+        .properties_json = "{\"kind\":\"fact\",\"text\":\"The repo uses pnpm.\",\"slotKey\":\"project.package_manager\",\"value\":\"pnpm\",\"state\":\"current\",\"validFrom\":\"2026-01-01T00:00:00Z\",\"validTo\":null,\"evidenceQid\":\"q_msg_1\",\"deleted\":false}",
+    });
+
+    const issues = try adapter.verify(std.testing.allocator);
+    defer freeVerificationIssues(std.testing.allocator, issues);
+
+    try std.testing.expect(hasIssueCode(issues, "active_derived_from_deleted_evidence"));
+}
+
+fn hasIssueCode(issues: []const storage.VerificationIssue, code: []const u8) bool {
+    for (issues) |issue| {
+        if (std.mem.eql(u8, issue.code, code)) return true;
+    }
+    return false;
+}
+
+fn freeVerificationIssues(allocator: std.mem.Allocator, issues: []const storage.VerificationIssue) void {
+    for (issues) |issue| {
+        if (issue.qid) |qid| allocator.free(qid);
+    }
+    allocator.free(issues);
 }
