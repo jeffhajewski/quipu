@@ -107,6 +107,10 @@ def _answer_from_text(text: str) -> str:
         return "pnpm"
     if "npm" in lower:
         return "npm"
+    if "concise" in lower:
+        return "concise"
+    if "detailed" in lower:
+        return "detailed"
     return text
 
 

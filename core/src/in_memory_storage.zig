@@ -237,6 +237,14 @@ pub const InMemoryAdapter = struct {
             try appendIssue(allocator, issues, "invalid_derived_state", "active derived node has invalid state", node.qid);
         }
 
+        const slot_key = try readOptionalString(allocator, node.properties_json, "slotKey");
+        defer if (slot_key) |value| allocator.free(value);
+        if (slot_key == null) {
+            try appendIssue(allocator, issues, "missing_slot_key", "active derived node is missing slotKey", node.qid);
+        } else if (!slotAllowedForLabel(node.label, slot_key.?)) {
+            try appendIssue(allocator, issues, "slot_label_mismatch", "active derived node slotKey does not match label", node.qid);
+        }
+
         const valid_from = try readOptionalString(allocator, node.properties_json, "validFrom");
         defer if (valid_from) |value| allocator.free(value);
         const valid_to = try readOptionalString(allocator, node.properties_json, "validTo");
@@ -334,7 +342,14 @@ pub const InMemoryAdapter = struct {
     }
 
     fn isDerivedLabel(label: []const u8) bool {
-        return std.mem.eql(u8, label, "Fact") or std.mem.eql(u8, label, "Procedure");
+        return std.mem.eql(u8, label, "Fact") or std.mem.eql(u8, label, "Preference") or std.mem.eql(u8, label, "Procedure");
+    }
+
+    fn slotAllowedForLabel(label: []const u8, slot_key: []const u8) bool {
+        if (std.mem.eql(u8, label, "Fact")) return std.mem.eql(u8, slot_key, "project.package_manager");
+        if (std.mem.eql(u8, label, "Preference")) return std.mem.eql(u8, slot_key, "user.response_style");
+        if (std.mem.eql(u8, label, "Procedure")) return std.mem.eql(u8, slot_key, "project.test_command");
+        return false;
     }
 
     fn readOptionalString(allocator: std.mem.Allocator, properties_json: []const u8, key: []const u8) !?[]u8 {
@@ -467,6 +482,28 @@ test "in-memory verification reports active derived memory from deleted evidence
     defer freeVerificationIssues(std.testing.allocator, issues);
 
     try std.testing.expect(hasIssueCode(issues, "active_derived_from_deleted_evidence"));
+}
+
+test "in-memory verification reports derived slot label mismatch" {
+    var adapter_state = InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    const adapter = adapter_state.adapter();
+
+    try adapter.putNode(.{
+        .qid = "q_msg_1",
+        .label = "Message",
+        .properties_json = "{\"kind\":\"message\",\"content\":\"Please be concise.\",\"deleted\":false}",
+    });
+    try adapter.putNode(.{
+        .qid = "q_fact_1",
+        .label = "Fact",
+        .properties_json = "{\"kind\":\"fact\",\"text\":\"The user prefers concise responses.\",\"slotKey\":\"user.response_style\",\"value\":\"concise\",\"state\":\"current\",\"validFrom\":\"2026-01-01T00:00:00Z\",\"validTo\":null,\"evidenceQid\":\"q_msg_1\",\"deleted\":false}",
+    });
+
+    const issues = try adapter.verify(std.testing.allocator);
+    defer freeVerificationIssues(std.testing.allocator, issues);
+
+    try std.testing.expect(hasIssueCode(issues, "slot_label_mismatch"));
 }
 
 fn hasIssueCode(issues: []const storage.VerificationIssue, code: []const u8) bool {

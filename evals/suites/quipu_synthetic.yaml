@@ -6,6 +6,7 @@
     "selective_forgetting",
     "cross_scope_contamination",
     "procedural_learning",
+    "preference_learning",
     "entity_resolution",
     "evidence_faithfulness",
     "adversarial_memory"
@@ -123,6 +124,66 @@
           "expectedEvidenceEventIds": ["e_scope_a"],
           "mustNotUseEventIds": ["e_scope_b"],
           "category": "cross_scope",
+          "shouldAbstain": false
+        }
+      ],
+      "forgetOps": []
+    },
+    {
+      "scenarioId": "scenario_response_style_update",
+      "metadata": {
+        "source": "quipu_synthetic",
+        "license": "MIT",
+        "suite": "preference_learning",
+        "description": "User response style preference update with temporal retrieval"
+      },
+      "actors": [
+        { "id": "user", "type": "user", "name": "User" },
+        { "id": "assistant", "type": "agent", "name": "Assistant" }
+      ],
+      "events": [
+        {
+          "eventId": "e_pref_1",
+          "time": "2026-05-01T10:00:00Z",
+          "type": "message",
+          "messages": [
+            { "role": "user", "content": "Please be concise in future responses." }
+          ],
+          "scope": { "userId": "user-local" },
+          "groundTruthMemories": ["m_pref_1"]
+        },
+        {
+          "eventId": "e_pref_2",
+          "time": "2026-06-01T10:00:00Z",
+          "type": "message",
+          "messages": [
+            { "role": "user", "content": "I prefer detailed responses now." }
+          ],
+          "scope": { "userId": "user-local" },
+          "groundTruthMemories": ["m_pref_2"]
+        }
+      ],
+      "queries": [
+        {
+          "queryId": "q_pref_current",
+          "time": "2026-06-15T10:00:00Z",
+          "query": "What response style should you use?",
+          "scope": { "userId": "user-local" },
+          "expectedAnswer": "detailed",
+          "expectedEvidenceEventIds": ["e_pref_2"],
+          "mustNotUseEventIds": ["e_pref_1"],
+          "category": "preference_update",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "q_pref_historical",
+          "time": "2026-05-15T10:00:00Z",
+          "query": "What response style did the user prefer in mid May?",
+          "scope": { "userId": "user-local" },
+          "expectedAnswer": "concise",
+          "expectedEvidenceEventIds": ["e_pref_1"],
+          "mustNotUseEventIds": [],
+          "category": "temporal",
           "shouldAbstain": false
         }
       ],

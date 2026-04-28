@@ -1,4 +1,5 @@
 const std = @import("std");
+const extractor = @import("extractor.zig");
 const protocol = @import("protocol.zig");
 const storage = @import("storage.zig");
 
@@ -111,13 +112,6 @@ const ForgetReportItem = struct {
     qid: []const u8,
     @"type": []const u8,
     action: []const u8,
-};
-
-const ExtractedMemory = struct {
-    label: []const u8,
-    slot_key: []const u8,
-    value: []const u8,
-    text: []const u8,
 };
 
 pub const Runtime = struct {
@@ -707,64 +701,54 @@ pub const Runtime = struct {
         content: []const u8,
         created_at: ?[]const u8,
     ) !usize {
-        var extracted: [2]ExtractedMemory = undefined;
-        var count: usize = 0;
-
-        if (extractPackageManager(content)) |package_manager| {
-            extracted[count] = .{
-                .label = "Fact",
-                .slot_key = "project.package_manager",
-                .value = package_manager,
-                .text = if (std.mem.eql(u8, package_manager, "pnpm"))
-                    "The repo uses pnpm as its package manager."
-                else
-                    "The repo uses npm as its package manager.",
-            };
-            count += 1;
-        }
-
-        if (extractTestCommand(content)) |test_command| {
-            extracted[count] = .{
-                .label = "Procedure",
-                .slot_key = "project.test_command",
-                .value = test_command,
-                .text = if (std.mem.eql(u8, test_command, "just test"))
-                    "Run just test before committing."
-                else if (std.mem.eql(u8, test_command, "pnpm test"))
-                    "Run pnpm test before committing."
-                else
-                    "Run npm test before committing.",
-            };
-            count += 1;
-        }
-
+        const extracted = extractor.DeterministicExtractor.extract(content);
         var written: usize = 0;
-        for (extracted[0..count]) |memory| {
-            try self.supersedeCurrentSlot(allocator, scope, memory.slot_key, created_at);
-            const qid = try self.nextQid(allocator, if (std.mem.eql(u8, memory.label, "Fact")) "fact" else "proc");
-            defer allocator.free(qid);
-            const props = try stringifyAlloc(allocator, .{
-                .kind = labelType(memory.label),
-                .text = memory.text,
-                .slotKey = memory.slot_key,
-                .value = memory.value,
-                .state = "current",
-                .validFrom = created_at,
-                .validTo = @as(?[]const u8, null),
-                .evidenceQid = message_qid,
-                .quote = content,
-                .tenantId = scope.tenant_id,
-                .userId = scope.user_id,
-                .agentId = scope.agent_id,
-                .projectId = scope.project_id,
-                .deleted = false,
-            });
-            defer allocator.free(props);
-            try self.store.putNode(.{ .qid = qid, .label = memory.label, .properties_json = props });
-            try self.putEdge(allocator, qid, message_qid, "EVIDENCED_BY");
+        for (extracted.items[0..extracted.len]) |candidate| {
+            self.writeExtractedMemory(allocator, scope, message_qid, content, created_at, candidate) catch |err| switch (err) {
+                error.InvalidExtractionCandidate => continue,
+                else => return err,
+            };
             written += 1;
         }
         return written;
+    }
+
+    fn writeExtractedMemory(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        scope: Scope,
+        message_qid: []const u8,
+        quote: []const u8,
+        created_at: ?[]const u8,
+        candidate: extractor.Candidate,
+    ) !void {
+        extractor.validateCandidate(candidate) catch {
+            return error.InvalidExtractionCandidate;
+        };
+
+        const label = extractor.labelName(candidate.label);
+        try self.supersedeCurrentSlot(allocator, scope, candidate.slot_key, created_at);
+        const qid = try self.nextQid(allocator, extractor.qidPrefix(candidate.label));
+        defer allocator.free(qid);
+        const props = try stringifyAlloc(allocator, .{
+            .kind = labelType(label),
+            .text = candidate.text,
+            .slotKey = candidate.slot_key,
+            .value = candidate.value,
+            .state = "current",
+            .validFrom = created_at,
+            .validTo = @as(?[]const u8, null),
+            .evidenceQid = message_qid,
+            .quote = quote,
+            .tenantId = scope.tenant_id,
+            .userId = scope.user_id,
+            .agentId = scope.agent_id,
+            .projectId = scope.project_id,
+            .deleted = false,
+        });
+        defer allocator.free(props);
+        try self.store.putNode(.{ .qid = qid, .label = label, .properties_json = props });
+        try self.putEdge(allocator, qid, message_qid, "EVIDENCED_BY");
     }
 
     fn supersedeCurrentSlot(self: *Runtime, allocator: std.mem.Allocator, scope: Scope, slot_key: []const u8, valid_to: ?[]const u8) !void {
@@ -774,7 +758,7 @@ pub const Runtime = struct {
         for (hits) |hit| {
             const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
-            if (!std.mem.eql(u8, node.label, "Fact") and !std.mem.eql(u8, node.label, "Procedure")) continue;
+            if (!isDerivedLabel(node.label)) continue;
             if (!try scope.matchesNode(allocator, node)) continue;
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
             if (!try propertyEquals(allocator, node.properties_json, "slotKey", slot_key)) continue;
@@ -870,7 +854,7 @@ pub const Runtime = struct {
         for (hits) |hit| {
             const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
-            if (!std.mem.eql(u8, node.label, "Fact") and !std.mem.eql(u8, node.label, "Procedure")) continue;
+            if (!isDerivedLabel(node.label)) continue;
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
             if (!try propertyEquals(allocator, node.properties_json, "evidenceQid", evidence_qid)) continue;
             try self.tombstoneNode(allocator, node.qid, node.label, reason, mode);
@@ -1021,7 +1005,7 @@ const OwnedItems = struct {
     fn suppressRawIfDerived(self: *OwnedItems) void {
         var has_derived = false;
         for (self.items.items) |item| {
-            if (std.mem.eql(u8, item.@"type", "fact") or std.mem.eql(u8, item.@"type", "procedure") or std.mem.eql(u8, item.@"type", "core")) {
+            if (std.mem.eql(u8, item.@"type", "fact") or std.mem.eql(u8, item.@"type", "preference") or std.mem.eql(u8, item.@"type", "procedure") or std.mem.eql(u8, item.@"type", "core")) {
                 has_derived = true;
                 break;
             }
@@ -1385,6 +1369,7 @@ fn stateForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
 fn labelType(label: []const u8) []const u8 {
     if (std.mem.eql(u8, label, "Message")) return "message";
     if (std.mem.eql(u8, label, "Fact")) return "fact";
+    if (std.mem.eql(u8, label, "Preference")) return "preference";
     if (std.mem.eql(u8, label, "Procedure")) return "procedure";
     if (std.mem.eql(u8, label, "Session")) return "raw";
     if (std.mem.eql(u8, label, "Turn")) return "raw";
@@ -1394,7 +1379,7 @@ fn labelType(label: []const u8) []const u8 {
 }
 
 fn isDerivedLabel(label: []const u8) bool {
-    return std.mem.eql(u8, label, "Fact") or std.mem.eql(u8, label, "Procedure");
+    return std.mem.eql(u8, label, "Fact") or std.mem.eql(u8, label, "Preference") or std.mem.eql(u8, label, "Procedure");
 }
 
 fn labelAllowed(label: []const u8, labels_value: ?Value) bool {
@@ -1508,29 +1493,6 @@ fn freeEvidence(allocator: std.mem.Allocator, evidence: []const EvidenceResult) 
         if (item.timestamp) |timestamp| allocator.free(timestamp);
     }
     allocator.free(evidence);
-}
-
-fn extractPackageManager(content: []const u8) ?[]const u8 {
-    if (containsIgnoreCase(content, "pnpm")) return "pnpm";
-    if (containsIgnoreCase(content, "npm")) return "npm";
-    return null;
-}
-
-fn extractTestCommand(content: []const u8) ?[]const u8 {
-    if (containsIgnoreCase(content, "just test")) return "just test";
-    if (containsIgnoreCase(content, "pnpm test")) return "pnpm test";
-    if (containsIgnoreCase(content, "npm test")) return "npm test";
-    return null;
-}
-
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-    var index: usize = 0;
-    while (index + needle.len <= haystack.len) : (index += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[index .. index + needle.len], needle)) return true;
-    }
-    return false;
 }
 
 fn estimateItemTokens(item: MessageResult) usize {
@@ -1780,6 +1742,75 @@ test "runtime retrieve filters event windows and token budgets" {
     try std.testing.expect(std.mem.indexOf(u8, budgeted, "\"token_budget_truncated\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, budgeted, "\"no_memory_items\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, budgeted, "\"droppedForBudget\":2") != null);
+}
+
+test "runtime extracts preference memories with temporal supersession" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+
+    const concise = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"userId\":\"user-local\"},\"messages\":[{\"role\":\"user\",\"content\":\"Please be concise in future responses.\",\"createdAt\":\"2026-01-01T10:00:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(concise);
+
+    const detailed = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"userId\":\"user-local\"},\"messages\":[{\"role\":\"user\",\"content\":\"I prefer detailed responses now.\",\"createdAt\":\"2026-02-01T10:00:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(detailed);
+
+    const current = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"response style\",\"scope\":{\"userId\":\"user-local\"},\"needs\":[\"preferences\"]}}",
+    );
+    defer std.testing.allocator.free(current);
+    try std.testing.expect(std.mem.indexOf(u8, current, "\"preferences\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, current, "The user prefers detailed responses.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, current, "The user prefers concise responses.") == null);
+
+    const historical = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q2\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"response style\",\"scope\":{\"userId\":\"user-local\"},\"needs\":[\"preferences\"],\"time\":{\"validAt\":\"2026-01-15T10:00:00Z\"}}}",
+    );
+    defer std.testing.allocator.free(historical);
+    try std.testing.expect(std.mem.indexOf(u8, historical, "The user prefers concise responses.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, historical, "The user prefers detailed responses.") == null);
+
+    const inspect = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"i1\",\"method\":\"memory.inspect\",\"params\":{\"qid\":\"q_pref_6\",\"includeProvenance\":true}}",
+    );
+    defer std.testing.allocator.free(inspect);
+    try std.testing.expect(std.mem.indexOf(u8, inspect, "\"relation\":\"evidenced_by\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inspect, "\"qid\":\"q_msg_4\"") != null);
+}
+
+test "runtime rejects invalid extractor candidates before writes" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+
+    const invalid = extractor.Candidate{
+        .label = .fact,
+        .slot_key = "user.response_style",
+        .value = "concise",
+        .text = "The user prefers concise responses.",
+    };
+    try std.testing.expectError(
+        error.InvalidExtractionCandidate,
+        runtime.writeExtractedMemory(std.testing.allocator, .{}, "q_msg_missing", "bad candidate", "2026-01-01T10:00:00Z", invalid),
+    );
+
+    const search = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"s1\",\"method\":\"memory.search\",\"params\":{\"query\":\"concise\",\"scope\":{}}}",
+    );
+    defer std.testing.allocator.free(search);
+    try std.testing.expect(std.mem.indexOf(u8, search, "The user prefers concise responses.") == null);
 }
 
 test "runtime forgetting raw evidence invalidates derived facts" {

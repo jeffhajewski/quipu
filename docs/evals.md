@@ -16,4 +16,4 @@ The in-memory core smoke baseline runs the compiled Zig process through `quipu s
 PYTHONPATH=evals/src python3 -m quipu_evals.core_runner
 ```
 
-This baseline is expected to pass current-fact, historical valid-at, cross-scope, and deletion-leak checks against the synthetic smoke suite.
+This baseline is expected to pass current-fact, historical valid-at, cross-scope, preference-update, and deletion-leak checks against the synthetic smoke suite.

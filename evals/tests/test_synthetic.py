@@ -31,9 +31,9 @@ class SyntheticEvalTests(unittest.TestCase):
     def test_q0_raw_only_smoke_run_passes(self):
         run = run_suite(SUITE_PATH)
         self.assertTrue(run.passed)
-        self.assertEqual(len(run.query_runs), 3)
+        self.assertEqual(len(run.query_runs), 5)
         self.assertEqual(len(run.forget_runs), 1)
-        self.assertEqual(run.to_json()["metrics"]["queriesPassed"], 3)
+        self.assertEqual(run.to_json()["metrics"]["queriesPassed"], 5)
 
     @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
     def test_core_stdio_remember_retrieve_forget_smoke(self):
@@ -83,6 +83,8 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertTrue(by_query["q_pkg_current"].passed)
         self.assertTrue(by_query["q_pkg_historical"].passed)
         self.assertTrue(by_query["q_scope_alpha"].passed)
+        self.assertTrue(by_query["q_pref_current"].passed)
+        self.assertTrue(by_query["q_pref_historical"].passed)
         self.assertEqual(run.forget_runs[0].deleted_roots, 1)
         self.assertTrue(run.forget_runs[0].passed)
 
