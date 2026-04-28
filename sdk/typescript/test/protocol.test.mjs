@@ -92,10 +92,17 @@ test("stdio client calls core process", { skip: !hasZig }, async () => {
       scope: { projectId: "repo:test" },
       messages: [{ role: "user", content: "Use pnpm from TypeScript." }],
     });
-    const retrieved = await client.retrieve({ query: "pnpm", scope: { projectId: "repo:test" } });
+    const retrieved = await client.retrieve({
+      query: "pnpm",
+      scope: { projectId: "repo:test" },
+      needs: ["current_facts"],
+      options: { includeDebug: true },
+    });
 
     assert.equal(remembered.status, "stored");
     assert.match(String(retrieved.prompt), /The repo uses pnpm as its package manager/);
+    assert.equal(Array.isArray(retrieved.context?.currentFacts), true);
+    assert.equal(retrieved.trace?.keptCount, 1);
   } finally {
     client.close();
   }

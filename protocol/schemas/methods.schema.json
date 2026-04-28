@@ -60,6 +60,31 @@
         }
       }
     },
+    "retrievalTrace": {
+      "type": "object",
+      "required": [
+        "query",
+        "requestedNeedsCount",
+        "budgetTokens",
+        "candidateCount",
+        "keptCount",
+        "droppedForNeeds",
+        "droppedForBudget",
+        "tokenEstimate"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "query": { "type": "string" },
+        "requestedNeedsCount": { "type": "integer", "minimum": 0 },
+        "budgetTokens": { "type": "integer", "minimum": 1 },
+        "candidateCount": { "type": "integer", "minimum": 0 },
+        "keptCount": { "type": "integer", "minimum": 0 },
+        "droppedForNeeds": { "type": "integer", "minimum": 0 },
+        "droppedForBudget": { "type": "integer", "minimum": 0 },
+        "tokenEstimate": { "type": "integer", "minimum": 0 },
+        "validAt": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
     "systemHealthParams": {
       "type": "object",
       "additionalProperties": false,
@@ -186,11 +211,26 @@
           "required": ["core", "currentFacts", "preferences", "procedural", "episodes", "warnings"],
           "additionalProperties": false,
           "properties": {
-            "core": { "type": "array" },
-            "currentFacts": { "type": "array" },
-            "preferences": { "type": "array" },
-            "procedural": { "type": "array" },
-            "episodes": { "type": "array" },
+            "core": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/memoryItem" }
+            },
+            "currentFacts": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/memoryItem" }
+            },
+            "preferences": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/memoryItem" }
+            },
+            "procedural": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/memoryItem" }
+            },
+            "episodes": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/memoryItem" }
+            },
             "warnings": {
               "type": "array",
               "items": { "type": "string" }
@@ -206,6 +246,12 @@
         "warnings": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "trace": {
+          "anyOf": [
+            { "$ref": "#/$defs/retrievalTrace" },
+            { "type": "null" }
+          ]
         }
       }
     },

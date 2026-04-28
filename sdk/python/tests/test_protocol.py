@@ -125,10 +125,17 @@ class QuipuClientTests(unittest.TestCase):
                 scope={"projectId": "repo:test"},
                 messages=[{"role": "user", "content": "Use pnpm through the SDK."}],
             )
-            retrieved = client.retrieve(query="pnpm", scope={"projectId": "repo:test"})
+            retrieved = client.retrieve(
+                query="pnpm",
+                scope={"projectId": "repo:test"},
+                needs=["current_facts"],
+                options={"includeDebug": True},
+            )
 
             self.assertEqual(remembered["status"], "stored")
             self.assertIn("The repo uses pnpm as its package manager.", retrieved["prompt"])
+            self.assertEqual(len(retrieved["context"]["currentFacts"]), 1)
+            self.assertEqual(retrieved["trace"]["keptCount"], 1)
 
 
 if __name__ == "__main__":
