@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "evals" / "src"))
 
 from quipu_evals.core_client import CoreStdioClient  # noqa: E402
+from quipu_evals.core_runner import run_core_suite  # noqa: E402
 from quipu_evals import load_suite, run_suite  # noqa: E402
 
 
@@ -54,7 +55,7 @@ class SyntheticEvalTests(unittest.TestCase):
             )
 
             self.assertEqual(remembered["status"], "stored")
-            self.assertIn("Use pnpm for this repo.", retrieved["prompt"])
+            self.assertIn("The repo uses pnpm as its package manager.", retrieved["prompt"])
 
             forgotten = client.call(
                 "memory.forget",
@@ -72,6 +73,18 @@ class SyntheticEvalTests(unittest.TestCase):
 
             self.assertEqual(forgotten["nodesDeleted"], 1)
             self.assertNotIn("Use pnpm for this repo.", retrieved_after_forget["prompt"])
+
+    @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
+    def test_core_synthetic_eval_marks_current_capabilities(self):
+        run = run_core_suite(SUITE_PATH)
+        by_query = {query.query_id: query for query in run.query_runs}
+
+        self.assertTrue(run.passed)
+        self.assertTrue(by_query["q_pkg_current"].passed)
+        self.assertTrue(by_query["q_pkg_historical"].passed)
+        self.assertTrue(by_query["q_scope_alpha"].passed)
+        self.assertEqual(run.forget_runs[0].deleted_roots, 1)
+        self.assertTrue(run.forget_runs[0].passed)
 
 
 if __name__ == "__main__":

@@ -329,7 +329,7 @@ pub const Runtime = struct {
         const include_deleted = boolField(params, "includeDeleted") orelse false;
         const scope = parseScope(params);
 
-        var results = try self.collectItems(allocator, query, @intCast(limit), scope, include_deleted, params.get("labels"));
+        var results = try self.collectItems(allocator, query, @intCast(limit), scope, include_deleted, params.get("labels"), null);
         defer results.deinit();
 
         const response = .{
@@ -353,8 +353,10 @@ pub const Runtime = struct {
         }
 
         const scope = parseScope(params);
-        var results = try self.collectItems(allocator, query, 20, scope, false, null);
+        const valid_at = parseValidAt(params);
+        var results = try self.collectItems(allocator, query, 20, scope, false, null, valid_at);
         defer results.deinit();
+        results.suppressRawIfDerived();
 
         const retrieval_id = try self.nextQid(allocator, "retr");
         defer allocator.free(retrieval_id);
@@ -761,6 +763,7 @@ pub const Runtime = struct {
         scope: Scope,
         include_deleted: bool,
         labels_value: ?Value,
+        valid_at: ?[]const u8,
     ) !OwnedItems {
         const hits = try self.store.fullTextSearch(allocator, .{ .text = query, .limit = @max(limit * 4, limit) });
         defer freeHits(allocator, hits);
@@ -774,18 +777,27 @@ pub const Runtime = struct {
             if (!try scope.matchesNode(allocator, node)) continue;
             if (!labelAllowed(node.label, labels_value)) continue;
             if (!include_deleted and isDerivedLabel(node.label)) {
-                if (!try propertyEquals(allocator, node.properties_json, "state", "current")) continue;
+                if (valid_at) |timestamp| {
+                    if (!try derivedActiveAt(allocator, node, timestamp)) continue;
+                } else {
+                    if (!try propertyEquals(allocator, node.properties_json, "state", "current")) continue;
+                }
             }
 
             const text = textForNode(allocator, node) catch continue;
             errdefer allocator.free(text);
             const evidence = try evidenceForNode(allocator, node);
             errdefer freeEvidence(allocator, evidence);
+            const state = try stateForNode(allocator, node);
+            errdefer allocator.free(state);
+            const result_qid = try allocator.dupe(u8, node.qid);
+            errdefer allocator.free(result_qid);
             try owned.items.append(allocator, .{
-                .qid = try allocator.dupe(u8, node.qid),
+                .qid = result_qid,
                 .@"type" = labelType(node.label),
                 .text = text,
                 .score = hit.score,
+                .state = state,
                 .evidence = evidence,
             });
             if (owned.items.items.len >= limit) break;
@@ -818,11 +830,38 @@ const OwnedItems = struct {
 
     fn deinit(self: *OwnedItems) void {
         for (self.items.items) |item| {
-            self.allocator.free(item.qid);
-            self.allocator.free(item.text);
-            freeEvidence(self.allocator, item.evidence);
+            self.freeItem(item);
         }
         self.items.deinit(self.allocator);
+    }
+
+    fn suppressRawIfDerived(self: *OwnedItems) void {
+        var has_derived = false;
+        for (self.items.items) |item| {
+            if (std.mem.eql(u8, item.@"type", "fact") or std.mem.eql(u8, item.@"type", "procedure") or std.mem.eql(u8, item.@"type", "core")) {
+                has_derived = true;
+                break;
+            }
+        }
+        if (!has_derived) return;
+
+        var write_index: usize = 0;
+        for (self.items.items) |item| {
+            if (std.mem.eql(u8, item.@"type", "message") or std.mem.eql(u8, item.@"type", "raw")) {
+                self.freeItem(item);
+                continue;
+            }
+            self.items.items[write_index] = item;
+            write_index += 1;
+        }
+        self.items.items.len = write_index;
+    }
+
+    fn freeItem(self: *OwnedItems, item: MessageResult) void {
+        self.allocator.free(item.qid);
+        self.allocator.free(item.text);
+        self.allocator.free(item.state);
+        freeEvidence(self.allocator, item.evidence);
     }
 };
 
@@ -834,6 +873,11 @@ fn parseScope(params: *const ObjectMap) Scope {
         .agent_id = optionalStringField(&scope_obj, "agentId"),
         .project_id = optionalStringField(&scope_obj, "projectId"),
     };
+}
+
+fn parseValidAt(params: *const ObjectMap) ?[]const u8 {
+    const time_obj = objectField(params, "time") orelse return null;
+    return optionalStringField(&time_obj, "validAt");
 }
 
 fn paramsObject(value: ?Value) !ObjectMap {
@@ -983,6 +1027,18 @@ fn textForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
     return allocator.dupe(u8, node.label);
 }
 
+fn stateForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
+    if (try propertyBool(allocator, node.properties_json, "deleted")) {
+        return allocator.dupe(u8, "deleted");
+    }
+    if (isDerivedLabel(node.label)) {
+        if (try readOptionalPropertyString(allocator, node.properties_json, "state")) |state| {
+            return state;
+        }
+    }
+    return allocator.dupe(u8, "current");
+}
+
 fn labelType(label: []const u8) []const u8 {
     if (std.mem.eql(u8, label, "Message")) return "message";
     if (std.mem.eql(u8, label, "Fact")) return "fact";
@@ -1007,6 +1063,30 @@ fn labelAllowed(label: []const u8, labels_value: ?Value) bool {
     return false;
 }
 
+fn derivedActiveAt(allocator: std.mem.Allocator, node: storage.Node, valid_at: []const u8) !bool {
+    const valid_from = try readOptionalPropertyString(allocator, node.properties_json, "validFrom");
+    defer if (valid_from) |value_to_free| allocator.free(value_to_free);
+    const valid_to = try readOptionalPropertyString(allocator, node.properties_json, "validTo");
+    defer if (valid_to) |value_to_free| allocator.free(value_to_free);
+
+    if (valid_from) |timestamp| {
+        if (timestampBefore(valid_at, timestamp)) return false;
+    }
+    if (valid_to) |timestamp| {
+        if (timestampAtOrAfter(valid_at, timestamp)) return false;
+    }
+    return true;
+}
+
+fn timestampBefore(left: []const u8, right: []const u8) bool {
+    return std.mem.order(u8, left, right) == .lt;
+}
+
+fn timestampAtOrAfter(left: []const u8, right: []const u8) bool {
+    const order = std.mem.order(u8, left, right);
+    return order == .eq or order == .gt;
+}
+
 fn evidenceForNode(allocator: std.mem.Allocator, node: storage.Node) ![]EvidenceResult {
     if (!isDerivedLabel(node.label)) {
         return allocator.alloc(EvidenceResult, 0);
@@ -1020,11 +1100,13 @@ fn evidenceForNode(allocator: std.mem.Allocator, node: storage.Node) ![]Evidence
         return allocator.alloc(EvidenceResult, 0);
     };
     errdefer allocator.free(quote);
+    const timestamp = try readOptionalPropertyString(allocator, node.properties_json, "validFrom");
+    errdefer if (timestamp) |value_to_free| allocator.free(value_to_free);
     const evidence = try allocator.alloc(EvidenceResult, 1);
     evidence[0] = .{
         .qid = evidence_qid,
         .quote = quote,
-        .timestamp = null,
+        .timestamp = timestamp,
     };
     return evidence;
 }
@@ -1033,6 +1115,7 @@ fn freeEvidence(allocator: std.mem.Allocator, evidence: []const EvidenceResult) 
     for (evidence) |item| {
         allocator.free(item.qid);
         allocator.free(item.quote);
+        if (item.timestamp) |timestamp| allocator.free(timestamp);
     }
     allocator.free(evidence);
 }
@@ -1207,6 +1290,14 @@ test "runtime extracts current package manager facts" {
 
     try std.testing.expect(std.mem.indexOf(u8, retrieve, "The repo uses pnpm as its package manager.") != null);
     try std.testing.expect(std.mem.indexOf(u8, retrieve, "The repo uses npm as its package manager.") == null);
+
+    const historical = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q2\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"package manager\",\"scope\":{\"projectId\":\"repo:test\"},\"time\":{\"validAt\":\"2026-01-15T10:00:00Z\"}}}",
+    );
+    defer std.testing.allocator.free(historical);
+    try std.testing.expect(std.mem.indexOf(u8, historical, "The repo uses npm as its package manager.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, historical, "The repo uses pnpm as its package manager.") == null);
 }
 
 test "runtime forgetting raw evidence invalidates derived facts" {

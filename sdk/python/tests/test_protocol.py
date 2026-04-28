@@ -128,7 +128,7 @@ class QuipuClientTests(unittest.TestCase):
             retrieved = client.retrieve(query="pnpm", scope={"projectId": "repo:test"})
 
             self.assertEqual(remembered["status"], "stored")
-            self.assertIn("Use pnpm through the SDK.", retrieved["prompt"])
+            self.assertIn("The repo uses pnpm as its package manager.", retrieved["prompt"])
 
 
 if __name__ == "__main__":
