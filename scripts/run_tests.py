@@ -41,7 +41,7 @@ def maybe_run_zig_build() -> None:
     if shutil.which("zig") is None:
         print("Skipping Zig build: zig is not installed")
         return
-    run(["zig", "build"], cwd=ROOT / "core")
+    run(["zig", "build", "test"], cwd=ROOT / "core")
 
 
 def main() -> int:
