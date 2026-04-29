@@ -47,6 +47,11 @@ def load_locomo_suite(
         raise ValueError("LoCoMo dataset must be a list of conversation samples")
 
     allowed_categories = set(include_categories or CATEGORY_NAMES)
+    full_dataset = (
+        max_conversations is None
+        and max_questions_per_conversation is None
+        and allowed_categories == set(CATEGORY_NAMES)
+    )
     scenarios = []
     for sample_index, sample in enumerate(raw):
         if max_conversations is not None and len(scenarios) >= max_conversations:
@@ -85,6 +90,12 @@ def load_locomo_suite(
             "license": "LoCoMo upstream license",
             "downloadUrl": LOCOMO_URL,
             "tasks": tasks,
+            "fullDataset": full_dataset,
+            "limits": {
+                "maxConversations": max_conversations,
+                "maxQuestionsPerConversation": max_questions_per_conversation,
+                "includeCategories": sorted(allowed_categories),
+            },
         },
         scenarios=scenarios,
     )

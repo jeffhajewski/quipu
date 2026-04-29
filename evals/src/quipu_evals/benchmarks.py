@@ -12,7 +12,7 @@ import time
 from typing import Any, Callable, Mapping
 
 from .artifacts import build_manifest, write_json
-from .baselines import registry_json
+from .baselines import DETERMINISTIC_ABLATIONS, DETERMINISTIC_REQUIRED_BASELINES, registry_json
 from .core_runner import CORE_BINARY, lattice_lib_from_env, run_core_suite
 from .external import DEFAULT_EXTERNAL_SUITES, external_suite_metadata, is_normalized_external_suite, load_external_suite
 from .locomo import download_locomo, load_locomo_suite, write_suite
@@ -40,6 +40,8 @@ def collect_benchmarks(
     require_core: bool = False,
     locomo_options: Mapping[str, Any] | None = None,
     require_lattice: bool = False,
+    include_baselines: bool = False,
+    include_ablations: bool = False,
 ) -> dict[str, Any]:
     suite_path = Path(suite_path)
     suite_path, suite = prepare_suite(suite_path, output_dir, external_benchmark, locomo_options or {})
@@ -68,18 +70,67 @@ def collect_benchmarks(
     runs.append(
         run_case(
             "q0_raw_only_fake",
-            lambda: run_suite(suite_path),
+            lambda: run_suite(suite_path, baseline_id="q0_raw_only_fake"),
             suite_path=suite_path,
             output_dir=output_dir,
             generated_at=generated_at,
             git_commit=git_commit,
             runner="quipu_evals.runner",
             storage="fake",
-            config={"suite": str(suite_path), "resultClass": result_class, "externalBenchmark": external_benchmark},
+            config={
+                "suite": str(suite_path),
+                "baseline": "q0_raw_only_fake",
+                "resultClass": result_class,
+                "externalBenchmark": external_benchmark,
+            },
             seed=seed,
             verification_status=verification_status,
         )
     )
+    if include_baselines:
+        for baseline_id in DETERMINISTIC_REQUIRED_BASELINES:
+            runs.append(
+                run_case(
+                    baseline_id,
+                    lambda baseline_id=baseline_id: run_suite(suite_path, baseline_id=baseline_id),
+                    suite_path=suite_path,
+                    output_dir=output_dir,
+                    generated_at=generated_at,
+                    git_commit=git_commit,
+                    runner="quipu_evals.runner",
+                    storage="deterministic",
+                    config={
+                        "suite": str(suite_path),
+                        "baseline": baseline_id,
+                        "resultClass": result_class,
+                        "externalBenchmark": external_benchmark,
+                    },
+                    seed=seed,
+                    verification_status=verification_status,
+                )
+            )
+    if include_ablations:
+        for ablation_id in DETERMINISTIC_ABLATIONS:
+            runs.append(
+                run_case(
+                    f"ablation_{ablation_id}",
+                    lambda ablation_id=ablation_id: run_suite(suite_path, baseline_id=ablation_id),
+                    suite_path=suite_path,
+                    output_dir=output_dir,
+                    generated_at=generated_at,
+                    git_commit=git_commit,
+                    runner="quipu_evals.runner",
+                    storage="deterministic",
+                    config={
+                        "suite": str(suite_path),
+                        "ablation": ablation_id,
+                        "resultClass": result_class,
+                        "externalBenchmark": external_benchmark,
+                    },
+                    seed=seed,
+                    verification_status=verification_status,
+                )
+            )
     core_available = shutil.which("zig") is not None
     if include_core and (core_available or require_core):
         runs.append(
@@ -147,6 +198,7 @@ def collect_benchmarks(
         "latticeIncluded": any(run.get("storage") == "lattice" for run in runs),
         "verification": report_verification,
         "baselineRegistry": registry_json(),
+        "ablations": ablation_summaries(runs),
         "traceArtifacts": [
             run.get("artifacts", {}).get("traces")
             for run in runs
@@ -157,6 +209,25 @@ def collect_benchmarks(
     }
     report["benchmarkReadiness"] = evaluate_readiness(report)
     return report
+
+
+def ablation_summaries(runs: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    ablation_ids = set(DETERMINISTIC_ABLATIONS)
+    summaries = []
+    for run in runs:
+        baseline = run.get("baseline")
+        if baseline not in ablation_ids:
+            continue
+        summaries.append(
+            {
+                "id": baseline,
+                "run": run.get("name"),
+                "passed": run.get("passed"),
+                "metrics": run.get("metrics", {}),
+                "artifacts": run.get("artifacts", {}),
+            }
+        )
+    return summaries
 
 
 def prepare_suite(
@@ -476,6 +547,8 @@ def main() -> int:
     parser.add_argument("--skip-core", action="store_true")
     parser.add_argument("--require-core", action="store_true")
     parser.add_argument("--require-lattice", action="store_true")
+    parser.add_argument("--include-baselines", action="store_true")
+    parser.add_argument("--include-ablations", action="store_true")
     parser.add_argument("--download-locomo", action="store_true")
     parser.add_argument("--dataset-cache", type=Path, default=Path(os.environ.get("QUIPU_DATASET_CACHE", ".quipu-datasets")))
     parser.add_argument("--locomo-max-conversations", type=int)
@@ -515,6 +588,8 @@ def main() -> int:
         include_core=not args.skip_core,
         require_core=args.require_core or result_class == "publishable",
         require_lattice=args.require_lattice or result_class == "publishable",
+        include_baselines=args.include_baselines or result_class == "publishable",
+        include_ablations=args.include_ablations or result_class == "publishable",
         locomo_options={
             "max_conversations": args.locomo_max_conversations,
             "max_questions_per_conversation": args.locomo_max_questions,

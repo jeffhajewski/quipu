@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable, Union
 
 from .artifacts import build_manifest, write_json
-from .fake_client import Q0RawOnlyBaseline
+from .fake_client import FakeQuipuClient, supported_baseline_ids
 from .graders import (
     GradeResult,
     grade_deletion_leakage,
@@ -67,25 +67,25 @@ class SuiteRun:
         }
 
 
-def run_suite(path: Union[str, Path]) -> SuiteRun:
+def run_suite(path: Union[str, Path], *, baseline_id: str = "q0_raw_only_fake") -> SuiteRun:
     suite = load_suite(path)
     query_runs: list[QueryRun] = []
     forget_runs: list[ForgetRun] = []
     for scenario in suite.scenarios:
-        scenario_query_runs, scenario_forget_runs = run_scenario(scenario)
+        scenario_query_runs, scenario_forget_runs = run_scenario(scenario, baseline_id=baseline_id)
         query_runs.extend(scenario_query_runs)
         forget_runs.extend(scenario_forget_runs)
     return SuiteRun(
         suite_name=suite.name,
         suite_version=suite.version,
-        baseline="q0_raw_only_fake",
+        baseline=baseline_id,
         query_runs=query_runs,
         forget_runs=forget_runs,
     )
 
 
-def run_scenario(scenario: Scenario) -> tuple[list[QueryRun], list[ForgetRun]]:
-    client = Q0RawOnlyBaseline()
+def run_scenario(scenario: Scenario, *, baseline_id: str = "q0_raw_only_fake") -> tuple[list[QueryRun], list[ForgetRun]]:
+    client = FakeQuipuClient(baseline_id)
     for event in sorted(scenario.events, key=lambda item: item.time):
         client.remember_event(event)
 
@@ -150,10 +150,11 @@ def forget_run_to_json(run: ForgetRun) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("suite", nargs="?", default="evals/suites/quipu_synthetic.yaml")
+    parser.add_argument("--baseline", choices=supported_baseline_ids(), default="q0_raw_only_fake")
     parser.add_argument("--output", type=Path, help="Write the full run result JSON to this path")
     parser.add_argument("--manifest", type=Path, help="Write a compact eval run manifest to this path")
     args = parser.parse_args()
-    run = run_suite(args.suite)
+    run = run_suite(args.suite, baseline_id=args.baseline)
     run_json = run.to_json()
     if args.output:
         write_json(args.output, run_json)
@@ -166,6 +167,7 @@ def main() -> int:
                 runner="quipu_evals.runner",
                 storage="fake",
                 results_path=args.output,
+                config={"suite": str(args.suite), "baseline": args.baseline},
             ),
         )
     print(json.dumps(run_json, indent=2, sort_keys=True))

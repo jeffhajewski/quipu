@@ -58,4 +58,6 @@ def external_suite_metadata(suite: Suite) -> dict[str, Any]:
         "source": metadata.get("source"),
         "license": metadata.get("license"),
         "tasks": list(metadata.get("tasks", [])),
+        "fullDataset": bool(metadata.get("fullDataset", False)),
+        "limits": dict(metadata.get("limits", {})) if isinstance(metadata.get("limits"), dict) else {},
     }

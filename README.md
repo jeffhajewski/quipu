@@ -72,6 +72,9 @@ Quipu currently supports:
 - External benchmark readiness gates, LoCoMo smoke fixtures, a real LoCoMo
   `locomo10.json` normalizer, retrieval trace artifacts, and reproducible
   benchmark manifests.
+- Deterministic external benchmark baselines (`full_context`, `recent_only`,
+  `bm25`, `vector_rag`, `hybrid_bm25_vector`, `summary_only`,
+  `memory_cards_only`, `graph_only`) plus Q0-Q13/full Quipu ablation runs.
 
 ## Current Benchmark Snapshot
 
@@ -83,8 +86,9 @@ The current benchmark surface has two honest result classes:
 
 `publishable` external results are not available yet. Do not advertise numbers
 for LoCoMo, LongMemEval, or MemoryAgentBench until a full LoCoMo run passes with
-LatticeDB storage, retrieval traces, answer and judge configuration, baselines,
-ablations, verification, and reproducible manifests.
+the full external dataset, LatticeDB storage, retrieval traces, answer and
+judge configuration, baselines, ablations, verification, and reproducible
+manifests.
 
 Latest local synthetic run:
 
@@ -101,8 +105,9 @@ Current external smoke:
   event-summary, and forgetting paths. This validates the harness, not LoCoMo
   performance.
 - Real LoCoMo adapter: normalizes the upstream SNAP `locomo10.json` shape into
-  Quipu scenarios and can run local Q0/core benchmark passes with artifacts.
-  These runs are development outputs until the publishable gate passes.
+  Quipu scenarios and can run local deterministic baseline, ablation, and core
+  benchmark passes with artifacts. These runs are development outputs until the
+  publishable gate passes.
 
 ## Try It
 
@@ -237,6 +242,8 @@ Implemented:
 - External benchmark readiness gate, LoCoMo mini smoke fixture, real LoCoMo
   dataset normalizer, retrieval trace artifacts, and `just` targets for LoCoMo
   smoke/full/download runs.
+- Deterministic required baselines and Q0-Q13/full Quipu ablation manifests for
+  benchmark reports.
 
 Still in progress:
 
@@ -245,7 +252,7 @@ Still in progress:
 - Full migration runner and compatibility checks.
 - Provider-backed embeddings, BM25/reranking, and learned scoring.
 - LLM-backed extraction and consolidation workers.
-- Full LoCoMo baseline/ablation matrix and provider-backed answer/judge scoring.
+- Provider-backed answer/judge scoring for LoCoMo publication.
 - LongMemEval and MemoryAgentBench adapters.
 - Richer host integrations.
 
@@ -266,11 +273,16 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --markdown docs/benchmark-results.md
 PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --external-benchmark locomo \
+  --include-baselines \
+  --include-ablations \
+  --allow-failures \
   --markdown artifacts/benchmarks/locomo-smoke/report.md
 PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   /path/to/locomo10.json \
   --external-benchmark locomo \
   --result-class publishable \
+  --include-baselines \
+  --include-ablations \
   --include-lattice \
   --require-lattice \
   --allow-failures \
@@ -301,9 +313,9 @@ zig build -Denable-lattice=true \
 - `sdk/typescript/`: thin TypeScript SDK and protocol tests.
 - `sdk/python/`: thin Python SDK and protocol tests.
 - `mcp/`: dependency-free MCP stdio adapter with tools, resources, and prompts.
-- `evals/`: synthetic scenario schema, fake baseline, Zig core runner, graders,
-  external smoke fixtures, real LoCoMo normalizer, run manifests, readiness
-  gates, trace artifacts, and tests.
+- `evals/`: synthetic scenario schema, deterministic baselines/ablations, Zig
+  core runner, graders, external smoke fixtures, real LoCoMo normalizer, run
+  manifests, readiness gates, trace artifacts, and tests.
 - `docs/`: implementation notes for API, algorithms, data model, evals,
   architecture, security, and publication.
 - `examples/`: planned integration examples.

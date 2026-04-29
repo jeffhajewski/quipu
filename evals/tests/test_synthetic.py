@@ -20,6 +20,7 @@ from quipu_evals.benchmarks import collect_benchmarks, render_markdown  # noqa: 
 from quipu_evals.external import load_external_suite  # noqa: E402
 from quipu_evals.locomo import load_locomo_suite, write_suite  # noqa: E402
 from quipu_evals.readiness import evaluate_readiness  # noqa: E402
+from quipu_evals.baselines import DETERMINISTIC_ABLATIONS, DETERMINISTIC_REQUIRED_BASELINES  # noqa: E402
 from quipu_evals import load_suite, run_suite  # noqa: E402
 
 
@@ -46,6 +47,14 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertEqual(len(run.query_runs), 5)
         self.assertEqual(len(run.forget_runs), 1)
         self.assertEqual(run.to_json()["metrics"]["queriesPassed"], 5)
+
+    def test_deterministic_required_baseline_runs(self):
+        run = run_suite(SUITE_PATH, baseline_id="bm25")
+        payload = run.to_json()
+
+        self.assertEqual(payload["baseline"], "bm25")
+        self.assertEqual(payload["metrics"]["queriesTotal"], 5)
+        self.assertIn("retrieval", payload["metrics"])
 
     def test_eval_manifest_summarizes_run_artifacts(self):
         run = run_suite(SUITE_PATH)
@@ -157,6 +166,7 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertEqual(len(loaded.scenarios[0].events), 2)
         self.assertEqual(loaded.scenarios[0].queries[0].expected_answer, "Pixel")
         self.assertEqual(loaded.scenarios[0].queries[1].category, "event_summary")
+        self.assertTrue(loaded.metadata["fullDataset"])
 
     def test_external_smoke_report_marks_not_publishable(self):
         report = collect_benchmarks(
@@ -172,6 +182,25 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertEqual(report["benchmarkReadiness"]["status"], "not_ready")
         self.assertIn("External Smoke Benchmark Results", markdown)
         self.assertIn("not publishable", markdown)
+
+    def test_report_can_execute_required_baselines_and_ablations(self):
+        report = collect_benchmarks(
+            LOCOMO_MINI_PATH,
+            include_core=False,
+            include_baselines=True,
+            include_ablations=True,
+            result_class="external_smoke",
+            external_benchmark="locomo",
+        )
+
+        baselines = {run["baseline"] for run in report["runs"]}
+        ablations = {item["id"] for item in report["ablations"]}
+        self.assertTrue(set(DETERMINISTIC_REQUIRED_BASELINES).issubset(baselines))
+        self.assertTrue(set(DETERMINISTIC_ABLATIONS).issubset(ablations))
+        readiness = {item["id"]: item["passed"] for item in report["benchmarkReadiness"]["requirements"]}
+        self.assertTrue(readiness["baselines"])
+        self.assertTrue(readiness["ablations"])
+        self.assertFalse(readiness["full_dataset"])
 
     def test_readiness_counts_lattice_storage_runs_separately_from_accuracy(self):
         readiness = evaluate_readiness(

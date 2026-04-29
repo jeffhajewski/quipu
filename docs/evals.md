@@ -16,11 +16,29 @@ Run the smoke baseline with:
 ```bash
 PYTHONPATH=evals/src python3 -m quipu_evals.runner \
   evals/suites/quipu_synthetic.yaml \
+  --baseline q0_raw_only_fake \
   --output artifacts/evals/q0-results.json \
   --manifest artifacts/evals/q0-manifest.json
 ```
 
 The Q0 fake baseline stores raw scenario events in memory, retrieves by scope-filtered lexical overlap, and grades exact answers, expected evidence IDs, forbidden evidence, scope leakage, and deletion leakage. It exists to keep eval fixtures executable before the daemon storage implementation is complete.
+
+The same deterministic runner now supports the required external benchmark
+baselines:
+
+- `full_context`
+- `recent_only`
+- `bm25`
+- `vector_rag`
+- `hybrid_bm25_vector`
+- `summary_only`
+- `memory_cards_only`
+- `graph_only`
+
+It also supports Quipu ablation IDs `Q0` through `Q13` plus `full_quipu`.
+These are deterministic fixture implementations for reproducible comparisons;
+provider-backed embeddings, reranking, extraction, and judging are configured
+separately from this runner.
 
 The in-memory core smoke baseline runs the compiled Zig process through `quipu serve-stdio`:
 
@@ -51,13 +69,15 @@ artifact paths.
 
 ## Benchmark Report
 
-The benchmark collector runs the fake Q0 baseline and the core runtime baseline,
-with optional LatticeDB storage, then writes JSON artifacts and a markdown
-summary:
+The benchmark collector runs the fake Q0 baseline, optional deterministic
+baseline/ablation matrix, and the core runtime baseline, with optional LatticeDB
+storage, then writes JSON artifacts and a markdown summary:
 
 ```bash
 PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   evals/suites/quipu_synthetic.yaml \
+  --include-baselines \
+  --include-ablations \
   --include-lattice \
   --lattice-include /path/to/latticedb/include \
   --lattice-lib /path/to/latticedb/lib \
@@ -83,6 +103,9 @@ LoCoMo has the first smoke fixture:
 ```bash
 PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --external-benchmark locomo \
+  --include-baselines \
+  --include-ablations \
+  --allow-failures \
   --markdown artifacts/benchmarks/locomo-smoke/report.md
 ```
 
@@ -91,8 +114,9 @@ retrieval, grading, forgetting, manifests, and the real-benchmark readiness
 gate without requiring external model keys. It is not a LoCoMo score.
 
 Full LoCoMo runs should use `--result-class publishable`, a real dataset path,
-LatticeDB enabled, provider configuration, verification status, and generated
-trace artifacts. LongMemEval and MemoryAgentBench remain next adapters.
+LatticeDB enabled, deterministic baselines/ablations, provider configuration,
+verification status, and generated trace artifacts. LongMemEval and
+MemoryAgentBench remain next adapters.
 
 ## Real LoCoMo Dataset
 
@@ -103,6 +127,8 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   /path/to/locomo10.json \
   --external-benchmark locomo \
   --result-class publishable \
+  --include-baselines \
+  --include-ablations \
   --include-lattice \
   --require-lattice \
   --allow-failures \

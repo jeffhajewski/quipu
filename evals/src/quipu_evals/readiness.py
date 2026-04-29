@@ -5,6 +5,7 @@ from typing import Any, Mapping
 
 REAL_BENCHMARK_READY_REQUIREMENTS = [
     ("external_dataset_adapter", "External dataset adapter"),
+    ("full_dataset", "Full external dataset"),
     ("replay_into_daemon", "Replay into daemon"),
     ("lattice_storage", "Lattice-backed storage"),
     ("retrieval_traces", "Retrieval traces"),
@@ -25,6 +26,7 @@ def evaluate_readiness(report: Mapping[str, Any]) -> dict[str, Any]:
 
     checks = {
         "external_dataset_adapter": bool(report.get("externalBenchmark")),
+        "full_dataset": bool(report.get("dataset", {}).get("fullDataset")),
         "replay_into_daemon": any(run.get("storage") in {"memory", "lattice"} for run in runs),
         "lattice_storage": any(
             run.get("storage") == "lattice"
