@@ -200,6 +200,23 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertTrue(lattice_requirement["passed"])
         self.assertEqual(readiness["status"], "not_ready")
 
+    def test_publishable_external_report_wording_is_not_synthetic(self):
+        markdown = render_markdown(
+            {
+                "resultClass": "publishable",
+                "externalBenchmark": "locomo",
+                "generatedAt": "2026-04-29T00:00:00Z",
+                "dataset": {"datasetName": "LoCoMo", "datasetVersion": "locomo10"},
+                "suite": "normalized-locomo-suite.json",
+                "latticeIncluded": True,
+                "runs": [],
+                "benchmarkReadiness": {"status": "not_ready", "requirements": []},
+            }
+        )
+        self.assertIn("External Benchmark Results", markdown)
+        self.assertIn("readiness gate", markdown)
+        self.assertNotIn("synthetic smoke benchmark results", markdown)
+
     @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
     def test_core_stdio_remember_retrieve_forget_smoke(self):
         env = os.environ.copy()

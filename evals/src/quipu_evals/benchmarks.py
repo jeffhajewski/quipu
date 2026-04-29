@@ -291,20 +291,28 @@ def _verification_status(run_json: Mapping[str, Any], default: str) -> str:
 
 def render_markdown(report: Mapping[str, Any]) -> str:
     result_class = str(report.get("resultClass") or "synthetic_smoke")
-    title = "External Smoke Benchmark Results" if result_class == "external_smoke" else "Benchmark Results"
-    scope_description = (
-        [
+    external_benchmark = report.get("externalBenchmark")
+    if result_class == "external_smoke":
+        title = "External Smoke Benchmark Results"
+        scope_description = [
             "These are Quipu external smoke benchmark results. They validate the",
             "dataset normalization, replay, retrieval, grading, and artifact path on",
             "a small fixture. They are not publishable external benchmark numbers.",
         ]
-        if result_class == "external_smoke"
-        else [
+    elif external_benchmark:
+        title = "External Benchmark Results"
+        scope_description = [
+            "These are Quipu external benchmark run artifacts. The readiness gate",
+            "below determines whether the run is publishable; do not cite numbers as",
+            "benchmark claims unless the gate status is ready.",
+        ]
+    else:
+        title = "Benchmark Results"
+        scope_description = [
             "These are Quipu synthetic smoke benchmark results. They are useful for",
             "tracking current correctness and basic runtime health, but they are not a",
             "claim of performance on external long-memory benchmarks yet.",
         ]
-    )
     dataset = report.get("dataset", {})
     lines = [
         f"# {title}",
