@@ -2,6 +2,7 @@ const std = @import("std");
 const extractor = @import("extractor.zig");
 const jobs = @import("jobs.zig");
 const protocol = @import("protocol.zig");
+const providers = @import("providers.zig");
 const storage = @import("storage.zig");
 const streams = @import("streams.zig");
 
@@ -854,7 +855,8 @@ pub const Runtime = struct {
         content: []const u8,
         created_at: ?[]const u8,
     ) !usize {
-        const extracted = extractor.DeterministicExtractor.extract(content);
+        const plugin = providers.deterministicExtractor();
+        const extracted = plugin.extract(content);
         var written: usize = 0;
         for (extracted.items[0..extracted.len]) |candidate| {
             self.writeExtractedMemory(allocator, scope, message_qid, content, created_at, candidate) catch |err| switch (err) {

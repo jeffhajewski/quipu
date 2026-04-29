@@ -16,6 +16,16 @@ Implemented MCP tools:
 - `quipu_core_get`
 - `quipu_core_update`
 
-Provider plugins for extractors, embedders, rerankers, and consolidation workers
-remain design-level only. See [../SPEC.md](../SPEC.md) for the full plugin
-architecture.
+## Provider Boundary
+
+`core/src/providers.zig` now defines the first provider-facing boundary:
+
+- `ProviderConfig`: extractor, embedding, and reranker endpoint descriptors.
+- `ProviderEndpoint`: `none`, `deterministic`, `command`, or `http` provider
+  shape.
+- `ExtractorPlugin`: vtable-based extractor interface used by the runtime.
+
+The runtime still uses the deterministic extractor by default, but it now calls it
+through `ExtractorPlugin`. Command and HTTP providers are validated as config
+shapes only; execution, sandboxing, retries, and schema-checked provider output
+are the next implementation layer.
