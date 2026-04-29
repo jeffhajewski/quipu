@@ -45,6 +45,22 @@ The manifest is a compact, machine-readable summary with suite identity,
 baseline, pass/fail status, metrics, and result artifact paths. The full result
 JSON keeps per-query grades and forgetting checks.
 
+## Benchmark Report
+
+Run all current synthetic baselines and write a markdown summary:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
+  evals/suites/quipu_synthetic.yaml \
+  --include-lattice \
+  --lattice-include /path/to/latticedb/include \
+  --lattice-lib /path/to/latticedb/lib \
+  --markdown docs/benchmark-results.md
+```
+
+The report is intentionally scoped as a synthetic smoke benchmark. External
+benchmark adapters and large-store latency reports are still on the roadmap.
+
 ## Planned External Adapters
 
 - LoCoMo

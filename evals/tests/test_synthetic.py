@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "evals" / "src"))
 from quipu_evals.core_client import CoreStdioClient  # noqa: E402
 from quipu_evals.core_runner import run_core_suite  # noqa: E402
 from quipu_evals.artifacts import build_manifest  # noqa: E402
+from quipu_evals.benchmarks import render_markdown  # noqa: E402
 from quipu_evals import load_suite, run_suite  # noqa: E402
 
 
@@ -55,6 +56,34 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertEqual(manifest["suite"]["name"], "quipu_synthetic")
         self.assertEqual(manifest["baseline"], "q0_raw_only_fake")
         self.assertEqual(manifest["artifacts"]["results"], "artifacts/results.json")
+
+    def test_benchmark_markdown_renders_honest_scope(self):
+        markdown = render_markdown(
+            {
+                "generatedAt": "2026-04-29T00:00:00Z",
+                "gitCommit": "abc1234",
+                "suite": "evals/suites/quipu_synthetic.yaml",
+                "latticeIncluded": False,
+                "runs": [
+                    {
+                        "baseline": "core_in_memory",
+                        "storage": "memory",
+                        "passed": True,
+                        "metrics": {
+                            "queriesPassed": 5,
+                            "queriesTotal": 5,
+                            "forgetOpsPassed": 1,
+                            "forgetOpsTotal": 1,
+                        },
+                        "durationMs": 42.25,
+                    }
+                ],
+            }
+        )
+
+        self.assertIn("synthetic smoke benchmark", markdown)
+        self.assertIn("core_in_memory", markdown)
+        self.assertIn("LoCoMo", markdown)
 
     @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
     def test_core_stdio_remember_retrieve_forget_smoke(self):

@@ -12,6 +12,12 @@ eval-smoke:
 eval-core-smoke:
     PYTHONPATH=evals/src python3 -m quipu_evals.core_runner evals/suites/quipu_synthetic.yaml --strict
 
+benchmark:
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks evals/suites/quipu_synthetic.yaml --markdown docs/benchmark-results.md
+
+benchmark-lattice:
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks evals/suites/quipu_synthetic.yaml --include-lattice --markdown docs/benchmark-results.md
+
 ci:
     python3 scripts/check_format.py --check
     python3 scripts/run_tests.py

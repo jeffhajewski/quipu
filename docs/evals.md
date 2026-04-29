@@ -39,3 +39,21 @@ PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
 The manifest uses `quipu.eval.run.v1` and records suite identity, runner,
 storage backend, baseline, pass/fail status, aggregate metrics, and result
 artifact paths.
+
+## Benchmark Report
+
+The benchmark collector runs the fake Q0 baseline and the core runtime baseline,
+with optional LatticeDB storage, then writes JSON artifacts and a markdown
+summary:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
+  evals/suites/quipu_synthetic.yaml \
+  --include-lattice \
+  --lattice-include /path/to/latticedb/include \
+  --lattice-lib /path/to/latticedb/lib \
+  --markdown docs/benchmark-results.md
+```
+
+Use the generated report as a synthetic smoke benchmark only. External benchmark
+adapters for LoCoMo, LongMemEval, and MemoryAgentBench are still pending.

@@ -8,6 +8,7 @@ requires-python = ">=3.10"
 [project.scripts]
 quipu-eval = "quipu_evals.runner:main"
 quipu-core-eval = "quipu_evals.core_runner:main"
+quipu-benchmark = "quipu_evals.benchmarks:main"
 
 [build-system]
 requires = ["hatchling"]

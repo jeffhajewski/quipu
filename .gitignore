@@ -24,6 +24,7 @@ __pycache__/
 venv/
 
 # Coverage and reports
+artifacts/
 coverage/
 .coverage
 htmlcov/

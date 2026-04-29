@@ -19,6 +19,14 @@ PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
   --manifest artifacts/evals/core-manifest.json
 ```
 
+Synthetic benchmark report:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
+  --include-lattice \
+  --markdown docs/benchmark-results.md
+```
+
 Optional LatticeDB-backed eval smoke:
 
 ```bash

@@ -70,6 +70,20 @@ Quipu currently supports:
 - Synthetic evals that check temporal truth, cross-scope leakage, evidence
   faithfulness, forgetting leakage, and emit run manifests.
 
+## Current Benchmark Snapshot
+
+The current benchmark surface is ready for honest synthetic smoke results. It is
+not ready for claims against LoCoMo, LongMemEval, or MemoryAgentBench yet.
+
+Latest local synthetic run:
+
+- Q0 raw-only fake baseline: 5/5 queries, 1/1 forgetting checks.
+- Core in-memory baseline: 5/5 queries, 1/1 forgetting checks.
+- Core LatticeDB `0.6.0` baseline: 5/5 queries, 1/1 forgetting checks.
+
+See [docs/benchmark-results.md](./docs/benchmark-results.md) for the generated
+report and caveats.
+
 ## Try It
 
 Start a local durable Quipu process:
@@ -220,6 +234,9 @@ just ci
 cd core && zig build test
 cd sdk/typescript && npm test
 PYTHONPATH=evals/src python3 -m quipu_evals.core_runner --strict
+PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
+  --include-lattice \
+  --markdown docs/benchmark-results.md
 PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
   --strict \
   --output artifacts/evals/core-results.json \

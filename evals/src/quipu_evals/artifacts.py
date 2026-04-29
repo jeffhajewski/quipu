@@ -13,6 +13,10 @@ def build_manifest(
     runner: str,
     storage: str,
     results_path: str | Path | None = None,
+    git_commit: str | None = None,
+    config: Mapping[str, Any] | None = None,
+    lattice_version: str | None = None,
+    duration_ms: float | None = None,
 ) -> dict[str, Any]:
     artifacts: dict[str, str] = {}
     if results_path is not None:
@@ -31,6 +35,10 @@ def build_manifest(
         "passed": run_json.get("passed"),
         "metrics": run_json.get("metrics", {}),
         "artifacts": artifacts,
+        "gitCommit": git_commit,
+        "config": dict(config or {}),
+        "latticeVersion": lattice_version,
+        "durationMs": duration_ms,
     }
 
 

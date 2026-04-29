@@ -16,6 +16,7 @@ SKIP_DIRS = {
     ".ruff_cache",
     ".venv",
     "__pycache__",
+    "artifacts",
     "build",
     "coverage",
     "dist",
