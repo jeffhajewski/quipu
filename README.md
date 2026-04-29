@@ -93,6 +93,20 @@ quipu --db "$HOME/.quipu/memory.lattice" health
 quipu --db "$HOME/.quipu/memory.lattice" verify
 ```
 
+Use the CLI directly:
+
+```bash
+quipu --db "$HOME/.quipu/memory.lattice" init
+quipu --db "$HOME/.quipu/memory.lattice" remember \
+  --project repo:quipu \
+  --text "This repo uses pnpm. Run just test before committing."
+quipu --db "$HOME/.quipu/memory.lattice" retrieve \
+  --project repo:quipu \
+  --query "test command" \
+  --need procedural \
+  --debug
+```
+
 ## SDK Examples
 
 Python:

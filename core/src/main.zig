@@ -5,6 +5,7 @@ const jobs = @import("jobs.zig");
 const lattice_storage = if (build_options.enable_lattice) @import("lattice_storage.zig") else struct {};
 const protocol = @import("protocol.zig");
 const runtime_mod = @import("runtime.zig");
+const schema = @import("schema.zig");
 const storage = @import("storage.zig");
 
 const RuntimeConfig = struct {
@@ -21,6 +22,73 @@ const MaterializeCliArgs = struct {
     }
 };
 
+const ScopeCliArgs = struct {
+    tenant_id: ?[]const u8 = null,
+    user_id: ?[]const u8 = null,
+    agent_id: ?[]const u8 = null,
+    project_id: ?[]const u8 = null,
+
+    fn json(self: ScopeCliArgs) ScopeJson {
+        return .{
+            .tenantId = self.tenant_id,
+            .userId = self.user_id,
+            .agentId = self.agent_id,
+            .projectId = self.project_id,
+        };
+    }
+};
+
+const ScopeJson = struct {
+    tenantId: ?[]const u8 = null,
+    userId: ?[]const u8 = null,
+    agentId: ?[]const u8 = null,
+    projectId: ?[]const u8 = null,
+};
+
+const RememberCliArgs = struct {
+    text: ?[]const u8 = null,
+    role: []const u8 = "user",
+    created_at: ?[]const u8 = null,
+    session_id: ?[]const u8 = null,
+    privacy_class: []const u8 = "normal",
+    extract: bool = true,
+    scope: ScopeCliArgs = .{},
+};
+
+const RetrieveCliArgs = struct {
+    query: ?[]const u8 = null,
+    budget_tokens: i64 = 1200,
+    include_debug: bool = false,
+    include_evidence: bool = true,
+    needs: std.ArrayList([]const u8),
+    scope: ScopeCliArgs = .{},
+
+    fn deinit(self: *RetrieveCliArgs, allocator: std.mem.Allocator) void {
+        self.needs.deinit(allocator);
+    }
+};
+
+const InspectCliArgs = struct {
+    qid: ?[]const u8 = null,
+};
+
+const ForgetCliArgs = struct {
+    mode: []const u8 = "hard_delete",
+    reason: []const u8 = "cli_request",
+    dry_run: bool = true,
+    qids: std.ArrayList([]const u8),
+    scope: ScopeCliArgs = .{},
+
+    fn deinit(self: *ForgetCliArgs, allocator: std.mem.Allocator) void {
+        self.qids.deinit(allocator);
+    }
+};
+
+const FeedbackCliArgs = struct {
+    retrieval_id: ?[]const u8 = null,
+    rating: ?[]const u8 = null,
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -28,6 +96,13 @@ pub fn main(init: std.process.Init) !void {
 
     if (config.db_path == null and build_options.enable_lattice) {
         config.db_path = init.environ_map.get("QUIPU_DB_PATH");
+        if (config.db_path == null and commandUsesDefaultDb(args, config.command_index)) {
+            config.db_path = try defaultDbPath(init.arena.allocator(), init.environ_map.get("HOME"));
+        }
+    }
+
+    if (config.db_path) |path| {
+        try ensureParentDir(init.io, path);
     }
 
     if (build_options.enable_lattice and config.db_path != null) {
@@ -78,10 +153,32 @@ fn runCommand(
     const stdout = &stdout_file_writer.interface;
     defer stdout.flush() catch {};
 
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "init")) {
+        try schema.ensure(allocator, store);
+        const response = try stringifyAlloc(allocator, .{
+            .status = "ok",
+            .dbPath = runtime.health.db_path,
+            .schemaVersion = schema.current_version,
+        });
+        defer allocator.free(response);
+        try stdout.print("{s}\n", .{response});
+        return;
+    }
+
     if (args.len > command_index and std.mem.eql(u8, args[command_index], "health")) {
         const response = try runtime.dispatch(
             allocator,
             "{\"jsonrpc\":\"2.0\",\"id\":\"cli_health\",\"method\":\"system.health\",\"params\":{}}",
+        );
+        defer allocator.free(response);
+        try stdout.print("{s}\n", .{response});
+        return;
+    }
+
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "status")) {
+        const response = try runtime.dispatch(
+            allocator,
+            "{\"jsonrpc\":\"2.0\",\"id\":\"cli_status\",\"method\":\"system.health\",\"params\":{}}",
         );
         defer allocator.free(response);
         try stdout.print("{s}\n", .{response});
@@ -152,6 +249,51 @@ fn runCommand(
         return;
     }
 
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "remember")) {
+        const request = buildRememberRequest(allocator, args[command_index + 1 ..]) catch {
+            return printCliError(stdout, allocator, "invalid remember arguments");
+        };
+        defer allocator.free(request);
+        try dispatchAndPrint(stdout, allocator, runtime, request);
+        return;
+    }
+
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "retrieve")) {
+        const request = buildRetrieveRequest(allocator, args[command_index + 1 ..]) catch {
+            return printCliError(stdout, allocator, "invalid retrieve arguments");
+        };
+        defer allocator.free(request);
+        try dispatchAndPrint(stdout, allocator, runtime, request);
+        return;
+    }
+
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "inspect")) {
+        const request = buildInspectRequest(allocator, args[command_index + 1 ..]) catch {
+            return printCliError(stdout, allocator, "invalid inspect arguments");
+        };
+        defer allocator.free(request);
+        try dispatchAndPrint(stdout, allocator, runtime, request);
+        return;
+    }
+
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "forget")) {
+        const request = buildForgetRequest(allocator, args[command_index + 1 ..]) catch {
+            return printCliError(stdout, allocator, "invalid forget arguments");
+        };
+        defer allocator.free(request);
+        try dispatchAndPrint(stdout, allocator, runtime, request);
+        return;
+    }
+
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "feedback")) {
+        const request = buildFeedbackRequest(allocator, args[command_index + 1 ..]) catch {
+            return printCliError(stdout, allocator, "invalid feedback arguments");
+        };
+        defer allocator.free(request);
+        try dispatchAndPrint(stdout, allocator, runtime, request);
+        return;
+    }
+
     if (args.len > command_index and std.mem.eql(u8, args[command_index], "rpc-stdin")) {
         var stdin_buffer: [4096]u8 = undefined;
         var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
@@ -163,7 +305,7 @@ fn runCommand(
         return;
     }
 
-    if (args.len > command_index and std.mem.eql(u8, args[command_index], "serve-stdio")) {
+    if (args.len > command_index and (std.mem.eql(u8, args[command_index], "serve-stdio") or std.mem.eql(u8, args[command_index], "serve"))) {
         var stdin_buffer: [4096]u8 = undefined;
         var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
         while (true) {
@@ -191,7 +333,48 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] health | quipu [--db PATH] verify [schema|provenance|temporal|forgetting]... | quipu [--db PATH] jobs materialize [--after SEQ] [--limit N] [--max-attempts N] [STREAM...] | quipu [--db PATH] rpc-stdin | quipu [--db PATH] serve-stdio\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--need NEED] | inspect ID | forget --id ID [--yes] | feedback --retrieval ID --rating RATING | verify [schema|provenance|temporal|forgetting]... | jobs materialize [--after SEQ] [--limit N] [--max-attempts N] [STREAM...] | rpc-stdin | serve\n", .{});
+}
+
+fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
+    if (args.len <= command_index) return false;
+    const command = args[command_index];
+    return std.mem.eql(u8, command, "init") or
+        std.mem.eql(u8, command, "serve") or
+        std.mem.eql(u8, command, "status") or
+        std.mem.eql(u8, command, "remember") or
+        std.mem.eql(u8, command, "retrieve") or
+        std.mem.eql(u8, command, "inspect") or
+        std.mem.eql(u8, command, "forget") or
+        std.mem.eql(u8, command, "feedback") or
+        std.mem.eql(u8, command, "verify") or
+        std.mem.eql(u8, command, "jobs");
+}
+
+fn defaultDbPath(allocator: std.mem.Allocator, home: ?[]const u8) !?[]const u8 {
+    const root = home orelse return null;
+    const path = try std.fmt.allocPrint(allocator, "{s}/.quipu/default/quipu.lattice", .{root});
+    return @as(?[]const u8, path);
+}
+
+fn ensureParentDir(io: std.Io, path: []const u8) !void {
+    const parent = std.fs.path.dirname(path) orelse return;
+    try std.Io.Dir.cwd().createDirPath(io, parent);
+}
+
+fn dispatchAndPrint(stdout: *std.Io.Writer, allocator: std.mem.Allocator, runtime: *runtime_mod.Runtime, request: []const u8) !void {
+    const response = try runtime.dispatch(allocator, request);
+    defer allocator.free(response);
+    try stdout.print("{s}\n", .{response});
+}
+
+fn printCliError(stdout: *std.Io.Writer, allocator: std.mem.Allocator, message: []const u8) !void {
+    const response = try stringifyAlloc(allocator, .{
+        .status = "error",
+        .message = message,
+    });
+    defer allocator.free(response);
+    try stdout.print("{s}\n", .{response});
 }
 
 fn parseMaterializeArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !MaterializeCliArgs {
@@ -223,6 +406,245 @@ fn parseMaterializeArgs(allocator: std.mem.Allocator, args: []const [:0]const u8
         }
     }
     return parsed;
+}
+
+fn buildRememberRequest(allocator: std.mem.Allocator, args: []const [:0]const u8) ![]u8 {
+    const parsed = try parseRememberArgs(args);
+    const text = parsed.text orelse return error.InvalidArgs;
+    const message = .{
+        .role = parsed.role,
+        .content = text,
+        .createdAt = parsed.created_at,
+    };
+    const messages = [_]@TypeOf(message){message};
+    return stringifyAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = "cli_remember",
+        .method = "memory.remember",
+        .params = .{
+            .sessionId = parsed.session_id,
+            .scope = parsed.scope.json(),
+            .messages = &messages,
+            .extract = parsed.extract,
+            .privacyClass = parsed.privacy_class,
+        },
+    });
+}
+
+fn buildRetrieveRequest(allocator: std.mem.Allocator, args: []const [:0]const u8) ![]u8 {
+    var parsed = try parseRetrieveArgs(allocator, args);
+    defer parsed.deinit(allocator);
+    const query = parsed.query orelse return error.InvalidArgs;
+    return stringifyAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = "cli_retrieve",
+        .method = "memory.retrieve",
+        .params = .{
+            .query = query,
+            .scope = parsed.scope.json(),
+            .budgetTokens = parsed.budget_tokens,
+            .needs = parsed.needs.items,
+            .options = .{
+                .includeEvidence = parsed.include_evidence,
+                .includeDebug = parsed.include_debug,
+                .logTrace = parsed.include_debug,
+            },
+        },
+    });
+}
+
+fn buildInspectRequest(allocator: std.mem.Allocator, args: []const [:0]const u8) ![]u8 {
+    const parsed = try parseInspectArgs(args);
+    const qid = parsed.qid orelse return error.InvalidArgs;
+    return stringifyAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = "cli_inspect",
+        .method = "memory.inspect",
+        .params = .{
+            .qid = qid,
+            .includeProvenance = true,
+            .includeDependents = true,
+            .includeRaw = true,
+        },
+    });
+}
+
+fn buildForgetRequest(allocator: std.mem.Allocator, args: []const [:0]const u8) ![]u8 {
+    var parsed = try parseForgetArgs(allocator, args);
+    defer parsed.deinit(allocator);
+    if (parsed.qids.items.len == 0) return error.InvalidArgs;
+    return stringifyAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = "cli_forget",
+        .method = "memory.forget",
+        .params = .{
+            .mode = parsed.mode,
+            .selector = .{
+                .qids = parsed.qids.items,
+                .scope = parsed.scope.json(),
+            },
+            .propagate = true,
+            .dryRun = parsed.dry_run,
+            .reason = parsed.reason,
+        },
+    });
+}
+
+fn buildFeedbackRequest(allocator: std.mem.Allocator, args: []const [:0]const u8) ![]u8 {
+    const parsed = try parseFeedbackArgs(args);
+    const retrieval_id = parsed.retrieval_id orelse return error.InvalidArgs;
+    const rating = parsed.rating orelse return error.InvalidArgs;
+    return stringifyAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = "cli_feedback",
+        .method = "memory.feedback",
+        .params = .{
+            .retrievalId = retrieval_id,
+            .rating = rating,
+        },
+    });
+}
+
+fn parseRememberArgs(args: []const [:0]const u8) !RememberCliArgs {
+    var parsed = RememberCliArgs{};
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--text")) {
+            parsed.text = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--role")) {
+            parsed.role = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--created-at")) {
+            parsed.created_at = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--session")) {
+            parsed.session_id = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--privacy")) {
+            parsed.privacy_class = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--extract")) {
+            parsed.extract = try parseBool(try nextArg(args, &index));
+        } else if (std.mem.eql(u8, arg, "--no-extract")) {
+            parsed.extract = false;
+        } else if (try parseScopeArg(arg, args, &index, &parsed.scope)) {
+            continue;
+        } else {
+            return error.InvalidArgs;
+        }
+    }
+    return parsed;
+}
+
+fn parseRetrieveArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !RetrieveCliArgs {
+    var parsed = RetrieveCliArgs{ .needs = std.ArrayList([]const u8).empty };
+    errdefer parsed.deinit(allocator);
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--query")) {
+            parsed.query = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--budget-tokens")) {
+            parsed.budget_tokens = try std.fmt.parseInt(i64, try nextArg(args, &index), 10);
+        } else if (std.mem.eql(u8, arg, "--need")) {
+            try parsed.needs.append(allocator, try nextArg(args, &index));
+        } else if (std.mem.eql(u8, arg, "--debug")) {
+            parsed.include_debug = true;
+        } else if (std.mem.eql(u8, arg, "--no-evidence")) {
+            parsed.include_evidence = false;
+        } else if (try parseScopeArg(arg, args, &index, &parsed.scope)) {
+            continue;
+        } else {
+            return error.InvalidArgs;
+        }
+    }
+    return parsed;
+}
+
+fn parseInspectArgs(args: []const [:0]const u8) !InspectCliArgs {
+    var parsed = InspectCliArgs{};
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--id")) {
+            parsed.qid = try nextArg(args, &index);
+        } else if (parsed.qid == null and !std.mem.startsWith(u8, arg, "--")) {
+            parsed.qid = arg;
+        } else {
+            return error.InvalidArgs;
+        }
+    }
+    return parsed;
+}
+
+fn parseForgetArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !ForgetCliArgs {
+    var parsed = ForgetCliArgs{ .qids = std.ArrayList([]const u8).empty };
+    errdefer parsed.deinit(allocator);
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--id")) {
+            try parsed.qids.append(allocator, try nextArg(args, &index));
+        } else if (std.mem.eql(u8, arg, "--mode")) {
+            parsed.mode = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--reason")) {
+            parsed.reason = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+            parsed.dry_run = true;
+        } else if (std.mem.eql(u8, arg, "--yes")) {
+            parsed.dry_run = false;
+        } else if (try parseScopeArg(arg, args, &index, &parsed.scope)) {
+            continue;
+        } else {
+            return error.InvalidArgs;
+        }
+    }
+    return parsed;
+}
+
+fn parseFeedbackArgs(args: []const [:0]const u8) !FeedbackCliArgs {
+    var parsed = FeedbackCliArgs{};
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--retrieval")) {
+            parsed.retrieval_id = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--rating")) {
+            parsed.rating = try nextArg(args, &index);
+        } else {
+            return error.InvalidArgs;
+        }
+    }
+    return parsed;
+}
+
+fn parseScopeArg(arg: []const u8, args: []const [:0]const u8, index: *usize, scope: *ScopeCliArgs) !bool {
+    if (std.mem.eql(u8, arg, "--tenant")) {
+        scope.tenant_id = try nextArg(args, index);
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--user")) {
+        scope.user_id = try nextArg(args, index);
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--agent")) {
+        scope.agent_id = try nextArg(args, index);
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--project")) {
+        scope.project_id = try nextArg(args, index);
+        return true;
+    }
+    return false;
+}
+
+fn nextArg(args: []const [:0]const u8, index: *usize) ![]const u8 {
+    index.* += 1;
+    if (index.* >= args.len) return error.InvalidArgs;
+    return args[index.*];
+}
+
+fn parseBool(value: []const u8) !bool {
+    if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes")) return true;
+    if (std.mem.eql(u8, value, "false") or std.mem.eql(u8, value, "0") or std.mem.eql(u8, value, "no")) return false;
+    return error.InvalidArgs;
 }
 
 fn freeVerificationIssues(allocator: std.mem.Allocator, issues: []const @import("storage.zig").VerificationIssue) void {

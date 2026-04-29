@@ -47,3 +47,22 @@ quipu --db /tmp/quipu.lattice jobs materialize --after 100 --limit 500 quipu.aud
 This gives the current single-process prototype the same durable stream-to-job
 boundary that later extractor, consolidation, forgetting, and feedback workers
 will use.
+
+## CLI and Schema
+
+`quipu init` writes the current schema metadata node (`q_schema_current`) into the
+active store. Lattice-enabled builds use `QUIPU_DB_PATH` or
+`~/.quipu/default/quipu.lattice` for persistent commands when `--db` is omitted.
+
+The CLI now exposes thin wrappers over the JSON-RPC runtime:
+
+```bash
+quipu remember --text "Use pnpm." --project repo:quipu
+quipu retrieve --query "package manager" --project repo:quipu --need current_facts
+quipu inspect q_fact_6
+quipu forget --id q_msg_4 --dry-run
+quipu feedback --retrieval q_retr_10 --rating helpful
+```
+
+These commands build JSON-RPC requests and dispatch through the same runtime path
+used by SDKs and MCP.
