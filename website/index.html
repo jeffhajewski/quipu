@@ -5,244 +5,274 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta
       name="description"
-      content="Quipu is evidence-backed temporal memory for long-horizon AI agents."
+      content="Quipu is local-first, evidence-backed temporal memory for long-horizon AI agents."
     >
-    <meta name="color-scheme" content="dark">
-    <title>Quipu | Evidence-Backed Temporal Memory</title>
+    <meta property="og:title" content="Quipu memory">
+    <meta
+      property="og:description"
+      content="A local memory layer for agents: raw evidence, temporal facts, retrieval packets, and forgetting that propagates."
+    >
+    <meta name="color-scheme" content="light">
+    <title>Quipu memory | Evidence-backed temporal memory</title>
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
 
-    <header class="site-header" aria-label="Primary">
-      <a class="brand-lockup" href="#top" aria-label="Quipu home">
-        <span class="brand-mark" aria-hidden="true">Q</span>
-        <span>
-          <span class="mono-block">[ QUIPU ]</span>
-          <span class="brand-subline">LOCAL-FIRST MEMORY RUNTIME</span>
-        </span>
+    <header class="site-header">
+      <a class="wordmark" href="#top" aria-label="Quipu home">
+        <span class="wordmark-name">quipu</span>
+        <span class="wordmark-pronounce">kee-poo</span>
       </a>
 
-      <nav class="primary-nav" aria-label="Sections">
-        <a href="#system">System</a>
-        <a href="#protocol">Protocol</a>
-        <a href="#memory">Memory</a>
-        <a href="#evals">Evals</a>
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="#why">Why</a>
+        <a href="#does">What it does</a>
+        <a href="#works">How it works</a>
+        <a href="#status">Status</a>
         <a href="#start">Start</a>
       </nav>
-
-      <data class="build-stamp" value="spec-v0.1">
-        OUTPUT 031<br>
-        SEED 0524
-      </data>
     </header>
 
     <main id="main">
       <section class="hero" id="top" aria-labelledby="hero-title">
-        <img
-          class="hero-asset"
-          src="assets/lattice.svg"
-          width="760"
-          height="540"
-          alt=""
-          aria-hidden="true"
-        >
         <div class="hero-copy">
-          <p class="unit-label">[ MEMORY OPERATING LAYER ]</p>
-          <h1 id="hero-title">Quipu</h1>
-          <p class="hero-line">
-            Evidence-backed temporal memory for long-horizon agents.
-          </p>
-          <p class="hero-text">
-            A local Zig runtime that captures raw interaction evidence, derives
-            scoped facts and procedures, preserves contradictions, propagates
-            forgetting, and returns compact context packets through JSON-RPC.
+          <p class="eyebrow">Quipu, pronounced kee-poo</p>
+          <h1 id="hero-title">Memory that can show its work.</h1>
+          <p class="hero-lede">
+            Quipu is a local-first memory layer for AI agents. It keeps raw
+            evidence, turns it into temporal facts and procedures, and retrieves
+            compact context packets with provenance.
           </p>
           <div class="hero-actions" aria-label="Primary actions">
-            <a class="action-link primary" href="#start">Initialize Memory</a>
-            <a class="action-link" href="#protocol">Inspect Protocol</a>
+            <a class="button" href="#start">Try the current core</a>
+            <a class="text-link" href="../SPEC.md">Read the spec</a>
+          </div>
+        </div>
+
+        <figure class="hero-visual">
+          <img
+            src="assets/cords.svg"
+            width="620"
+            height="520"
+            alt="Abstract quipu cords with knots connected to a small memory pipeline diagram."
+          >
+          <figcaption>
+            Named after Andean knotted-cord record systems: memory as evidence,
+            relation, and time, not loose text fragments.
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="intro-band" aria-label="Summary">
+        <p>
+          Agents need memory that survives sessions, knows when facts changed,
+          can cite what it came from, and can actually forget.
+        </p>
+      </section>
+
+      <section class="section" id="why" aria-labelledby="why-title">
+        <div class="section-kicker">Why you need it</div>
+        <div class="section-main">
+          <h2 id="why-title">A vector index is not enough memory.</h2>
+          <div class="reason-grid">
+            <article>
+              <h3>Facts go stale</h3>
+              <p>
+                An agent may learn that a project uses npm, then later learn it
+                moved to pnpm. Quipu represents the change instead of burying
+                both statements in search results.
+              </p>
+            </article>
+            <article>
+              <h3>Evidence matters</h3>
+              <p>
+                Derived memories link back to raw messages or events, so the
+                agent can explain why it believes something and audits can check
+                the source.
+              </p>
+            </article>
+            <article>
+              <h3>Forgetting is a system</h3>
+              <p>
+                When evidence is removed or redacted, memories derived from it
+                must be invalidated too. Deletion cannot stop at one row.
+              </p>
+            </article>
           </div>
         </div>
       </section>
 
-      <section class="marquee-strip" aria-label="Core invariant">
-        <span>RAW MEMORY IS PRESERVED UNLESS EXPLICITLY FORGOTTEN</span>
-        <span>DERIVED MEMORY LINKS TO EVIDENCE</span>
-        <span>CURRENT FACTS ARE TEMPORAL AND SCOPED</span>
-      </section>
-
-      <section class="section-grid" id="system" aria-labelledby="system-title">
-        <div class="section-head">
-          <p class="unit-label">[ SYSTEM / 001 ]</p>
-          <h2 id="system-title">Not rag with a memory vibe.</h2>
-        </div>
-        <div class="section-body two-column">
-          <p class="statement">
-            Quipu treats memory as a transactional operating layer: observe,
-            store evidence, extract candidates, resolve entities, update
-            temporal facts, link memories, consolidate, retrieve, evaluate, and
-            forget with propagation.
-          </p>
-          <div class="process-rail" aria-label="Memory process">
-            <span>Observe</span>
-            <span>Store raw evidence</span>
-            <span>Extract candidates</span>
-            <span>Resolve entities</span>
-            <span>Update temporal facts</span>
-            <span>Assemble context</span>
+      <section class="section" id="does" aria-labelledby="does-title">
+        <div class="section-kicker">What it does</div>
+        <div class="section-main">
+          <h2 id="does-title">Quipu gives agents a disciplined memory loop.</h2>
+          <div class="capability-list">
+            <article>
+              <span>01</span>
+              <div>
+                <h3>Remember raw interaction history</h3>
+                <p>
+                  Store messages and events as durable evidence before any model
+                  interpretation happens.
+                </p>
+              </div>
+            </article>
+            <article>
+              <span>02</span>
+              <div>
+                <h3>Extract useful facts and procedures</h3>
+                <p>
+                  Compile observations into preferences, project facts, goals,
+                  lessons, and test commands while preserving links to evidence.
+                </p>
+              </div>
+            </article>
+            <article>
+              <span>03</span>
+              <div>
+                <h3>Track scope, time, and contradiction</h3>
+                <p>
+                  Treat "true for this project" and "true until yesterday" as
+                  first-class memory properties.
+                </p>
+              </div>
+            </article>
+            <article>
+              <span>04</span>
+              <div>
+                <h3>Retrieve a context packet</h3>
+                <p>
+                  Return a small, structured packet the agent can use at
+                  inference time instead of a loose top-k pile.
+                </p>
+              </div>
+            </article>
+            <article>
+              <span>05</span>
+              <div>
+                <h3>Forget with propagation</h3>
+                <p>
+                  Dry-run a forget operation, tombstone or redact evidence, and
+                  invalidate derived memories that depended on it.
+                </p>
+              </div>
+            </article>
           </div>
         </div>
       </section>
 
-      <section class="blueprint" aria-labelledby="blueprint-title">
-        <div class="section-head">
-          <p class="unit-label">[ BLUEPRINT / CANONICAL ]</p>
-          <h2 id="blueprint-title">One owner for memory semantics.</h2>
-        </div>
-
-        <div class="blueprint-grid">
-          <article class="module">
-            <span class="module-index">01</span>
-            <h3>Agent runtime</h3>
+      <section class="section work-section" id="works" aria-labelledby="works-title">
+        <div class="section-kicker">How it works</div>
+        <div class="section-main">
+          <h2 id="works-title">One local runtime owns the semantics.</h2>
+          <div class="ascii-panel" role="img" aria-label="Quipu architecture flow">
+            <pre><code>agent / app / mcp host
+        |
+        v
+thin sdk or cli  -- JSON-RPC 2.0 -->  quipu core runtime
+                                           |
+              +----------------------------+----------------------------+
+              |                            |                            |
+              v                            v                            v
+       raw evidence                 derived memory              retrieval packet
+       messages/events              facts/procedures            scoped + cited
+              |                            |                            |
+              +------------ provenance edges + temporal validity --------+
+                                           |
+                                           v
+                                  local storage adapter</code></pre>
+          </div>
+          <div class="work-notes">
             <p>
-              Apps, local agents, CLI workflows, and MCP hosts submit memory
-              operations without owning database semantics.
+              The public API is intentionally small. SDKs validate inputs and
+              call the runtime; they do not reimplement extraction, retrieval,
+              temporal logic, or forgetting.
             </p>
-            <samp>TYPE / CLIENT EDGE</samp>
-          </article>
-          <article class="module">
-            <span class="module-index">02</span>
-            <h3>Thin SDKs</h3>
             <p>
-              TypeScript and Python validate inputs, find or call the runtime,
-              and return typed protocol results.
+              The current core runs in Zig with an in-memory adapter by default
+              and an optional LatticeDB-backed adapter for durable local storage.
             </p>
-            <samp>MODE / VALIDATE + FORWARD</samp>
-          </article>
-          <article class="module">
-            <span class="module-index">03</span>
-            <h3>Zig core</h3>
-            <p>
-              The native runtime owns extraction, retrieval planning,
-              forgetting, audit, verification, and context assembly.
-            </p>
-            <samp>AUTHORITY / CANONICAL WRITER</samp>
-          </article>
-          <article class="module">
-            <span class="module-index">04</span>
-            <h3>Storage adapter</h3>
-            <p>
-              In-memory and optional LatticeDB adapters expose graph-like
-              records, evidence edges, search, streams, and verification.
-            </p>
-            <samp>SUBSTRATE / LOCAL FILE</samp>
-          </article>
-        </div>
-      </section>
-
-      <section class="section-grid" id="protocol" aria-labelledby="protocol-title">
-        <div class="section-head">
-          <p class="unit-label">[ PROTOCOL / JSON-RPC ]</p>
-          <h2 id="protocol-title">Stable envelopes. Small surface.</h2>
-        </div>
-        <div class="method-board" role="list" aria-label="Implemented methods">
-          <data value="system.health" role="listitem">system.health</data>
-          <data value="memory.remember" role="listitem">memory.remember</data>
-          <data value="memory.retrieve" role="listitem">memory.retrieve</data>
-          <data value="memory.search" role="listitem">memory.search</data>
-          <data value="memory.inspect" role="listitem">memory.inspect</data>
-          <data value="memory.forget" role="listitem">memory.forget</data>
-          <data value="memory.feedback" role="listitem">memory.feedback</data>
-          <data value="memory.core.get" role="listitem">memory.core.get</data>
-          <data value="memory.core.update" role="listitem">memory.core.update</data>
-        </div>
-      </section>
-
-      <section class="invariant-wall" id="memory" aria-labelledby="memory-title">
-        <div class="section-head">
-          <p class="unit-label">[ MEMORY / INVARIANTS ]</p>
-          <h2 id="memory-title">Write nothing that cannot be checked.</h2>
-        </div>
-        <ol class="invariants">
-          <li>Raw memory is preserved unless explicitly forgotten.</li>
-          <li>Every derived memory links to evidence.</li>
-          <li>Current semantic facts have temporal validity.</li>
-          <li>Contradictions are represented, not silently overwritten.</li>
-          <li>Forgetting propagates to derived memory and indexes.</li>
-          <li>Retrieval returns evidence-aware context packets.</li>
-          <li>The daemon is the canonical writer.</li>
-          <li>LLM output is validated before deterministic writes.</li>
-          <li>Evaluation is a first-class package.</li>
-          <li>The common path stays trivial: start, remember, retrieve.</li>
-        </ol>
-      </section>
-
-      <section class="status-section" aria-labelledby="status-title">
-        <div class="section-head">
-          <p class="unit-label">[ STATUS / CURRENT BUILD ]</p>
-          <h2 id="status-title">Prototype with real edges.</h2>
-        </div>
-        <div class="status-grid">
-          <article>
-            <h3>Implemented now</h3>
-            <ul>
-              <li>Zig runtime and CLI protocol dispatch.</li>
-              <li>In-memory graph-like adapter with verification.</li>
-              <li>Optional LatticeDB-backed durable adapter.</li>
-              <li>Retrieval V0 with rendered prompt and structured packet.</li>
-              <li>Forget reports, tombstones, redaction, and invalidation.</li>
-              <li>Thin TypeScript, Python, and MCP stdio surfaces.</li>
-            </ul>
-          </article>
-          <article>
-            <h3>Next vectors</h3>
-            <ul>
-              <li>Long-running socket or HTTP daemon.</li>
-              <li>Provider-backed embeddings, BM25, and reranking.</li>
-              <li>LLM-backed extraction and consolidation workers.</li>
-              <li>MCP resources, prompts, and richer host integrations.</li>
-              <li>Publication-quality experiments and eval reporting.</li>
-            </ul>
-          </article>
-        </div>
-      </section>
-
-      <section class="eval-section" id="evals" aria-labelledby="evals-title">
-        <div class="section-head">
-          <p class="unit-label">[ EVALS / VERIFICATION ]</p>
-          <h2 id="evals-title">Memory is measured, not claimed.</h2>
-        </div>
-        <dl class="eval-meter" aria-label="Evaluation channels">
-          <div>
-            <dt>Conformance fixtures</dt>
-            <dd>Present</dd>
           </div>
-          <div>
-            <dt>Synthetic scenarios</dt>
-            <dd>Wired</dd>
-          </div>
-          <div>
-            <dt>Zig core smoke baseline</dt>
-            <dd>Present</dd>
-          </div>
-        </dl>
+        </div>
       </section>
 
-      <section class="start-section" id="start" aria-labelledby="start-title">
-        <div class="section-head">
-          <p class="unit-label">[ START / LOCAL PROCESS ]</p>
-          <h2 id="start-title">Bring up the current core.</h2>
+      <section class="section" id="status" aria-labelledby="status-title">
+        <div class="section-kicker">Current state</div>
+        <div class="section-main">
+          <h2 id="status-title">Prototype, not a hosted service.</h2>
+          <div class="status-columns">
+            <article>
+              <h3>Implemented now</h3>
+              <ul>
+                <li>Zig core runtime and CLI protocol dispatch.</li>
+                <li>JSON-RPC methods for health, remember, retrieve, search, inspect, forget, feedback, and core memory.</li>
+                <li>In-memory adapter with graph-like records, streams, search, and invariant checks.</li>
+                <li>Optional LatticeDB adapter for durable local storage.</li>
+                <li>Thin TypeScript, Python, and MCP stdio surfaces.</li>
+                <li>Conformance fixtures and smoke evals.</li>
+              </ul>
+            </article>
+            <article>
+              <h3>Still ahead</h3>
+              <ul>
+                <li>Long-running socket or HTTP daemon.</li>
+                <li>Provider-backed embeddings, BM25, and reranking.</li>
+                <li>LLM-backed extraction and consolidation workers.</li>
+                <li>Richer MCP resources, prompts, and host integrations.</li>
+                <li>Publication-quality experiments.</li>
+              </ul>
+            </article>
+          </div>
         </div>
-        <div class="terminal-grid">
+      </section>
+
+      <section class="section protocol-section" aria-labelledby="protocol-title">
+        <div class="section-kicker">Protocol glimpse</div>
+        <div class="section-main">
+          <h2 id="protocol-title">Remember first. Retrieve when context matters.</h2>
+          <div class="code-grid">
+            <figure>
+              <figcaption>remember</figcaption>
+              <pre><code>{
+  "method": "memory.remember",
+  "params": {
+    "scope": { "projectId": "repo:quipu" },
+    "messages": [
+      {
+        "role": "user",
+        "content": "Run just test before committing."
+      }
+    ]
+  }
+}</code></pre>
+            </figure>
+            <figure>
+              <figcaption>retrieve</figcaption>
+              <pre><code>{
+  "method": "memory.retrieve",
+  "params": {
+    "query": "What should I run before committing?",
+    "scope": { "projectId": "repo:quipu" },
+    "needs": ["current_facts", "procedural"]
+  }
+}</code></pre>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section class="section start-section" id="start" aria-labelledby="start-title">
+        <div class="section-kicker">Start locally</div>
+        <div class="section-main">
+          <h2 id="start-title">Build the current core.</h2>
           <figure class="terminal">
-            <figcaption>BUILD + HEALTH</figcaption>
+            <figcaption>from the repository root</figcaption>
             <pre><code>cd core
 zig build
-./zig-out/bin/quipu health</code></pre>
-          </figure>
-          <figure class="terminal">
-            <figcaption>RPC STDIN</figcaption>
-            <pre><code>printf '%s\n' '{"jsonrpc":"2.0","id":"1","method":"system.health","params":{}}' \
+./zig-out/bin/quipu health
+
+printf '%s\n' '{"jsonrpc":"2.0","id":"1","method":"system.health","params":{}}' \
   | ./zig-out/bin/quipu rpc-stdin</code></pre>
           </figure>
         </div>
@@ -250,15 +280,12 @@ zig build
     </main>
 
     <footer class="site-footer">
-      <div>
-        <span class="mono-block">[ QUIPU MEMORY ]</span>
-        <p>Local-first. Evidence-backed. Temporal by default.</p>
-      </div>
+      <p>Quipu memory. Local-first, evidence-backed, temporal by default.</p>
       <nav aria-label="Project links">
-        <a href="../SPEC.md">SPEC</a>
         <a href="../README.md">README</a>
+        <a href="../SPEC.md">Spec</a>
         <a href="../docs/api.md">API</a>
-        <a href="../protocol/README.md">PROTOCOL</a>
+        <a href="../protocol/README.md">Protocol</a>
       </nav>
     </footer>
   </body>
