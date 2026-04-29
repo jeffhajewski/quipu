@@ -147,15 +147,16 @@ figcaption,
 
 .hero {
   display: grid;
-  grid-template-columns: minmax(0, 1.08fr) minmax(320px, 0.82fr);
+  grid-template-columns: minmax(360px, 0.75fr) minmax(560px, 1.25fr);
   gap: clamp(2rem, 5vw, 5rem);
-  max-width: var(--max);
+  max-width: 1360px;
   margin: 0 auto;
   padding: clamp(4rem, 8vw, 7.5rem) 1.25rem 4rem;
 }
 
 .hero-copy {
   align-self: center;
+  max-width: 600px;
 }
 
 .eyebrow,
@@ -245,17 +246,20 @@ h3 {
 }
 
 .hero-visual {
-  align-self: end;
+  align-self: center;
   margin: 0;
 }
 
-.hero-visual img {
+.hero-visual img,
+.architecture-figure img {
   width: 100%;
+  height: auto;
   border: 1px solid var(--line);
   background: var(--paper-soft);
 }
 
-.hero-visual figcaption {
+.hero-visual figcaption,
+.architecture-figure figcaption {
   max-width: 42rem;
   margin-top: 0.85rem;
   color: var(--muted);
@@ -355,6 +359,10 @@ h3 {
   align-items: start;
 }
 
+.architecture-figure {
+  margin: 0 0 1.5rem;
+}
+
 .ascii-panel {
   border: 1px solid var(--line);
 }
@@ -443,7 +451,7 @@ h3 {
   color: var(--teal-dark);
 }
 
-@media (max-width: 920px) {
+@media (max-width: 1080px) {
   .site-header {
     position: static;
   }

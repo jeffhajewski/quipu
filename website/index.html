@@ -52,10 +52,10 @@
 
         <figure class="hero-visual">
           <img
-            src="assets/cords.svg"
-            width="620"
-            height="520"
-            alt="Abstract quipu cords with knots connected to a small memory pipeline diagram."
+            src="assets/architecture-memory.webp"
+            width="1589"
+            height="990"
+            alt="Abstract knot notation connected by provenance lines to raw evidence, temporal facts, and a context packet."
           >
           <figcaption>
             Named after Andean knotted-cord record systems: memory as evidence,
@@ -166,6 +166,19 @@
         <div class="section-kicker">How it works</div>
         <div class="section-main">
           <h2 id="works-title">One local runtime owns the semantics.</h2>
+          <figure class="architecture-figure">
+            <img
+              src="assets/architecture-runtime.webp"
+              width="1774"
+              height="887"
+              loading="lazy"
+              alt="Architecture pipeline from agent to JSON-RPC, Zig runtime, memory graph, and context packet with evidence, time, and forget lanes."
+            >
+            <figcaption>
+              The runtime is the owner of memory semantics; SDKs and tools
+              submit requests instead of duplicating memory behavior.
+            </figcaption>
+          </figure>
           <div class="ascii-panel" role="img" aria-label="Quipu architecture flow">
             <pre><code>agent / app / mcp host
         |
