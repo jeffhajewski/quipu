@@ -2,98 +2,192 @@
 
 Evidence-backed temporal memory for long-horizon AI agents.
 
-Quipu is a local-first memory system for agents. The current implementation is a native Zig prototype with the public JSON-RPC protocol, an in-memory adapter, an optional LatticeDB-backed adapter, thin SDK validators, conformance fixtures, and smoke evals.
+Quipu is pronounced **KEE-poo**. The name comes from knotted Andean record
+systems: durable memory encoded as structure, not just loose text.
 
-See [SPEC.md](./SPEC.md) for the full architecture and invariants.
+Quipu gives an agent a local memory layer it can inspect, verify, update, and
+forget. It stores raw evidence, extracts scoped facts and preferences from that
+evidence, retrieves the right memories for a task, and keeps enough provenance
+that you can ask why a memory exists or remove it later.
 
-## Status
+```bash
+curl -fsSL https://raw.githubusercontent.com/jeffhajewski/quipu/main/scripts/install.sh | bash
+export PATH="$HOME/.quipu/bin:$PATH"
+quipu --db "$HOME/.quipu/memory.lattice" health
+```
 
-Implemented now:
+The installer builds the Zig core and downloads the LatticeDB `0.6.0` native
+library for durable graph, full-text, vector, and stream storage. You need
+`git`, `curl`, `tar`, and `zig` installed.
 
-- Zig core runtime with `system.health`, `memory.remember`, `memory.search`, `memory.retrieve`, `memory.inspect`, `memory.forget`, `memory.feedback`, `memory.core.get`, and `memory.core.update`.
-- In-memory storage adapter with graph-like nodes/edges, simple full-text search, streams, transaction stubs, and invariant verification.
-- Optional LatticeDB-backed storage adapter for durable node/edge storage, Lattice FTS retrieval, hash-vector indexing/search, native durable streams, persistence across process restarts, and invariant verification.
-- Deterministic extraction for package manager facts, response-style preferences, and test-command procedures, including temporal supersession and evidence links.
-- Retrieval V0 that returns both a rendered prompt and structured context packet, with scope filtering, needs filtering, token budgeting, `validAt`, event windows, warnings, and optional trace output.
-- Forgetting paths for dry-run reports, hard-delete tombstones, redaction state, and invalidation of derived memories backed by forgotten evidence.
-- JSON-RPC schemas and conformance fixtures shared by SDK tests.
-- Thin TypeScript and Python SDKs that validate protocol shape and can call a local `quipu serve-stdio` process.
-- Dependency-free MCP stdio tool adapter that forwards Quipu tool calls to the core JSON-RPC process.
-- Python eval harness with a raw fake baseline and a Zig core smoke baseline.
+## Why Quipu
 
-Not implemented yet:
+Agents do not just need longer prompts. They need memory with discipline.
 
-- LatticeDB migrations and release-pinned dependency packaging.
-- Long-running socket or HTTP daemon process.
-- Provider-backed embeddings, BM25/reranking retrieval, and learned scoring.
-- LLM-backed extraction, consolidation workers, and plugin provider loading.
-- MCP resources/prompts and richer host integrations beyond the tool bridge.
+Most memory layers eventually become a pile of chunks. They can recall stale
+facts, mix data across users or projects, lose the evidence behind a summary, or
+fail to fully suppress deleted information. Quipu is built around stricter
+invariants:
 
-## Architecture
+- Raw evidence is preserved unless it is explicitly forgotten.
+- Derived facts link back to the messages that justify them.
+- Current facts are temporal: old values become historical, not silently wrong.
+- Retrieval is scoped, budgeted, and inspectable.
+- Forgetting propagates from raw evidence to derived memories.
+- SDKs stay thin; memory semantics live in the local daemon.
+
+The result is a memory system that is useful for real agent work: repo
+preferences, user style, project procedures, facts that change over time, and
+audit trails for what the agent used.
+
+## What It Does
+
+Quipu currently supports:
+
+- `memory.remember`: store raw sessions, turns, and messages.
+- Deterministic extraction for package-manager facts, test commands, and
+  response-style preferences.
+- Temporal supersession for single-valued facts and preferences.
+- `memory.retrieve`: return both a rendered prompt and structured context
+  packet with scope filtering, needs filtering, token budgeting, event windows,
+  `validAt`, warnings, and optional trace output.
+- `memory.search`: lexical, vector, and hybrid search modes.
+- `memory.inspect`: inspect a node, its provenance, dependents, and stream-backed
+  audit records.
+- `memory.forget`: dry-run reports, tombstones, redaction state, and suppression
+  of derived memories backed by forgotten evidence.
+- `memory.feedback` and `memory.core.*` for retrieval feedback and user-managed
+  core memory blocks.
+- Native LatticeDB-backed persistence with graph nodes/edges, FTS, hash-vector
+  search, and durable streams.
+- Python and TypeScript SDKs that validate JSON-RPC shape and talk to a local
+  `quipu serve-stdio` process.
+- A dependency-free MCP stdio adapter for tool-calling hosts.
+- Synthetic evals that check temporal truth, cross-scope leakage, evidence
+  faithfulness, and forgetting leakage.
+
+## Try It
+
+Start a local durable Quipu process:
+
+```bash
+quipu --db "$HOME/.quipu/memory.lattice" serve-stdio
+```
+
+Or send JSON-RPC directly:
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":"1","method":"memory.remember","params":{"scope":{"projectId":"repo:quipu"},"messages":[{"role":"user","content":"This repo uses pnpm. Run just test before committing.","createdAt":"2026-04-28T10:15:00Z"}]}}' \
+  | quipu --db "$HOME/.quipu/memory.lattice" rpc-stdin
+
+printf '%s\n' '{"jsonrpc":"2.0","id":"2","method":"memory.retrieve","params":{"query":"What should I run before committing?","scope":{"projectId":"repo:quipu"},"needs":["procedural"],"options":{"includeDebug":true}}}' \
+  | quipu --db "$HOME/.quipu/memory.lattice" rpc-stdin
+```
+
+Check the store:
+
+```bash
+quipu --db "$HOME/.quipu/memory.lattice" health
+quipu --db "$HOME/.quipu/memory.lattice" verify
+```
+
+## SDK Examples
+
+Python:
+
+```python
+from quipu import Quipu
+
+with Quipu.stdio(["quipu", "--db", "/tmp/quipu.lattice", "serve-stdio"]) as q:
+    remembered = q.remember(
+        scope={"projectId": "repo:quipu"},
+        messages=[{"role": "user", "content": "Use pnpm for this repo."}],
+    )
+    retrieved = q.retrieve(
+        query="package manager",
+        scope={"projectId": "repo:quipu"},
+        needs=["current_facts"],
+        options={"includeDebug": True},
+    )
+    print(remembered["messageQids"])
+    print(retrieved["prompt"])
+```
+
+TypeScript:
+
+```ts
+import { Quipu } from "@quipu/memory";
+
+const q = Quipu.stdio(["quipu", "--db", "/tmp/quipu.lattice", "serve-stdio"]);
+
+try {
+  await q.remember({
+    scope: { projectId: "repo:quipu" },
+    messages: [{ role: "user", content: "Run just test before committing." }],
+  });
+
+  const retrieved = await q.retrieve({
+    query: "test command",
+    scope: { projectId: "repo:quipu" },
+    needs: ["procedural"],
+    options: { includeDebug: true },
+  });
+
+  console.log(retrieved.prompt);
+} finally {
+  q.close();
+}
+```
+
+SDK packaging is still settling; from source, use `sdk/python` and
+`sdk/typescript` directly.
+
+## How It Works
 
 ```text
 Agent runtime / app
-  -> TypeScript SDK, Python SDK, CLI, or MCP adapter
+  -> Python SDK, TypeScript SDK, CLI, or MCP adapter
   -> JSON-RPC 2.0 protocol
   -> Zig core runtime
   -> storage adapter
-  -> in-memory adapter or optional LatticeDB adapter
+  -> in-memory adapter or LatticeDB adapter
 ```
 
-The daemon remains the canonical owner of memory semantics. SDKs validate inputs, submit protocol calls, and return typed results; they should not duplicate extraction, retrieval, temporal, or forgetting behavior.
+The Zig core owns memory semantics. Storage adapters provide graph records,
+full-text search, vector search, streams, transactions, and verification.
 
-## Quickstart
+The LatticeDB adapter stores Quipu nodes as durable graph nodes with public qids,
+creates provenance edges, indexes text with Lattice FTS, stores deterministic
+`lattice_hash_embed` vectors for search, and publishes events through Lattice
+native durable streams.
 
-Build and query the current in-memory core:
+## Current Status
 
-```bash
-cd core
-zig build
-./zig-out/bin/quipu health
-```
+Quipu is a working core prototype, not a packaged production daemon yet.
 
-Send one JSON-RPC request over stdin:
+Implemented:
 
-```bash
-printf '%s\n' '{"jsonrpc":"2.0","id":"1","method":"system.health","params":{}}' \
-  | ./zig-out/bin/quipu rpc-stdin
-```
+- Contract-first JSON-RPC protocol schemas and conformance fixtures.
+- Zig runtime for the public memory methods.
+- In-memory and LatticeDB `0.6.0` storage adapters.
+- Retrieval, inspection, feedback, core memory blocks, forgetting, and audit
+  stream logging.
+- Python/TypeScript SDK validators and stdio clients.
+- MCP tool bridge.
+- Synthetic eval harness and strict core eval baseline.
 
-Use the persistent stdio mode for SDKs and integration tests:
+Still in progress:
 
-```bash
-./zig-out/bin/quipu serve-stdio
-```
-
-Example request sequence for `serve-stdio`:
-
-```json
-{"jsonrpc":"2.0","id":"1","method":"memory.remember","params":{"scope":{"projectId":"repo:test"},"messages":[{"role":"user","content":"This repo uses pnpm. Run just test before committing.","createdAt":"2026-04-01T10:00:00Z"}]}}
-{"jsonrpc":"2.0","id":"2","method":"memory.retrieve","params":{"query":"What should I run before committing?","scope":{"projectId":"repo:test"},"needs":["current_facts","procedural"],"options":{"includeDebug":true}}}
-```
-
-Because the default adapter is in-memory, data is lost when the process exits.
-
-Build with the optional LatticeDB adapter and use a durable database file:
-
-```bash
-cd core
-zig build -Denable-lattice=true \
-  -Dlattice-include=/path/to/latticedb/include \
-  -Dlattice-lib=/path/to/latticedb/lib
-
-./zig-out/bin/quipu --db /tmp/quipu.lattice health
-./zig-out/bin/quipu --db /tmp/quipu.lattice serve-stdio
-```
-
-`QUIPU_DB_PATH` can be used instead of `--db`. The adapter targets the published
-LatticeDB `0.6.0` C ABI so it can use native durable stream APIs.
+- Long-running socket or HTTP daemon.
+- Release artifacts for Quipu itself.
+- LatticeDB migrations and schema versioning.
+- Provider-backed embeddings, BM25/reranking, and learned scoring.
+- LLM-backed extraction and consolidation workers.
+- Richer MCP resources/prompts and host integrations.
 
 ## Development
 
-Target contributors should have Zig, Python 3.10 or newer, Node.js, npm, and `just`. Until every toolchain is installed locally, `python3 scripts/run_tests.py` skips unavailable optional checks and CI runs the checks with Python and Node configured.
-
-Common commands:
+Common checks:
 
 ```bash
 just test
@@ -102,24 +196,35 @@ just ci
 
 cd core && zig build test
 cd sdk/typescript && npm test
-PYTHONPATH=evals/src python3 -m quipu_evals.runner evals/suites/quipu_synthetic.yaml
-PYTHONPATH=evals/src python3 -m quipu_evals.core_runner
+PYTHONPATH=evals/src python3 -m quipu_evals.core_runner --strict
+```
+
+Build with an explicit LatticeDB release:
+
+```bash
+cd core
+zig build -Denable-lattice=true \
+  -Dlattice-include=/path/to/latticedb/include \
+  -Dlattice-lib=/path/to/latticedb/lib
 ```
 
 ## Repository Layout
 
-- `core/`: Zig runtime, CLI entrypoint, protocol dispatch, storage adapter boundary, in-memory and LatticeDB adapters, deterministic extractor, and core tests.
+- `core/`: Zig runtime, CLI entrypoint, storage adapters, deterministic
+  extraction, retrieval, forgetting, audit streams, and tests.
 - `protocol/`: JSON-RPC schemas and conformance fixtures.
 - `sdk/typescript/`: thin TypeScript SDK and protocol tests.
 - `sdk/python/`: thin Python SDK and protocol tests.
-- `evals/`: synthetic scenario schema, fake baseline, Zig core runner, graders, and tests.
-- `docs/`: implementation notes for API, algorithms, data model, evals, architecture, security, and publication.
 - `mcp/`: dependency-free MCP stdio tool adapter.
+- `evals/`: synthetic scenario schema, fake baseline, Zig core runner, graders,
+  and tests.
+- `docs/`: implementation notes for API, algorithms, data model, evals,
+  architecture, security, and publication.
 - `examples/`: planned integration examples.
 
 ## Protocol
 
-Quipu uses JSON-RPC 2.0 envelopes. The current public methods are:
+Public JSON-RPC methods:
 
 - `system.health`
 - `memory.remember`
@@ -131,7 +236,9 @@ Quipu uses JSON-RPC 2.0 envelopes. The current public methods are:
 - `memory.core.get`
 - `memory.core.update`
 
-See [protocol/README.md](./protocol/README.md), [docs/api.md](./docs/api.md), and [protocol/schemas/methods.schema.json](./protocol/schemas/methods.schema.json) for the implemented contract.
+See [protocol/README.md](./protocol/README.md), [docs/api.md](./docs/api.md),
+and [protocol/schemas/methods.schema.json](./protocol/schemas/methods.schema.json)
+for the implemented contract.
 
 ## License
 
