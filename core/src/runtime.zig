@@ -100,6 +100,11 @@ const SearchMode = enum {
     graph,
 };
 
+const stream_raw_event = "quipu.raw_event";
+const stream_forget_completed = "quipu.forget.completed";
+const stream_feedback_received = "quipu.feedback.received";
+const stream_audit = "quipu.audit";
+
 const CoreBlockResult = struct {
     qid: []const u8,
     blockKey: []const u8,
@@ -345,6 +350,19 @@ pub const Runtime = struct {
             try self.store.putNode(.{ .qid = idem_qid, .label = "Idempotency", .properties_json = idem_props });
         }
 
+        const event_payload = try stringifyAlloc(allocator, .{
+            .method = "memory.remember",
+            .status = "stored",
+            .sessionQid = session_qid,
+            .turnQid = turn_qid,
+            .messageQids = message_qids.items,
+            .queuedJobs = queued_jobs.items,
+            .derivedCount = derived_count,
+        });
+        defer allocator.free(event_payload);
+        try self.publishEvent(stream_raw_event, event_payload);
+        try self.publishEvent(stream_audit, event_payload);
+
         const response = .{
             .jsonrpc = "2.0",
             .id = id,
@@ -551,12 +569,29 @@ pub const Runtime = struct {
 
         const deletion_qid = try self.nextQid(allocator, "del");
         defer allocator.free(deletion_qid);
+        const status = if (dry_run) "planned" else "completed";
+        const event_payload = try stringifyAlloc(allocator, .{
+            .method = "memory.forget",
+            .deletionRequestQid = deletion_qid,
+            .status = status,
+            .dryRun = dry_run,
+            .rootsMatched = roots_matched,
+            .nodesDeleted = nodes_deleted,
+            .nodesRedacted = nodes_redacted,
+            .factsInvalidated = facts_invalidated,
+            .reason = reason,
+            .report = report.items.items,
+        });
+        defer allocator.free(event_payload);
+        try self.publishEvent(stream_forget_completed, event_payload);
+        try self.publishEvent(stream_audit, event_payload);
+
         const response = .{
             .jsonrpc = "2.0",
             .id = id,
             .result = .{
                 .deletionRequestQid = deletion_qid,
-                .status = if (dry_run) "planned" else "completed",
+                .status = status,
                 .dryRun = dry_run,
                 .rootsMatched = roots_matched,
                 .nodesDeleted = nodes_deleted,
@@ -587,6 +622,17 @@ pub const Runtime = struct {
         });
         defer allocator.free(props);
         try self.store.putNode(.{ .qid = feedback_qid, .label = "Feedback", .properties_json = props });
+
+        const event_payload = try stringifyAlloc(allocator, .{
+            .method = "memory.feedback",
+            .status = "stored",
+            .feedbackQid = feedback_qid,
+            .retrievalId = retrieval_id,
+            .rating = rating,
+        });
+        defer allocator.free(event_payload);
+        try self.publishEvent(stream_feedback_received, event_payload);
+        try self.publishEvent(stream_audit, event_payload);
 
         const response = .{
             .jsonrpc = "2.0",
@@ -632,6 +678,16 @@ pub const Runtime = struct {
         });
         defer allocator.free(props);
         try self.store.putNode(.{ .qid = block_qid, .label = "Core", .properties_json = props });
+
+        const event_payload = try stringifyAlloc(allocator, .{
+            .method = "memory.core.update",
+            .status = status,
+            .blockQid = block_qid,
+            .blockKey = block_key,
+            .managedBy = managed_by,
+        });
+        defer allocator.free(event_payload);
+        try self.publishEvent(stream_audit, event_payload);
 
         const response = .{
             .jsonrpc = "2.0",
@@ -706,6 +762,10 @@ pub const Runtime = struct {
             .edge_type = edge_type,
             .properties_json = "{}",
         });
+    }
+
+    fn publishEvent(self: *Runtime, stream: []const u8, payload_json: []const u8) !void {
+        _ = try self.store.appendStream(stream, payload_json);
     }
 
     fn extractFromMessage(
@@ -1614,6 +1674,14 @@ fn freeHits(allocator: std.mem.Allocator, hits: []storage.SearchHit) void {
     allocator.free(hits);
 }
 
+fn freeStreamEntries(allocator: std.mem.Allocator, entries: []storage.StreamEntry) void {
+    for (entries) |entry| {
+        allocator.free(entry.stream);
+        allocator.free(entry.payload_json);
+    }
+    allocator.free(entries);
+}
+
 fn appendMergedHits(allocator: std.mem.Allocator, merged: *std.ArrayList(storage.SearchHit), hits: []const storage.SearchHit) !void {
     for (hits) |hit| {
         if (indexOfHit(merged.items, hit.qid)) |index| {
@@ -1689,6 +1757,33 @@ test "runtime health includes storage capabilities" {
     try std.testing.expect(std.mem.indexOf(u8, health, "\"storage\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, health, "\"backend\":\"memory\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, health, "\"vector\":false") != null);
+}
+
+test "runtime publishes audit stream entries for mutations" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    const adapter = adapter_state.adapter();
+    var runtime = Runtime.init(adapter, protocol.Health.default());
+
+    const remember = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"Audit this memory.\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(remember);
+
+    const feedback = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"f1\",\"method\":\"memory.feedback\",\"params\":{\"retrievalId\":\"q_retr_1\",\"rating\":\"useful\"}}",
+    );
+    defer std.testing.allocator.free(feedback);
+
+    const entries = try adapter.readStream(std.testing.allocator, stream_audit, 0, 10);
+    defer freeStreamEntries(std.testing.allocator, entries);
+
+    try std.testing.expectEqual(@as(usize, 2), entries.len);
+    try std.testing.expect(std.mem.indexOf(u8, entries[0].payload_json, "\"method\":\"memory.remember\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, entries[1].payload_json, "\"method\":\"memory.feedback\"") != null);
 }
 
 test "runtime forget suppresses retrieval" {

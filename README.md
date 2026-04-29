@@ -12,7 +12,7 @@ Implemented now:
 
 - Zig core runtime with `system.health`, `memory.remember`, `memory.search`, `memory.retrieve`, `memory.inspect`, `memory.forget`, `memory.feedback`, `memory.core.get`, and `memory.core.update`.
 - In-memory storage adapter with graph-like nodes/edges, simple full-text search, streams, transaction stubs, and invariant verification.
-- Optional LatticeDB-backed storage adapter for durable node/edge storage, Lattice FTS retrieval, hash-vector indexing/search, adapter-side stream records, persistence across process restarts, and invariant verification.
+- Optional LatticeDB-backed storage adapter for durable node/edge storage, Lattice FTS retrieval, hash-vector indexing/search, native durable streams, persistence across process restarts, and invariant verification.
 - Deterministic extraction for package manager facts, response-style preferences, and test-command procedures, including temporal supersession and evidence links.
 - Retrieval V0 that returns both a rendered prompt and structured context packet, with scope filtering, needs filtering, token budgeting, `validAt`, event windows, warnings, and optional trace output.
 - Forgetting paths for dry-run reports, hard-delete tombstones, redaction state, and invalidation of derived memories backed by forgotten evidence.
@@ -86,9 +86,8 @@ zig build -Denable-lattice=true \
 ./zig-out/bin/quipu --db /tmp/quipu.lattice serve-stdio
 ```
 
-`QUIPU_DB_PATH` can be used instead of `--db`. The adapter currently targets the
-published LatticeDB `0.5.0` C ABI; the upstream source checkout may need its own
-Zig-version-compatible build.
+`QUIPU_DB_PATH` can be used instead of `--db`. The adapter targets the published
+LatticeDB `0.6.0` C ABI so it can use native durable stream APIs.
 
 ## Development
 

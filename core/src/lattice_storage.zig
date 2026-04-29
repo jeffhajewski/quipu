@@ -282,25 +282,13 @@ pub const LatticeAdapter = struct {
 
     fn appendStream(context: *anyopaque, stream: []const u8, payload_json: []const u8) !storage.StreamEntry {
         const self = ctx(context);
-        const sequence = self.next_sequence;
-        self.next_sequence += 1;
-
         const tx = try self.beginWrite();
         errdefer self.rollbackQuiet(tx);
-        const label_z = try self.allocator.dupeZ(u8, "QuipuStreamEntry");
-        defer self.allocator.free(label_z);
-        var node_id: c.lattice_node_id = 0;
-        try check(c.lattice_node_create(tx, label_z.ptr, &node_id));
-        try self.setStringProperty(tx, @intCast(node_id), "recordKind", "stream");
-        try self.setStringProperty(tx, @intCast(node_id), "stream", stream);
-        try self.setIntProperty(tx, @intCast(node_id), "sequence", @intCast(sequence));
-        try self.setStringProperty(tx, @intCast(node_id), "payloadJson", payload_json);
-
-        const index_text = try self.indexText(self.allocator, stream_marker, stream, "", payload_json);
-        defer self.allocator.free(index_text);
-        try check(c.lattice_fts_index(tx, node_id, index_text.ptr, index_text.len));
+        var payload = stringValue(payload_json);
+        try check(c.lattice_stream_publish(tx, stream.ptr, stream.len, "message", "message".len, &payload));
         try check(c.lattice_commit(tx));
 
+        const sequence = try self.latestStreamSequence(stream);
         return .{ .stream = stream, .sequence = sequence, .payload_json = payload_json };
     }
 
@@ -312,9 +300,23 @@ pub const LatticeAdapter = struct {
         limit: usize,
     ) ![]storage.StreamEntry {
         const self = ctx(context);
-        const lattice_hits = try self.searchNodeIds(allocator, stream_marker, 1_000_000);
-        defer allocator.free(lattice_hits);
+        return self.readNativeStream(allocator, stream, after_sequence, limit);
+    }
 
+    fn readNativeStream(
+        self: *LatticeAdapter,
+        allocator: std.mem.Allocator,
+        stream: []const u8,
+        after_sequence: u64,
+        limit: usize,
+    ) ![]storage.StreamEntry {
+        if (limit == 0) return allocator.alloc(storage.StreamEntry, 0);
+        var batch: ?*c.lattice_stream_batch = null;
+        try check(c.lattice_stream_read(self.db, stream.ptr, stream.len, after_sequence, limit, 0, &batch));
+        defer if (batch) |ptr| c.lattice_stream_batch_free(ptr);
+
+        const ptr = batch orelse return allocator.alloc(storage.StreamEntry, 0);
+        const count = c.lattice_stream_batch_count(ptr);
         var entries = std.ArrayList(storage.StreamEntry).empty;
         errdefer {
             for (entries.items) |entry| {
@@ -324,24 +326,40 @@ pub const LatticeAdapter = struct {
             entries.deinit(allocator);
         }
 
-        const tx = try self.beginRead();
-        defer self.rollbackQuiet(tx);
-        for (lattice_hits) |hit| {
-            const stored_stream = (try self.readStringPropertyInTxn(allocator, tx, hit.node_id, "stream")) orelse continue;
-            defer allocator.free(stored_stream);
-            if (!std.mem.eql(u8, stored_stream, stream)) continue;
-            const sequence = (try self.readIntPropertyInTxn(tx, hit.node_id, "sequence")) orelse continue;
-            if (sequence <= after_sequence) continue;
-            const payload = (try self.readStringPropertyInTxn(allocator, tx, hit.node_id, "payloadJson")) orelse continue;
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            var sequence: u64 = 0;
+            var kind_ptr: [*c]const u8 = null;
+            var kind_len: usize = 0;
+            var payload_value: ?*const c.lattice_value = null;
+            try check(c.lattice_stream_batch_get(ptr, index, &sequence, &kind_ptr, &kind_len, &payload_value));
+            const value = payload_value orelse continue;
+            if (value.type != c.LATTICE_VALUE_STRING) return error.InvalidLatticeValue;
+            const string = value.data.string_val;
+            if (string.len > 0 and string.ptr == null) return error.InvalidLatticeValue;
+            const payload = if (string.len == 0)
+                try allocator.dupe(u8, "")
+            else
+                try allocator.dupe(u8, string.ptr[0..string.len]);
             errdefer allocator.free(payload);
             try entries.append(allocator, .{
-                .stream = try allocator.dupe(u8, stored_stream),
-                .sequence = @intCast(sequence),
+                .stream = try allocator.dupe(u8, stream),
+                .sequence = sequence,
                 .payload_json = payload,
             });
-            if (entries.items.len >= limit) break;
         }
         return entries.toOwnedSlice(allocator);
+    }
+
+    fn latestStreamSequence(self: *LatticeAdapter, stream: []const u8) !u64 {
+        const entries = try self.readNativeStream(self.allocator, stream, 0, 1_000_000);
+        defer freeStreamEntries(self.allocator, entries);
+        var sequence: u64 = 0;
+        for (entries) |entry| {
+            sequence = @max(sequence, entry.sequence);
+        }
+        if (sequence == 0) return error.NotFound;
+        return sequence;
     }
 
     fn beginTransaction(context: *anyopaque) !storage.Transaction {
@@ -701,6 +719,34 @@ fn hashEmbed(allocator: std.mem.Allocator, text: []const u8) ![]f32 {
     return try allocator.dupe(f32, vector_ptr[0..dims]);
 }
 
+test "lattice adapter persists stream records" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/stream.lattice", .{tmp.sub_path[0..]});
+    defer std.testing.allocator.free(db_path);
+
+    {
+        var adapter_state = try LatticeAdapter.open(std.testing.allocator, db_path);
+        defer adapter_state.deinit();
+        const adapter = adapter_state.adapter();
+        const entry = try adapter.appendStream("quipu.audit", "{\"method\":\"test\"}");
+        try std.testing.expectEqual(@as(u64, 1), entry.sequence);
+    }
+
+    {
+        var adapter_state = try LatticeAdapter.open(std.testing.allocator, db_path);
+        defer adapter_state.deinit();
+        const adapter = adapter_state.adapter();
+        const entries = try adapter.readStream(std.testing.allocator, "quipu.audit", 0, 10);
+        defer freeStreamEntries(std.testing.allocator, entries);
+
+        try std.testing.expectEqual(@as(usize, 1), entries.len);
+        try std.testing.expectEqual(@as(u64, 1), entries[0].sequence);
+        try std.testing.expectEqualStrings("quipu.audit", entries[0].stream);
+        try std.testing.expectEqualStrings("{\"method\":\"test\"}", entries[0].payload_json);
+    }
+}
+
 fn stringValue(value: []const u8) c.lattice_value {
     return .{
         .type = c.LATTICE_VALUE_STRING,
@@ -759,6 +805,14 @@ fn freeIssues(allocator: std.mem.Allocator, issues: []const storage.Verification
     for (issues) |issue| {
         if (issue.qid) |qid| allocator.free(qid);
     }
+}
+
+fn freeStreamEntries(allocator: std.mem.Allocator, entries: []const storage.StreamEntry) void {
+    for (entries) |entry| {
+        allocator.free(entry.stream);
+        allocator.free(entry.payload_json);
+    }
+    allocator.free(entries);
 }
 
 fn isDerivedLabel(label: []const u8) bool {
