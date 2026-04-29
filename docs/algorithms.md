@@ -7,16 +7,22 @@ See [../SPEC.md](../SPEC.md) for the full design.
 `memory.search` accepts `mode` values of `fts`, `vector`, `hybrid`, and `graph`.
 The in-memory adapter currently serves lexical search only; vector mode returns
 no hits when the active backend does not advertise vector capability. The
-Lattice adapter indexes deterministic `lattice_hash_embed` vectors when nodes
-are written and uses those vectors for `vector` and `hybrid` search. `hybrid`
-merges lexical and vector hits by qid before the runtime applies scope,
-deleted-state, label, and temporal filters.
+Lattice adapter indexes deterministic `lattice_hash_embed` vectors by default,
+or OpenAI-compatible provider embeddings when configured, as nodes are written.
+It embeds vector queries through the same provider and uses Lattice vector
+search for `vector` and `hybrid` modes. `hybrid` merges lexical and vector hits
+by qid before the runtime applies scope, deleted-state, label, and temporal
+filters.
 
 ## Retrieval V0
 
-The current in-memory retrieval path is deterministic and deliberately simple:
+The current retrieval path is deterministic around filtering and context
+construction. Candidate generation uses lexical search by default for in-memory
+and hash-vector stores, and hybrid search by default when the active backend
+advertises a non-hash embedding model. Callers can override this with
+`mode: "fts"`, `"vector"`, `"hybrid"`, or `"graph"`.
 
-1. Search the adapter with lexical full-text matching.
+1. Search the adapter with the selected candidate mode.
 2. Apply scope, deleted-state, temporal validity, and event-window filters.
 3. Optionally add scoped core blocks when `needs` includes `core`.
 4. Filter candidates by requested memory needs.

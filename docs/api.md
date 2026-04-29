@@ -11,6 +11,9 @@ See [../SPEC.md](../SPEC.md) for the full design. This file tracks implemented p
 - `time.validAt` for temporal facts and procedures.
 - `time.eventWindowStart` / `time.eventWindowEnd` for timestamped raw and derived memories.
 - `options.includeDebug` or `options.logTrace` to include a retrieval trace with candidate, kept, and dropped counts.
+- Optional `mode` values `fts`, `vector`, `hybrid`, and `graph`. Retrieval
+  defaults to lexical search unless the active storage backend advertises a
+  non-hash embedding model, in which case it defaults to hybrid search.
 
 The prompt is assembled from the structured context sections, so callers that need typed memory should use `result.context` and callers that need direct model input can use `result.prompt`.
 
@@ -25,6 +28,13 @@ the normal runtime filters.
 `system.health.result.storage` reports backend capability flags, including
 `backend`, `durable`, `fullText`, `vector`, `vectorDimensions`, and
 `embeddingModel`.
+
+Lattice-enabled CLI processes accept storage-level vector flags before the
+command: `--vector-dimensions`, `--page-size`, `--embedding-provider`,
+`--embedding-url`, and `--embedding-model`. The matching environment variables
+are `QUIPU_VECTOR_DIMENSIONS`, `QUIPU_LATTICE_PAGE_SIZE`,
+`QUIPU_EMBEDDING_PROVIDER`, `QUIPU_EMBEDDING_URL`,
+`QUIPU_EMBEDDING_MODEL`, and `QUIPU_EMBEDDING_API_KEY`.
 
 ## Inspection V0
 

@@ -46,6 +46,7 @@ def collect_benchmarks(
     include_ablations: bool = False,
     include_provider_baselines: bool = False,
     provider_options: Mapping[str, Any] | None = None,
+    core_retrieval_mode: str | None = None,
     reuse_existing: bool = False,
 ) -> dict[str, Any]:
     suite_path = Path(suite_path)
@@ -192,14 +193,19 @@ def collect_benchmarks(
         runs.append(
             run_case(
                 "core_in_memory",
-                lambda: run_core_suite(suite_path, storage="memory"),
+                lambda: run_core_suite(suite_path, storage="memory", retrieval_mode=core_retrieval_mode),
                 suite_path=suite_path,
                 output_dir=output_dir,
                 generated_at=generated_at,
                 git_commit=git_commit,
                 runner="quipu_evals.core_runner",
                 storage="memory",
-                config={"suite": str(suite_path), "resultClass": result_class, "externalBenchmark": external_benchmark},
+                config={
+                    "suite": str(suite_path),
+                    "resultClass": result_class,
+                    "externalBenchmark": external_benchmark,
+                    "retrievalMode": core_retrieval_mode,
+                },
                 seed=seed,
                 verification_status=verification_status,
                 reuse_existing=reuse_existing,
@@ -221,6 +227,7 @@ def collect_benchmarks(
                         lattice_lib=lattice_lib,
                         scenario_artifact_dir=output_dir / "core_lattice-scenarios",
                         reuse_existing=reuse_existing,
+                        retrieval_mode=core_retrieval_mode,
                     ),
                     suite_path=suite_path,
                     output_dir=output_dir,
@@ -234,6 +241,7 @@ def collect_benchmarks(
                         "externalBenchmark": external_benchmark,
                         "latticeInclude": lattice_include,
                         "latticeLib": lattice_lib,
+                        "retrievalMode": core_retrieval_mode,
                     },
                     lattice_version=lattice_version(lattice_include, lattice_lib),
                     seed=seed,
@@ -717,6 +725,7 @@ def main() -> int:
     parser.add_argument("--include-baselines", action="store_true")
     parser.add_argument("--include-ablations", action="store_true")
     parser.add_argument("--include-provider-baselines", action="store_true")
+    parser.add_argument("--core-retrieval-mode", choices=["fts", "vector", "hybrid", "graph"], default=os.environ.get("QUIPU_CORE_RETRIEVAL_MODE"))
     parser.add_argument(
         "--provider-embedding-cache",
         type=Path,
@@ -766,6 +775,7 @@ def main() -> int:
         include_ablations=args.include_ablations or result_class == "publishable",
         include_provider_baselines=args.include_provider_baselines,
         provider_options={"embedding_cache": args.provider_embedding_cache},
+        core_retrieval_mode=args.core_retrieval_mode,
         reuse_existing=args.reuse_existing,
         locomo_options={
             "max_conversations": args.locomo_max_conversations,

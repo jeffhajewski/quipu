@@ -59,8 +59,8 @@ Quipu currently supports:
   summaries backed by forgotten evidence.
 - `memory.feedback` and `memory.core.*` for retrieval feedback and user-managed
   core memory blocks.
-- Native LatticeDB-backed persistence with graph nodes/edges, FTS, hash-vector
-  search, and durable streams.
+- Native LatticeDB-backed persistence with graph nodes/edges, FTS,
+  configurable hash or OpenAI-compatible vector search, and durable streams.
 - Durable stream events can be materialized into idempotent `Job` nodes for
   extraction, consolidation, forgetting, retrieval logging, and feedback work.
 - Python and TypeScript SDKs that validate JSON-RPC shape and talk to a local
@@ -112,9 +112,10 @@ Current external benchmark status:
   core Lattice answer-containment exact match 28.55%, evidence recall 58.27%,
   with reports under `artifacts/benchmarks/locomo-core-lattice-raw-fast-full/`.
 - Same-suite provider semantic baselines using OpenRouter
-  `openai/text-embedding-3-small`: vector RAG exact 25.28%, evidence recall
-  57.90%; hybrid BM25/vector exact 26.64%, evidence recall 58.07%, with
-  reports under `artifacts/benchmarks/locomo-full-openrouter-semantic/`.
+  `openai/text-embedding-3-small` at the provider default dimensionality:
+  vector RAG exact 25.28%, evidence recall 57.90%; hybrid BM25/vector exact
+  26.64%, evidence recall 58.07%, with reports under
+  `artifacts/benchmarks/locomo-full-openrouter-semantic/`.
 - Local BM25 on the same normalized suite: exact 24.12%, evidence recall
   50.42%. Full context remains the local upper bound at exact 42.80% and
   evidence recall 99.70%.
@@ -146,6 +147,23 @@ Check the store:
 quipu --db "$HOME/.quipu/memory.lattice" health
 quipu --db "$HOME/.quipu/memory.lattice" verify
 ```
+
+Provider-backed vector search can be enabled in the Lattice adapter with an
+OpenAI-compatible embeddings endpoint:
+
+```bash
+export OPENROUTER_API_KEY=...
+QUIPU_EMBEDDING_PROVIDER=openrouter \
+  quipu --db "$HOME/.quipu/memory.lattice" \
+  remember --project repo:quipu --text "The launch code is heliotrope."
+```
+
+With LatticeDB `0.6.0`, Quipu requests 768-dimensional
+`openai/text-embedding-3-small` vectors by default for the core Lattice adapter.
+The installed LatticeDB header exposes configurable `vector_dimensions`, but
+local smoke tests show commits fail with `LatticeIo` at `1017` dimensions and
+above. Full 1536-dimensional OpenAI embeddings should be re-enabled after that
+LatticeDB persistence issue is fixed.
 
 Use the CLI directly:
 
@@ -233,8 +251,8 @@ full-text search, vector search, streams, transactions, and verification.
 
 The LatticeDB adapter stores Quipu nodes as durable graph nodes with public qids,
 creates provenance edges, indexes text with Lattice FTS, stores deterministic
-`lattice_hash_embed` vectors for search, and publishes events through Lattice
-native durable streams.
+`lattice_hash_embed` or OpenAI-compatible provider vectors for search, and
+publishes events through Lattice native durable streams.
 
 ## Current Status
 
@@ -263,7 +281,7 @@ Still in progress:
 - Long-running socket or HTTP daemon.
 - Release artifacts for Quipu itself.
 - Full migration runner and compatibility checks.
-- Provider-backed embeddings, BM25/reranking, and learned scoring.
+- Reranking and learned scoring.
 - LLM-backed extraction and consolidation workers.
 - Provider-backed answer/judge scoring for LoCoMo publication.
 - LongMemEval and MemoryAgentBench adapters.
@@ -298,6 +316,7 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --include-ablations \
   --include-lattice \
   --require-lattice \
+  --core-retrieval-mode hybrid \
   --allow-failures \
   --markdown artifacts/benchmarks/locomo-full/report.md
 PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \

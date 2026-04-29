@@ -19,9 +19,18 @@ in properties, creates real Lattice edges for provenance when endpoints exist,
 keeps shadow edge records for adapter verification, and publishes Quipu events
 through Lattice native durable streams.
 It uses Lattice FTS for lexical retrieval, stores deterministic
-`lattice_hash_embed` vectors on Quipu nodes, exposes Lattice vector search for
-`memory.search`, and adds adapter-side token aggregation so the current
+`lattice_hash_embed` vectors or OpenAI-compatible provider embeddings on Quipu
+nodes, exposes Lattice vector search for `memory.search`, and adds adapter-side
+token aggregation so the current
 natural-language retrieval semantics match the in-memory adapter.
+
+The LatticeDB 0.6 C ABI exposes `lattice_open_options.vector_dimensions`, and
+the CLI accepts `--vector-dimensions`, `--embedding-provider`,
+`--embedding-url`, and `--embedding-model`. Current local smoke tests show
+LatticeDB 0.6 commits fail with `LatticeIo` at `1017` persisted dimensions and
+above, even when the page size is increased. For OpenRouter, Quipu therefore
+defaults the core adapter to 768-dimensional `openai/text-embedding-3-small`
+embeddings until the large-vector persistence issue is fixed.
 
 `system.health` reports the active storage backend and capability flags so SDKs,
 evals, and operators can tell whether durable storage and vector search are

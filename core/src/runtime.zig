@@ -561,12 +561,15 @@ pub const Runtime = struct {
         const include_trace = if (options) |opts| (boolField(&opts, "includeDebug") orelse false) or (boolField(&opts, "logTrace") orelse false) else false;
         const log_retrieval = if (options) |opts| boolField(&opts, "logRetrieval") orelse (boolField(&opts, "logTrace") orelse true) else true;
         const log_audit = if (options) |opts| boolField(&opts, "logAudit") orelse true else true;
+        const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
+            return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
+        };
 
         const raw_only = needsCount(needs_value) == 1 and needsIncludes(needs_value, "raw");
-        var results = if (raw_only)
+        var results = if (raw_only and retrieve_mode == .fts)
             try self.collectRawLexicalItems(allocator, query, 40, scope, event_window, include_evidence)
         else
-            try self.collectItems(allocator, query, .fts, 40, scope, false, null, valid_at, event_window, include_evidence);
+            try self.collectItems(allocator, query, retrieve_mode, 40, scope, false, null, valid_at, event_window, include_evidence);
         defer results.deinit();
         if (needsIncludes(needs_value, "core")) {
             try self.appendCoreItems(allocator, &results, scope, include_evidence);
@@ -602,10 +605,7 @@ pub const Runtime = struct {
             .query = query,
             .requestedNeedsCount = needsCount(needs_value),
             .budgetTokens = budget,
-            .candidateSources = .{
-                .fts = candidate_count,
-                .core = context.core.items.len,
-            },
+            .candidateSources = retrievalCandidateSources(retrieve_mode, candidate_count, context.core.items.len),
             .candidateCount = candidate_count,
             .keptCount = results.items.items.len,
             .droppedForNeeds = dropped_for_needs,
@@ -2001,6 +2001,25 @@ fn parseSearchMode(value: ?[]const u8) ?SearchMode {
     if (std.mem.eql(u8, mode, "hybrid")) return .hybrid;
     if (std.mem.eql(u8, mode, "graph")) return .graph;
     return null;
+}
+
+fn parseRetrieveMode(value: ?[]const u8, capabilities: storage.Capabilities) ?SearchMode {
+    if (value) |mode| return parseSearchMode(mode);
+    if (capabilities.vector and capabilities.embedding_model != null and !std.mem.eql(u8, capabilities.embedding_model.?, "lattice_hash_embed")) {
+        return .hybrid;
+    }
+    return .fts;
+}
+
+fn retrievalCandidateSources(mode: SearchMode, candidate_count: usize, core_count: usize) CandidateSources {
+    var sources = CandidateSources{ .core = core_count };
+    switch (mode) {
+        .fts => sources.fts = candidate_count,
+        .vector => sources.vector = candidate_count,
+        .hybrid => sources.hybrid = candidate_count,
+        .graph => sources.graph = candidate_count,
+    }
+    return sources;
 }
 
 fn storageHealth(capabilities: storage.Capabilities) protocol.StorageHealth {

@@ -8,9 +8,21 @@ const runtime_mod = @import("runtime.zig");
 const schema = @import("schema.zig");
 const storage = @import("storage.zig");
 
+const LatticeOptions = if (build_options.enable_lattice) lattice_storage.Options else struct {};
+const LatticeEmbeddingProviderKind = if (build_options.enable_lattice) lattice_storage.EmbeddingProviderKind else enum {
+    hash,
+    openai_compatible,
+};
+const default_openrouter_lattice_dimensions: u16 = 768;
+
 const RuntimeConfig = struct {
     command_index: usize = 1,
     db_path: ?[]const u8 = null,
+    page_size: ?u32 = null,
+    vector_dimensions: ?u16 = null,
+    embedding_provider: ?[]const u8 = null,
+    embedding_url: ?[]const u8 = null,
+    embedding_model: ?[]const u8 = null,
 };
 
 const MaterializeCliArgs = struct {
@@ -62,6 +74,7 @@ const RememberCliArgs = struct {
 
 const RetrieveCliArgs = struct {
     query: ?[]const u8 = null,
+    mode: ?[]const u8 = null,
     budget_tokens: i64 = 1200,
     include_debug: bool = false,
     include_evidence: bool = true,
@@ -118,7 +131,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (build_options.enable_lattice and config.db_path != null) {
-        var adapter_state = try lattice_storage.LatticeAdapter.open(allocator, config.db_path.?);
+        const lattice_options = try latticeOptionsFromConfig(init.io, init.environ_map, config);
+        var adapter_state = try lattice_storage.LatticeAdapter.open(allocator, config.db_path.?, lattice_options);
         defer adapter_state.deinit();
         try schema.ensure(allocator, adapter_state.adapter());
         var health = protocol.Health.default();
@@ -150,9 +164,135 @@ fn parseRuntimeConfig(args: []const [:0]const u8) RuntimeConfig {
             config.command_index += 1;
             break;
         }
+        if (std.mem.eql(u8, arg, "--vector-dimensions")) {
+            if (config.command_index + 1 < args.len) {
+                config.vector_dimensions = std.fmt.parseInt(u16, args[config.command_index + 1], 10) catch null;
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--page-size")) {
+            if (config.command_index + 1 < args.len) {
+                config.page_size = std.fmt.parseInt(u32, args[config.command_index + 1], 10) catch null;
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--embedding-provider")) {
+            if (config.command_index + 1 < args.len) {
+                config.embedding_provider = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--embedding-url")) {
+            if (config.command_index + 1 < args.len) {
+                config.embedding_url = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--embedding-model")) {
+            if (config.command_index + 1 < args.len) {
+                config.embedding_model = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
         break;
     }
     return config;
+}
+
+fn latticeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, config: RuntimeConfig) !LatticeOptions {
+    if (comptime !build_options.enable_lattice) {
+        return .{};
+    }
+    const provider_name = config.embedding_provider orelse environ_map.get("QUIPU_EMBEDDING_PROVIDER") orelse "hash";
+    const provider = try parseEmbeddingProvider(provider_name);
+    const vector_dimensions = config.vector_dimensions orelse
+        envU16(environ_map, "QUIPU_VECTOR_DIMENSIONS") orelse
+        envU16(environ_map, "OPENROUTER_EMBEDDING_DIMENSIONS") orelse
+        if (provider == .openai_compatible and isProviderName(provider_name, "openrouter")) default_openrouter_lattice_dimensions else @as(u16, 128);
+    const requested_page_size = config.page_size orelse
+        envU32(environ_map, "QUIPU_LATTICE_PAGE_SIZE") orelse
+        @as(u32, 4096);
+    const page_size = normalizePageSize(@max(requested_page_size, pageSizeForVectorDimensions(vector_dimensions)));
+    const embedding_model = config.embedding_model orelse
+        environ_map.get("QUIPU_EMBEDDING_MODEL") orelse
+        environ_map.get("OPENROUTER_EMBEDDING_MODEL") orelse
+        if (provider == .openai_compatible and isProviderName(provider_name, "openrouter"))
+            "openai/text-embedding-3-small"
+        else
+            "lattice_hash_embed";
+    const embedding_url = config.embedding_url orelse
+        environ_map.get("QUIPU_EMBEDDING_URL") orelse
+        environ_map.get("OPENROUTER_EMBEDDING_URL") orelse
+        "https://openrouter.ai/api/v1/embeddings";
+    const embedding_api_key = environ_map.get("QUIPU_EMBEDDING_API_KEY") orelse environ_map.get("OPENROUTER_API_KEY");
+    if (provider == .openai_compatible and isProviderName(provider_name, "openrouter") and embedding_api_key == null) {
+        return error.MissingOpenRouterApiKey;
+    }
+    return .{
+        .io = io,
+        .page_size = page_size,
+        .vector_dimensions = vector_dimensions,
+        .embedding_provider = provider,
+        .embedding_url = embedding_url,
+        .embedding_model = embedding_model,
+        .embedding_api_key = embedding_api_key,
+        .embedding_request_dimensions = provider == .openai_compatible and
+            (isProviderName(provider_name, "openrouter") or isProviderName(provider_name, "openai")),
+    };
+}
+
+fn parseEmbeddingProvider(provider: []const u8) !LatticeEmbeddingProviderKind {
+    if (isProviderName(provider, "hash") or isProviderName(provider, "lattice_hash_embed")) return .hash;
+    if (isProviderName(provider, "openrouter") or
+        isProviderName(provider, "openai") or
+        isProviderName(provider, "openai-compatible") or
+        isProviderName(provider, "http"))
+    {
+        return .openai_compatible;
+    }
+    return error.InvalidEmbeddingProvider;
+}
+
+fn isProviderName(actual: []const u8, expected: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(actual, expected);
+}
+
+fn envU16(environ_map: *std.process.Environ.Map, key: []const u8) ?u16 {
+    const value = environ_map.get(key) orelse return null;
+    return std.fmt.parseInt(u16, value, 10) catch null;
+}
+
+fn envU32(environ_map: *std.process.Environ.Map, key: []const u8) ?u32 {
+    const value = environ_map.get(key) orelse return null;
+    return std.fmt.parseInt(u32, value, 10) catch null;
+}
+
+fn pageSizeForVectorDimensions(dimensions: u16) u32 {
+    const vector_bytes = @as(u32, dimensions) * @sizeOf(f32);
+    return normalizePageSize(vector_bytes + 1024);
+}
+
+fn normalizePageSize(minimum: u32) u32 {
+    var page_size: u32 = 4096;
+    while (page_size < minimum) {
+        page_size *= 2;
+    }
+    return page_size;
 }
 
 fn runCommand(
@@ -403,7 +543,7 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter] [--embedding-url URL] [--embedding-model MODEL] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
@@ -577,12 +717,13 @@ fn buildRetrieveRequest(allocator: std.mem.Allocator, args: []const [:0]const u8
         .jsonrpc = "2.0",
         .id = "cli_retrieve",
         .method = "memory.retrieve",
-        .params = .{
-            .query = query,
-            .scope = parsed.scope.json(),
-            .budgetTokens = parsed.budget_tokens,
-            .needs = parsed.needs.items,
-            .options = .{
+            .params = .{
+                .query = query,
+                .mode = parsed.mode,
+                .scope = parsed.scope.json(),
+                .budgetTokens = parsed.budget_tokens,
+                .needs = parsed.needs.items,
+                .options = .{
                 .includeEvidence = parsed.include_evidence,
                 .includeDebug = parsed.include_debug,
                 .logTrace = parsed.include_debug,
@@ -694,6 +835,8 @@ fn parseRetrieveArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !
         const arg = args[index];
         if (std.mem.eql(u8, arg, "--query")) {
             parsed.query = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--mode")) {
+            parsed.mode = try nextArg(args, &index);
         } else if (std.mem.eql(u8, arg, "--budget-tokens")) {
             parsed.budget_tokens = try std.fmt.parseInt(i64, try nextArg(args, &index), 10);
         } else if (std.mem.eql(u8, arg, "--need")) {

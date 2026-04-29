@@ -47,6 +47,13 @@ answerer/judge in its public runner. Quipu defaults the OpenRouter embedding
 model to `openai/text-embedding-3-small` so semantic retrieval can be compared
 against BM25 under the same local harness metrics.
 
+The eval-layer semantic baselines use the provider's returned dimensionality.
+The core Lattice adapter is more constrained today: with LatticeDB `0.6.0`,
+persisted vectors store successfully through `1016` dimensions and fail at
+`1017+`, so OpenRouter-backed core runs request 768-dimensional
+`openai/text-embedding-3-small` vectors until the LatticeDB large-vector
+persistence issue is fixed.
+
 ```bash
 export OPENROUTER_API_KEY=...
 PYTHONPATH=evals/src python3 -m quipu_evals.runner \
@@ -55,6 +62,11 @@ PYTHONPATH=evals/src python3 -m quipu_evals.runner \
   --embedding-provider openrouter \
   --embedding-cache artifacts/provider-cache/openrouter-embeddings.jsonl
 ```
+
+Core benchmark runs can force the runtime retrieval path with
+`--core-retrieval-mode fts|vector|hybrid|graph`. When `QUIPU_EMBEDDING_PROVIDER`
+is set to `openrouter`, the core runtime defaults `memory.retrieve` to hybrid
+search; without a provider, it defaults to lexical search.
 
 Optional LLM answer and judge hooks are also wired through OpenRouter:
 

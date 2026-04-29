@@ -118,6 +118,7 @@ def run_core_suite(
     skip_verification: bool = False,
     log_retrieval: bool = True,
     extract: bool = True,
+    retrieval_mode: str | None = None,
 ) -> CoreSuiteRun:
     ensure_core_binary(storage=storage, lattice_include=lattice_include, lattice_lib=lattice_lib)
     suite = load_suite(path)
@@ -148,6 +149,7 @@ def run_core_suite(
             skip_verification=skip_verification,
             log_retrieval=log_retrieval,
             extract=extract,
+            retrieval_mode=retrieval_mode,
         )
         query_runs.extend(scenario_query_runs)
         forget_runs.extend(scenario_forget_runs)
@@ -171,6 +173,7 @@ def run_core_scenario(
     skip_verification: bool = False,
     log_retrieval: bool = True,
     extract: bool = True,
+    retrieval_mode: str | None = None,
 ) -> tuple[list[CoreQueryRun], list[CoreForgetRun], Mapping[str, Any] | None]:
     extra_args = ["--db", str(db_path)] if db_path is not None else []
     with CoreStdioClient(CORE_BINARY, extra_args=extra_args) as client:
@@ -187,6 +190,7 @@ def run_core_scenario(
                 event_to_message_qids,
                 retrieval_needs=retrieval_needs,
                 log_retrieval=log_retrieval,
+                retrieval_mode=retrieval_mode,
             )
             for query in scenario.queries
         ]
@@ -207,7 +211,10 @@ def run_core_scenario(
             )
             visible_texts = []
             for text in op.expected_not_retrievable_text:
-                retrieved = client.call("memory.retrieve", {"query": text, "scope": {}})
+                params: dict[str, Any] = {"query": text, "scope": {}}
+                if retrieval_mode is not None:
+                    params["mode"] = retrieval_mode
+                retrieved = client.call("memory.retrieve", params)
                 visible_texts.append(str(retrieved["prompt"]))
             grade = grade_deletion_leakage(visible_texts, op.expected_not_retrievable_text)
             forget_runs.append(
@@ -334,6 +341,7 @@ def run_query(
     *,
     retrieval_needs: list[str] | None = None,
     log_retrieval: bool = True,
+    retrieval_mode: str | None = None,
 ) -> CoreQueryRun:
     params = {
         "query": query.query,
@@ -343,6 +351,8 @@ def run_query(
     }
     if retrieval_needs is not None:
         params["needs"] = retrieval_needs
+    if retrieval_mode is not None:
+        params["mode"] = retrieval_mode
     retrieved = client.call(
         "memory.retrieve",
         params,
@@ -459,6 +469,7 @@ def main() -> int:
     parser.add_argument("--skip-verification", action="store_true", help="Skip per-scenario core DB verification")
     parser.add_argument("--no-retrieval-log", action="store_true", help="Do not write retrieval/audit stream entries during queries")
     parser.add_argument("--no-extract", action="store_true", help="Replay raw messages without synchronous extraction")
+    parser.add_argument("--retrieval-mode", choices=["fts", "vector", "hybrid", "graph"], default=os.environ.get("QUIPU_CORE_RETRIEVAL_MODE"))
     args = parser.parse_args()
 
     if args.storage == "lattice":
@@ -473,6 +484,7 @@ def main() -> int:
                 skip_verification=args.skip_verification,
                 log_retrieval=not args.no_retrieval_log,
                 extract=not args.no_extract,
+                retrieval_mode=args.retrieval_mode,
             )
         else:
             with tempfile.TemporaryDirectory(prefix="quipu-lattice-eval-") as directory:
@@ -485,9 +497,10 @@ def main() -> int:
                     skip_verification=args.skip_verification,
                     log_retrieval=not args.no_retrieval_log,
                     extract=not args.no_extract,
+                    retrieval_mode=args.retrieval_mode,
                 )
     else:
-        run = run_core_suite(args.suite)
+        run = run_core_suite(args.suite, retrieval_mode=args.retrieval_mode)
     run_json = run.to_json()
     if args.output:
         write_json(args.output, run_json)

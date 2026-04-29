@@ -8,8 +8,27 @@ const c = @cImport({
 const node_marker = "quipunodeall";
 const edge_marker = "quipuedgeall";
 const stream_marker = "quipustreamall";
-const vector_dimensions: u16 = 128;
-const embedding_model = "lattice_hash_embed";
+const default_page_size: u32 = 4096;
+const default_vector_dimensions: u16 = 128;
+const default_embedding_model = "lattice_hash_embed";
+const default_openrouter_embedding_url = "https://openrouter.ai/api/v1/embeddings";
+const default_openrouter_embedding_model = "openai/text-embedding-3-small";
+
+pub const EmbeddingProviderKind = enum {
+    hash,
+    openai_compatible,
+};
+
+pub const Options = struct {
+    io: std.Io,
+    page_size: u32 = default_page_size,
+    vector_dimensions: u16 = default_vector_dimensions,
+    embedding_provider: EmbeddingProviderKind = .hash,
+    embedding_url: []const u8 = default_openrouter_embedding_url,
+    embedding_model: []const u8 = default_embedding_model,
+    embedding_api_key: ?[]const u8 = null,
+    embedding_request_dimensions: bool = false,
+};
 
 const NodeIndex = struct {
     node_id: u64,
@@ -27,17 +46,34 @@ const LatticeHit = struct {
 
 pub const LatticeAdapter = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     db: ?*c.lattice_database,
     path: []u8,
     qid_to_node: std.StringHashMap(NodeIndex),
+    page_size: u32,
+    vector_dimensions: u16,
+    embedding_provider: EmbeddingProviderKind,
+    embedding_url: [:0]u8,
+    embedding_model: [:0]u8,
+    embedding_api_key: ?[:0]u8,
+    embedding_request_dimensions: bool,
     next_tx_id: u64 = 1,
     next_sequence: u64 = 1,
     next_runtime_id: u64 = 1,
 
-    pub fn open(allocator: std.mem.Allocator, path: []const u8) !LatticeAdapter {
+    pub fn open(allocator: std.mem.Allocator, path: []const u8, options: Options) !LatticeAdapter {
         const owned_path = try allocator.dupe(u8, path);
         var owned_path_transferred = false;
         errdefer if (!owned_path_transferred) allocator.free(owned_path);
+        const owned_embedding_url = try allocator.dupeZ(u8, options.embedding_url);
+        var owned_embedding_url_transferred = false;
+        errdefer if (!owned_embedding_url_transferred) allocator.free(owned_embedding_url);
+        const owned_embedding_model = try allocator.dupeZ(u8, options.embedding_model);
+        var owned_embedding_model_transferred = false;
+        errdefer if (!owned_embedding_model_transferred) allocator.free(owned_embedding_model);
+        const owned_embedding_api_key = if (options.embedding_api_key) |api_key| try allocator.dupeZ(u8, api_key) else null;
+        var owned_embedding_api_key_transferred = false;
+        errdefer if (!owned_embedding_api_key_transferred) if (owned_embedding_api_key) |api_key| allocator.free(api_key);
 
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
@@ -46,20 +82,31 @@ pub const LatticeAdapter = struct {
             .create = true,
             .read_only = false,
             .cache_size_mb = 100,
-            .page_size = 4096,
+            .page_size = options.page_size,
             .enable_vector = true,
-            .vector_dimensions = vector_dimensions,
+            .vector_dimensions = options.vector_dimensions,
         };
         var db: ?*c.lattice_database = null;
         try check(c.lattice_open(path_z.ptr, &opts, &db));
 
         var self = LatticeAdapter{
             .allocator = allocator,
+            .io = options.io,
             .db = db,
             .path = owned_path,
             .qid_to_node = std.StringHashMap(NodeIndex).init(allocator),
+            .page_size = options.page_size,
+            .vector_dimensions = options.vector_dimensions,
+            .embedding_provider = options.embedding_provider,
+            .embedding_url = owned_embedding_url,
+            .embedding_model = owned_embedding_model,
+            .embedding_api_key = owned_embedding_api_key,
+            .embedding_request_dimensions = options.embedding_request_dimensions,
         };
         owned_path_transferred = true;
+        owned_embedding_url_transferred = true;
+        owned_embedding_model_transferred = true;
+        owned_embedding_api_key_transferred = true;
         errdefer self.deinit();
         try self.loadIndexes();
         return self;
@@ -77,6 +124,9 @@ pub const LatticeAdapter = struct {
             self.db = null;
         }
         self.allocator.free(self.path);
+        self.allocator.free(self.embedding_url);
+        self.allocator.free(self.embedding_model);
+        if (self.embedding_api_key) |api_key| self.allocator.free(api_key);
     }
 
     pub fn adapter(self: *LatticeAdapter) storage.Adapter {
@@ -96,7 +146,8 @@ pub const LatticeAdapter = struct {
         return @max(self.next_runtime_id, 1);
     }
 
-    fn capabilities(_: *anyopaque) storage.Capabilities {
+    fn capabilities(context: *anyopaque) storage.Capabilities {
+        const self = ctx(context);
         return .{
             .backend = "lattice",
             .durable = true,
@@ -105,8 +156,8 @@ pub const LatticeAdapter = struct {
             .streams = true,
             .transactions = true,
             .verification = true,
-            .vector_dimensions = vector_dimensions,
-            .embedding_model = embedding_model,
+            .vector_dimensions = self.vector_dimensions,
+            .embedding_model = self.embedding_model,
         };
     }
 
@@ -166,7 +217,9 @@ pub const LatticeAdapter = struct {
         const index_text = try self.indexText(self.allocator, node_marker, node.qid, node.label, searchable_properties);
         defer self.allocator.free(index_text);
         try check(c.lattice_fts_index(tx, @intCast(node_id), index_text.ptr, index_text.len));
-        try self.setNodeVector(tx, node_id, index_text);
+        if (!isInternalLabel(node.label)) {
+            try self.setNodeVector(tx, node_id, index_text);
+        }
         try check(c.lattice_commit(tx));
 
         try self.indexNode(node.qid, node_id, node.label);
@@ -279,8 +332,9 @@ pub const LatticeAdapter = struct {
         return hits.toOwnedSlice(allocator);
     }
 
-    fn embedText(_: *anyopaque, allocator: std.mem.Allocator, text: []const u8) ![]f32 {
-        return hashEmbed(allocator, text);
+    fn embedText(context: *anyopaque, allocator: std.mem.Allocator, text: []const u8) ![]f32 {
+        const self = ctx(context);
+        return self.embed(allocator, text);
     }
 
     fn appendStream(context: *anyopaque, stream: []const u8, payload_json: []const u8) !storage.StreamEntry {
@@ -565,10 +619,58 @@ pub const LatticeAdapter = struct {
     }
 
     fn setNodeVector(self: *LatticeAdapter, tx: *c.lattice_txn, node_id: u64, text: []const u8) !void {
-        const vector = try hashEmbed(self.allocator, text);
+        const vector = try self.embed(self.allocator, text);
         defer self.allocator.free(vector);
         if (vector.len == 0) return;
         try check(c.lattice_node_set_vector(tx, @intCast(node_id), "embedding", vector.ptr, @intCast(vector.len)));
+    }
+
+    fn embed(self: *LatticeAdapter, allocator: std.mem.Allocator, text: []const u8) ![]f32 {
+        return switch (self.embedding_provider) {
+            .hash => hashEmbed(allocator, text, self.vector_dimensions),
+            .openai_compatible => try self.openAiCompatibleEmbed(allocator, text),
+        };
+    }
+
+    fn openAiCompatibleEmbed(self: *LatticeAdapter, allocator: std.mem.Allocator, text: []const u8) ![]f32 {
+        const request_body = if (self.embedding_request_dimensions)
+            try stringifyAlloc(allocator, .{
+                .model = self.embedding_model,
+                .input = text,
+                .dimensions = self.vector_dimensions,
+            })
+        else
+            try stringifyAlloc(allocator, .{
+                .model = self.embedding_model,
+                .input = text,
+            });
+        defer allocator.free(request_body);
+
+        const authorization = if (self.embedding_api_key) |api_key|
+            try std.fmt.allocPrint(allocator, "Bearer {s}", .{api_key})
+        else
+            null;
+        defer if (authorization) |value| allocator.free(value);
+
+        var client = std.http.Client{ .allocator = allocator, .io = self.io };
+        defer client.deinit();
+        var response_body: std.Io.Writer.Allocating = .init(allocator);
+        defer response_body.deinit();
+        const result = try client.fetch(.{
+            .location = .{ .url = self.embedding_url },
+            .method = .POST,
+            .payload = request_body,
+            .response_writer = &response_body.writer,
+            .headers = .{
+                .authorization = if (authorization) |value| .{ .override = value } else .omit,
+                .content_type = .{ .override = "application/json" },
+                .user_agent = .{ .override = "quipu/0.1.0" },
+            },
+        });
+        if (result.status.class() != .success) return error.EmbeddingProviderRequestFailed;
+        const response = try response_body.toOwnedSlice();
+        defer allocator.free(response);
+        return parseEmbeddingResponse(allocator, response, self.vector_dimensions);
     }
 
     fn readStringPropertyInTxn(
@@ -713,13 +815,55 @@ pub const LatticeAdapter = struct {
     };
 };
 
-fn hashEmbed(allocator: std.mem.Allocator, text: []const u8) ![]f32 {
+fn hashEmbed(allocator: std.mem.Allocator, text: []const u8, dimensions: u16) ![]f32 {
     var vector_ptr: [*c]f32 = null;
     var dims: u32 = 0;
-    try check(c.lattice_hash_embed(text.ptr, text.len, vector_dimensions, &vector_ptr, &dims));
+    try check(c.lattice_hash_embed(text.ptr, text.len, dimensions, &vector_ptr, &dims));
     defer if (vector_ptr != null) c.lattice_hash_embed_free(vector_ptr, dims);
     if (vector_ptr == null or dims == 0) return allocator.alloc(f32, 0);
     return try allocator.dupe(f32, vector_ptr[0..dims]);
+}
+
+fn parseEmbeddingResponse(allocator: std.mem.Allocator, response: []const u8, expected_dimensions: u16) ![]f32 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.InvalidEmbeddingResponse,
+    };
+    const data_value = root.get("data") orelse return error.InvalidEmbeddingResponse;
+    const data = switch (data_value) {
+        .array => |array| array,
+        else => return error.InvalidEmbeddingResponse,
+    };
+    if (data.items.len == 0) return error.InvalidEmbeddingResponse;
+    const first = switch (data.items[0]) {
+        .object => |object| object,
+        else => return error.InvalidEmbeddingResponse,
+    };
+    const embedding_value = first.get("embedding") orelse return error.InvalidEmbeddingResponse;
+    const embedding = switch (embedding_value) {
+        .array => |array| array,
+        else => return error.InvalidEmbeddingResponse,
+    };
+    if (embedding.items.len != expected_dimensions) return error.InvalidEmbeddingDimensions;
+    const vector = try allocator.alloc(f32, embedding.items.len);
+    errdefer allocator.free(vector);
+    for (embedding.items, 0..) |value, index| {
+        vector[index] = switch (value) {
+            .float => |float| @floatCast(float),
+            .integer => |integer| @floatFromInt(integer),
+            else => return error.InvalidEmbeddingResponse,
+        };
+    }
+    return vector;
+}
+
+fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    errdefer writer.deinit();
+    try std.json.Stringify.value(value, .{}, &writer.writer);
+    return writer.toOwnedSlice();
 }
 
 test "lattice adapter persists stream records" {
@@ -729,7 +873,7 @@ test "lattice adapter persists stream records" {
     defer std.testing.allocator.free(db_path);
 
     {
-        var adapter_state = try LatticeAdapter.open(std.testing.allocator, db_path);
+        var adapter_state = try LatticeAdapter.open(std.testing.allocator, db_path, .{ .io = std.testing.io });
         defer adapter_state.deinit();
         const adapter = adapter_state.adapter();
         const entry = try adapter.appendStream("quipu.audit", "{\"method\":\"test\"}");
@@ -737,7 +881,7 @@ test "lattice adapter persists stream records" {
     }
 
     {
-        var adapter_state = try LatticeAdapter.open(std.testing.allocator, db_path);
+        var adapter_state = try LatticeAdapter.open(std.testing.allocator, db_path, .{ .io = std.testing.io });
         defer adapter_state.deinit();
         const adapter = adapter_state.adapter();
         const entries = try adapter.readStream(std.testing.allocator, "quipu.audit", 0, 10);
@@ -781,8 +925,19 @@ fn indexOfQid(hits: []const storage.SearchHit, qid: []const u8) ?usize {
 fn check(rc: c.lattice_error) !void {
     if (rc == c.LATTICE_OK) return;
     return switch (rc) {
+        c.LATTICE_ERROR => error.LatticeFailure,
+        c.LATTICE_ERROR_IO => error.LatticeIo,
+        c.LATTICE_ERROR_CORRUPTION => error.LatticeCorruption,
         c.LATTICE_ERROR_NOT_FOUND => error.NotFound,
+        c.LATTICE_ERROR_ALREADY_EXISTS => error.AlreadyExists,
         c.LATTICE_ERROR_INVALID_ARG => error.InvalidRequest,
+        c.LATTICE_ERROR_TXN_ABORTED => error.TransactionAborted,
+        c.LATTICE_ERROR_LOCK_TIMEOUT => error.LockTimeout,
+        c.LATTICE_ERROR_READ_ONLY => error.ReadOnly,
+        c.LATTICE_ERROR_FULL => error.LatticeFull,
+        c.LATTICE_ERROR_VERSION_MISMATCH => error.VersionMismatch,
+        c.LATTICE_ERROR_CHECKSUM => error.ChecksumFailure,
+        c.LATTICE_ERROR_OUT_OF_MEMORY => error.OutOfMemory,
         c.LATTICE_ERROR_UNSUPPORTED => error.Unsupported,
         else => error.LatticeFailure,
     };

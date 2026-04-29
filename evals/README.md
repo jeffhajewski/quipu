@@ -95,6 +95,10 @@ or `LATTICE_LIB_PATH`. They return successfully after producing artifacts even
 when benchmark answers fail; failed answers are benchmark results, not harness
 errors.
 
+Set `QUIPU_CORE_RETRIEVAL_MODE=hybrid` or pass `--core-retrieval-mode hybrid`
+to force the core runtime benchmark through semantic+lexical retrieval. With
+`QUIPU_EMBEDDING_PROVIDER=openrouter`, the runtime defaults to hybrid retrieval.
+
 ## Planned External Adapters
 
 - LoCoMo full dataset adapter and baselines
