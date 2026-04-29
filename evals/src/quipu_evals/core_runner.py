@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Mapping
+from typing import Any, Mapping
 
 from .artifacts import build_manifest, write_json
 from .core_client import CoreStdioClient
@@ -38,6 +38,7 @@ class CoreQueryRun:
     actual_answer: str
     evidence_event_ids: list[str]
     grades: list[GradeResult]
+    trace: Mapping[str, Any] | None = None
 
     @property
     def passed(self) -> bool:
@@ -64,6 +65,7 @@ class CoreSuiteRun:
     baseline: str
     query_runs: list[CoreQueryRun]
     forget_runs: list[CoreForgetRun]
+    verification_runs: list[Mapping[str, Any]]
 
     @property
     def passed(self) -> bool:
@@ -78,6 +80,7 @@ class CoreSuiteRun:
             "passed": self.passed,
             "queries": [query_run_to_json(run) for run in self.query_runs],
             "forgetOps": [forget_run_to_json(run) for run in self.forget_runs],
+            "verification": summarize_verification(self.verification_runs),
             "metrics": {
                 "queriesPassed": sum(1 for run in self.query_runs if run.passed),
                 "queriesTotal": len(self.query_runs),
@@ -96,6 +99,13 @@ def _all_grades(run: CoreSuiteRun):
         yield forget.grade
 
 
+def summarize_verification(verification_runs: list[Mapping[str, Any]]) -> dict[str, object]:
+    if not verification_runs:
+        return {"status": "not_run", "runs": []}
+    passed = all(run.get("status") == "ok" for run in verification_runs)
+    return {"status": "passed" if passed else "failed", "runs": verification_runs}
+
+
 def run_core_suite(
     path: str | Path,
     *,
@@ -108,20 +118,33 @@ def run_core_suite(
     suite = load_suite(path)
     query_runs: list[CoreQueryRun] = []
     forget_runs: list[CoreForgetRun] = []
+    verification_runs: list[Mapping[str, Any]] = []
     for scenario in suite.scenarios:
         db_path = None
         if storage == "lattice":
             if db_dir is None:
                 raise ValueError("db_dir is required for lattice storage")
             db_path = db_dir / f"{scenario.scenario_id}.lattice"
-        scenario_query_runs, scenario_forget_runs = run_core_scenario(scenario, db_path=db_path)
+        retrieval_needs = ["raw"] if suite.metadata.get("benchmark") == "locomo" else None
+        scenario_query_runs, scenario_forget_runs, scenario_verification = run_core_scenario(
+            scenario,
+            db_path=db_path,
+            retrieval_needs=retrieval_needs,
+        )
         query_runs.extend(scenario_query_runs)
         forget_runs.extend(scenario_forget_runs)
+        if scenario_verification is not None:
+            verification_runs.append(scenario_verification)
     baseline = "core_lattice" if storage == "lattice" else "core_in_memory"
-    return CoreSuiteRun(suite.name, suite.version, baseline, query_runs, forget_runs)
+    return CoreSuiteRun(suite.name, suite.version, baseline, query_runs, forget_runs, verification_runs)
 
 
-def run_core_scenario(scenario: Scenario, *, db_path: Path | None = None) -> tuple[list[CoreQueryRun], list[CoreForgetRun]]:
+def run_core_scenario(
+    scenario: Scenario,
+    *,
+    db_path: Path | None = None,
+    retrieval_needs: list[str] | None = None,
+) -> tuple[list[CoreQueryRun], list[CoreForgetRun], Mapping[str, Any] | None]:
     extra_args = ["--db", str(db_path)] if db_path is not None else []
     with CoreStdioClient(CORE_BINARY, extra_args=extra_args) as client:
         event_to_message_qids: dict[str, list[str]] = {}
@@ -129,7 +152,10 @@ def run_core_scenario(scenario: Scenario, *, db_path: Path | None = None) -> tup
             remembered = remember_event(client, event)
             event_to_message_qids[event.event_id] = list(remembered["messageQids"])
 
-        query_runs = [run_query(client, scenario.scenario_id, query, event_to_message_qids) for query in scenario.queries]
+        query_runs = [
+            run_query(client, scenario.scenario_id, query, event_to_message_qids, retrieval_needs=retrieval_needs)
+            for query in scenario.queries
+        ]
 
         forget_runs = []
         for op in scenario.forget_ops:
@@ -160,7 +186,33 @@ def run_core_scenario(scenario: Scenario, *, db_path: Path | None = None) -> tup
                 )
             )
 
-        return query_runs, forget_runs
+    verification = verify_db(db_path, scenario.scenario_id) if db_path is not None else None
+    return query_runs, forget_runs, verification
+
+
+def verify_db(db_path: Path, scenario_id: str) -> Mapping[str, Any]:
+    completed = subprocess.run(
+        [str(CORE_BINARY), "--db", str(db_path), "verify", "all"],
+        cwd=str(ROOT),
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        payload = {
+            "status": "failed",
+            "checks": ["all"],
+            "issueCount": 1,
+            "issues": [{"code": "verify_command_failed", "message": completed.stderr.strip()}],
+        }
+    return {
+        "scenarioId": scenario_id,
+        "exitCode": completed.returncode,
+        **payload,
+    }
 
 
 def remember_event(client: CoreStdioClient, event: Event) -> Mapping[str, object]:
@@ -185,15 +237,20 @@ def run_query(
     scenario_id: str,
     query: Query,
     event_to_message_qids: Mapping[str, list[str]],
+    *,
+    retrieval_needs: list[str] | None = None,
 ) -> CoreQueryRun:
+    params = {
+        "query": query.query,
+        "scope": query.scope,
+        "time": {"validAt": query.time},
+        "options": {"includeEvidence": True, "includeDebug": True, "logTrace": True},
+    }
+    if retrieval_needs is not None:
+        params["needs"] = retrieval_needs
     retrieved = client.call(
         "memory.retrieve",
-        {
-            "query": query.query,
-            "scope": query.scope,
-            "time": {"validAt": query.time},
-            "options": {"includeEvidence": True},
-        },
+        params,
     )
     prompt = str(retrieved["prompt"])
     actual_answer = answer_from_prompt(prompt, query.expected_answer)
@@ -211,6 +268,7 @@ def run_query(
         actual_answer=actual_answer,
         evidence_event_ids=evidence_event_ids,
         grades=grades,
+        trace=retrieved.get("trace") if isinstance(retrieved.get("trace"), Mapping) else None,
     )
 
 
@@ -278,6 +336,7 @@ def query_run_to_json(run: CoreQueryRun) -> dict[str, object]:
         "actualAnswer": run.actual_answer,
         "evidenceEventIds": run.evidence_event_ids,
         "grades": [asdict(grade) for grade in run.grades],
+        "trace": dict(run.trace) if run.trace is not None else None,
     }
 
 

@@ -428,6 +428,21 @@ fn defaultDbPath(allocator: std.mem.Allocator, home: ?[]const u8) !?[]const u8 {
 
 fn ensureParentDir(io: std.Io, path: []const u8) !void {
     const parent = std.fs.path.dirname(path) orelse return;
+    if (std.fs.path.isAbsolute(parent)) {
+        var existing = std.Io.Dir.openDirAbsolute(io, parent, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                if (std.mem.eql(u8, parent, std.fs.path.sep_str)) return;
+                var root = try std.Io.Dir.openDirAbsolute(io, std.fs.path.sep_str, .{});
+                defer root.close(io);
+                const relative = std.mem.trimStart(u8, parent, std.fs.path.sep_str);
+                try root.createDirPath(io, relative);
+                return;
+            },
+            else => return err,
+        };
+        existing.close(io);
+        return;
+    }
     try std.Io.Dir.cwd().createDirPath(io, parent);
 }
 

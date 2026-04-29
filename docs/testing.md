@@ -36,6 +36,17 @@ just benchmark-locomo-smoke
 This writes ignored artifacts under `artifacts/benchmarks/locomo-smoke/` and
 keeps the report marked `external_smoke`, not `publishable`.
 
+Real LoCoMo adapter smoke against one conversation and five questions:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
+  /path/to/locomo10.json \
+  --external-benchmark locomo \
+  --locomo-max-conversations 1 \
+  --locomo-max-questions 5 \
+  --allow-failures
+```
+
 Optional LatticeDB-backed eval smoke:
 
 ```bash

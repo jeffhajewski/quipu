@@ -31,10 +31,12 @@ def build_manifest(
     providers: Mapping[str, str] | None = None,
     seed: int = 0,
     verification_status: str = "not_run",
+    extra_artifacts: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     artifacts: dict[str, str] = {}
     if results_path is not None:
         artifacts["results"] = str(results_path)
+    artifacts.update(dict(extra_artifacts or {}))
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     config_payload = dict(config or {})
     return {

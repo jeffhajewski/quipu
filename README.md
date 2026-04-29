@@ -256,6 +256,14 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
 PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --external-benchmark locomo \
   --markdown artifacts/benchmarks/locomo-smoke/report.md
+PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
+  /path/to/locomo10.json \
+  --external-benchmark locomo \
+  --result-class publishable \
+  --include-lattice \
+  --require-lattice \
+  --allow-failures \
+  --markdown artifacts/benchmarks/locomo-full/report.md
 PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
   --strict \
   --output artifacts/evals/core-results.json \

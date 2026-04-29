@@ -14,7 +14,8 @@ from typing import Any, Callable, Mapping
 from .artifacts import build_manifest, write_json
 from .baselines import registry_json
 from .core_runner import CORE_BINARY, lattice_lib_from_env, run_core_suite
-from .external import DEFAULT_EXTERNAL_SUITES, external_suite_metadata, load_external_suite
+from .external import DEFAULT_EXTERNAL_SUITES, external_suite_metadata, is_normalized_external_suite, load_external_suite
+from .locomo import download_locomo, load_locomo_suite, write_suite
 from .readiness import evaluate_readiness
 from .runner import run_suite
 from .scenarios import load_suite
@@ -37,13 +38,11 @@ def collect_benchmarks(
     verification_status: str = "not_run",
     include_core: bool = True,
     require_core: bool = False,
+    locomo_options: Mapping[str, Any] | None = None,
+    require_lattice: bool = False,
 ) -> dict[str, Any]:
     suite_path = Path(suite_path)
-    suite = (
-        load_external_suite(suite_path, benchmark=external_benchmark)
-        if external_benchmark
-        else load_suite(suite_path)
-    )
+    suite_path, suite = prepare_suite(suite_path, output_dir, external_benchmark, locomo_options or {})
     dataset = external_suite_metadata(suite) if external_benchmark else {
         "format": "quipu.synthetic.scenario.v1",
         "benchmark": "synthetic",
@@ -55,6 +54,11 @@ def collect_benchmarks(
     }
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if require_lattice and not include_lattice:
+        raise RuntimeError("publishable LatticeDB run requires --include-lattice")
+    lattice_available = include_lattice and bool(lattice_include) and bool(lattice_lib)
+    if include_lattice and require_lattice and not lattice_available:
+        raise RuntimeError("publishable LatticeDB run requires --lattice-include and --lattice-lib or LATTICE_* env vars")
 
     git_commit = current_git_commit()
     generated_at = now_iso()
@@ -96,7 +100,6 @@ def collect_benchmarks(
     elif include_core:
         skipped_runs.append({"name": "core_in_memory", "reason": "zig is not installed"})
 
-    lattice_available = include_lattice and bool(lattice_include) and bool(lattice_lib)
     if lattice_available and (core_available or require_core):
         with tempfile.TemporaryDirectory(prefix="quipu-bench-lattice-") as db_dir:
             runs.append(
@@ -130,6 +133,7 @@ def collect_benchmarks(
     elif include_lattice and not core_available:
         skipped_runs.append({"name": "core_lattice", "reason": "zig is not installed"})
 
+    report_verification = aggregate_verification(runs, verification_status)
     report = {
         "schemaVersion": "quipu.benchmark.report.v1",
         "generatedAt": generated_at,
@@ -141,13 +145,60 @@ def collect_benchmarks(
         "suite": str(suite_path),
         "latticeRequested": include_lattice,
         "latticeIncluded": any(run.get("storage") == "lattice" for run in runs),
-        "verification": {"status": verification_status},
+        "verification": report_verification,
         "baselineRegistry": registry_json(),
+        "traceArtifacts": [
+            run.get("artifacts", {}).get("traces")
+            for run in runs
+            if isinstance(run.get("artifacts", {}), Mapping) and run.get("artifacts", {}).get("traces")
+        ],
         "runs": runs,
         "skippedRuns": skipped_runs,
     }
     report["benchmarkReadiness"] = evaluate_readiness(report)
     return report
+
+
+def prepare_suite(
+    suite_path: Path,
+    output_dir: str | Path,
+    external_benchmark: str | None,
+    locomo_options: Mapping[str, Any],
+) -> tuple[Path, Any]:
+    if external_benchmark != "locomo":
+        return suite_path, load_suite(suite_path)
+    if is_normalized_external_suite(suite_path):
+        return suite_path, load_external_suite(suite_path, benchmark="locomo")
+
+    suite = load_locomo_suite(
+        suite_path,
+        max_conversations=_optional_int(locomo_options.get("max_conversations")),
+        max_questions_per_conversation=_optional_int(locomo_options.get("max_questions_per_conversation")),
+        include_categories=locomo_options.get("include_categories"),
+        include_event_summaries=bool(locomo_options.get("include_event_summaries", False)),
+    )
+    normalized_path = Path(output_dir) / "normalized-locomo-suite.json"
+    write_suite(normalized_path, suite)
+    return normalized_path, suite
+
+
+def aggregate_verification(runs: list[Mapping[str, Any]], default: str) -> dict[str, Any]:
+    verification_runs = [
+        run.get("verification")
+        for run in runs
+        if isinstance(run.get("verification"), Mapping) and run.get("verification", {}).get("status") != "not_run"
+    ]
+    if verification_runs:
+        passed = any(item.get("status") == "passed" for item in verification_runs if isinstance(item, Mapping))
+        failed = any(item.get("status") == "failed" for item in verification_runs if isinstance(item, Mapping))
+        if failed:
+            status = "failed"
+        elif passed:
+            status = "passed"
+        else:
+            status = default
+        return {"status": status, "runs": verification_runs}
+    return {"status": default}
 
 
 def run_case(
@@ -169,8 +220,15 @@ def run_case(
     run = fn()
     duration_ms = (time.perf_counter() - started) * 1000
     run_json = run.to_json()
+    case_verification_status = _verification_status(run_json, verification_status)
     results_path = output_dir / f"{slug}-results.json"
     manifest_path = output_dir / f"{slug}-manifest.json"
+    extra_artifacts: dict[str, str] = {}
+    traces = trace_payload(run_json)
+    if traces:
+        trace_path = output_dir / f"{slug}-traces.json"
+        write_json(trace_path, {"schemaVersion": "quipu.retrieval_traces.v1", "baseline": slug, "traces": traces})
+        extra_artifacts["traces"] = str(trace_path)
     write_json(results_path, run_json)
     manifest = build_manifest(
         run_json,
@@ -183,7 +241,8 @@ def run_case(
         lattice_version=lattice_version,
         duration_ms=round(duration_ms, 3),
         seed=seed,
-        verification_status=verification_status,
+        verification_status=case_verification_status,
+        extra_artifacts=extra_artifacts,
     )
     manifest["generatedAt"] = generated_at
     write_json(manifest_path, manifest)
@@ -195,11 +254,39 @@ def run_case(
         "metrics": run_json.get("metrics", {}),
         "durationMs": round(duration_ms, 3),
         "latticeVersion": lattice_version,
+        "verification": run_json.get("verification", {"status": case_verification_status}),
         "artifacts": {
             "results": str(results_path),
             "manifest": str(manifest_path),
+            **extra_artifacts,
         },
     }
+
+
+def trace_payload(run_json: Mapping[str, Any]) -> list[dict[str, Any]]:
+    traces = []
+    for query in run_json.get("queries", []):
+        if not isinstance(query, Mapping):
+            continue
+        trace = query.get("trace")
+        if isinstance(trace, Mapping):
+            traces.append(
+                {
+                    "scenarioId": query.get("scenarioId"),
+                    "queryId": query.get("queryId"),
+                    "trace": trace,
+                }
+            )
+    return traces
+
+
+def _verification_status(run_json: Mapping[str, Any], default: str) -> str:
+    verification = run_json.get("verification")
+    if isinstance(verification, Mapping):
+        status = verification.get("status")
+        if isinstance(status, str):
+            return status
+    return default
 
 
 def render_markdown(report: Mapping[str, Any]) -> str:
@@ -298,6 +385,12 @@ def _mapping_get(value: object, key: str, default: str) -> str:
     return default
 
 
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
 def current_git_commit() -> str | None:
     try:
         completed = subprocess.run(
@@ -374,11 +467,28 @@ def main() -> int:
     parser.add_argument("--verification-status", default="not_run")
     parser.add_argument("--skip-core", action="store_true")
     parser.add_argument("--require-core", action="store_true")
+    parser.add_argument("--require-lattice", action="store_true")
+    parser.add_argument("--download-locomo", action="store_true")
+    parser.add_argument("--dataset-cache", type=Path, default=Path(os.environ.get("QUIPU_DATASET_CACHE", ".quipu-datasets")))
+    parser.add_argument("--locomo-max-conversations", type=int)
+    parser.add_argument("--locomo-max-questions", type=int)
+    parser.add_argument(
+        "--locomo-categories",
+        default="1,2,3,4,5",
+        help="Comma-separated LoCoMo category numbers to include",
+    )
+    parser.add_argument("--locomo-event-summaries", action="store_true")
+    parser.add_argument("--allow-failures", action="store_true")
     args = parser.parse_args()
+    if args.download_locomo and args.external_benchmark != "locomo":
+        parser.error("--download-locomo requires --external-benchmark locomo")
     result_class = args.result_class or ("external_smoke" if args.external_benchmark else "synthetic_smoke")
+    downloaded_suite = download_locomo(args.dataset_cache) if args.download_locomo else None
     suite_path = (
         Path(args.suite)
         if args.suite
+        else downloaded_suite
+        if downloaded_suite is not None
         else DEFAULT_EXTERNAL_SUITES[args.external_benchmark]
         if args.external_benchmark
         else DEFAULT_SUITE
@@ -396,13 +506,32 @@ def main() -> int:
         verification_status=args.verification_status,
         include_core=not args.skip_core,
         require_core=args.require_core or result_class == "publishable",
+        require_lattice=args.require_lattice or result_class == "publishable",
+        locomo_options={
+            "max_conversations": args.locomo_max_conversations,
+            "max_questions_per_conversation": args.locomo_max_questions,
+            "include_categories": parse_category_list(args.locomo_categories),
+            "include_event_summaries": args.locomo_event_summaries,
+        },
     )
     write_json(args.report, report)
     if args.markdown:
         args.markdown.parent.mkdir(parents=True, exist_ok=True)
         args.markdown.write_text(render_markdown(report))
     print(json.dumps(report, indent=2, sort_keys=True))
+    if args.allow_failures or result_class == "publishable":
+        return 0
     return 0 if all(run.get("passed") for run in report["runs"]) else 1
+
+
+def parse_category_list(value: str) -> list[int]:
+    categories = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        categories.append(int(item))
+    return categories
 
 
 if __name__ == "__main__":

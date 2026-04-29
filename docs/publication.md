@@ -24,7 +24,9 @@ items block publication.
 ## Current Status
 
 LoCoMo has the first external smoke fixture at
-`evals/suites/external/locomo_mini.yaml`. It validates the normalized external
-scenario format and artifact path, but it is not a LoCoMo result.
+`evals/suites/external/locomo_mini.yaml`. The harness can also normalize the
+real upstream `locomo10.json` file and run it through the core runner with trace
+artifacts. A full report still remains blocked on configured LatticeDB runs,
+provider-backed answer/judge scoring, and the required baseline/ablation set.
 
 LongMemEval and MemoryAgentBench remain planned adapters.

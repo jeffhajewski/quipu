@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import json
 
 from .scenarios import Suite, load_suite
 
@@ -17,6 +18,17 @@ def load_external_suite(path: str | Path, *, benchmark: str | None = None) -> Su
     suite = load_suite(path)
     validate_external_suite(suite, benchmark=benchmark)
     return suite
+
+
+def is_normalized_external_suite(path: str | Path) -> bool:
+    try:
+        raw = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    metadata = raw.get("metadata", {})
+    return isinstance(metadata, dict) and metadata.get("format") == EXTERNAL_SCENARIO_FORMAT
 
 
 def validate_external_suite(suite: Suite, *, benchmark: str | None = None) -> None:

@@ -78,6 +78,23 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
 This validates the external scenario format and artifact pipeline without model
 keys. It is not a publishable LoCoMo benchmark result.
 
+Run a local copy of the real SNAP LoCoMo file:
+
+```bash
+just benchmark-locomo-full /path/to/locomo10.json
+```
+
+Or let the harness download `data/locomo10.json` into the ignored dataset cache:
+
+```bash
+just benchmark-locomo-download
+```
+
+Full runs require LatticeDB paths through `LATTICE_INCLUDE` and `LATTICE_LIB_DIR`
+or `LATTICE_LIB_PATH`. They return successfully after producing artifacts even
+when benchmark answers fail; failed answers are benchmark results, not harness
+errors.
+
 ## Planned External Adapters
 
 - LoCoMo full dataset adapter and baselines

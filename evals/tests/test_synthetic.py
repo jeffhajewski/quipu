@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+import json
 from pathlib import Path
 import os
 import shutil
@@ -17,6 +18,7 @@ from quipu_evals.core_runner import run_core_suite  # noqa: E402
 from quipu_evals.artifacts import build_manifest  # noqa: E402
 from quipu_evals.benchmarks import collect_benchmarks, render_markdown  # noqa: E402
 from quipu_evals.external import load_external_suite  # noqa: E402
+from quipu_evals.locomo import load_locomo_suite, write_suite  # noqa: E402
 from quipu_evals import load_suite, run_suite  # noqa: E402
 
 
@@ -111,6 +113,49 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertEqual(len(run.query_runs), 5)
         self.assertEqual(len(run.forget_runs), 1)
         self.assertEqual(run.to_json()["metrics"]["answer"]["exactMatch"], 1.0)
+
+    def test_converts_real_locomo_shape_to_external_suite(self):
+        with tempfile.TemporaryDirectory(prefix="quipu-locomo-shape-") as directory:
+            dataset = Path(directory) / "locomo10.json"
+            dataset.write_text(
+                json.dumps(
+                    [
+                        {
+                            "sample_id": "conv-test",
+                            "conversation": {
+                                "speaker_a": "Avery",
+                                "speaker_b": "Blake",
+                                "session_1_date_time": "1:56 pm on 8 May, 2023",
+                                "session_1": [
+                                    {"speaker": "Avery", "dia_id": "D1:1", "text": "I adopted a cat named Pixel."},
+                                    {"speaker": "Blake", "dia_id": "D1:2", "text": "Pixel sounds lovely."},
+                                ],
+                            },
+                            "qa": [
+                                {
+                                    "question": "What is Avery's cat named?",
+                                    "answer": "Pixel",
+                                    "evidence": ["D1:1"],
+                                    "category": 1,
+                                }
+                            ],
+                            "event_summary": {
+                                "events_session_1": {"Avery": ["Avery adopted Pixel."], "Blake": [], "date": "8 May, 2023"}
+                            },
+                        }
+                    ]
+                )
+            )
+            suite = load_locomo_suite(dataset, include_event_summaries=True)
+            normalized = Path(directory) / "normalized.json"
+            write_suite(normalized, suite)
+            loaded = load_external_suite(normalized, benchmark="locomo")
+
+        self.assertEqual(loaded.name, "locomo")
+        self.assertEqual(len(loaded.scenarios), 1)
+        self.assertEqual(len(loaded.scenarios[0].events), 2)
+        self.assertEqual(loaded.scenarios[0].queries[0].expected_answer, "Pixel")
+        self.assertEqual(loaded.scenarios[0].queries[1].category, "event_summary")
 
     def test_external_smoke_report_marks_not_publishable(self):
         report = collect_benchmarks(

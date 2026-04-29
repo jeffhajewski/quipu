@@ -93,3 +93,33 @@ gate without requiring external model keys. It is not a LoCoMo score.
 Full LoCoMo runs should use `--result-class publishable`, a real dataset path,
 LatticeDB enabled, provider configuration, verification status, and generated
 trace artifacts. LongMemEval and MemoryAgentBench remain next adapters.
+
+## Real LoCoMo Dataset
+
+Quipu can normalize the upstream SNAP LoCoMo `data/locomo10.json` file directly:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
+  /path/to/locomo10.json \
+  --external-benchmark locomo \
+  --result-class publishable \
+  --include-lattice \
+  --require-lattice \
+  --allow-failures \
+  --markdown artifacts/benchmarks/locomo-full/report.md
+```
+
+For a quick backend check against the real file without a full run:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
+  /path/to/locomo10.json \
+  --external-benchmark locomo \
+  --locomo-max-conversations 1 \
+  --locomo-max-questions 5 \
+  --allow-failures
+```
+
+The normalizer writes `normalized-locomo-suite.json` into the benchmark artifact
+directory. Dataset downloads and caches belong under `QUIPU_DATASET_CACHE`,
+`.quipu-datasets/`, or another ignored local path.

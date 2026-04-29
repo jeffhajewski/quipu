@@ -37,7 +37,10 @@ benchmark-locomo-smoke:
     PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --output-dir artifacts/benchmarks/locomo-smoke --report artifacts/benchmarks/locomo-smoke/report.json --markdown artifacts/benchmarks/locomo-smoke/report.md
 
 benchmark-locomo-full dataset:
-    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks {{dataset}} --result-class publishable --external-benchmark locomo --include-lattice --markdown artifacts/benchmarks/locomo-full/report.md
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks {{dataset}} --result-class publishable --external-benchmark locomo --include-lattice --require-lattice --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
+
+benchmark-locomo-download:
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --download-locomo --result-class publishable --include-lattice --require-lattice --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
 
 benchmark-external-all: benchmark-locomo-smoke
 

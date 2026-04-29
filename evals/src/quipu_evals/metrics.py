@@ -23,9 +23,10 @@ def metric_groups(grades: Iterable[GradeResult]) -> dict[str, dict[str, float]]:
 
     retrieval: dict[str, float] = {}
     if by_name["evidence_ids"]:
-        retrieval["evidenceRecall"] = _pass_rate(by_name["evidence_ids"])
+        retrieval["evidenceRecall"] = _mean_evidence_recall(by_name["evidence_ids"])
+        retrieval["recallAtK"] = retrieval["evidenceRecall"]
     if by_name["forbidden_evidence"]:
-        retrieval["evidencePrecision"] = _pass_rate(by_name["forbidden_evidence"])
+        retrieval["evidencePrecision"] = _mean_evidence_precision(by_name["evidence_ids"])
         retrieval["staleMemoryRate"] = _fail_rate(by_name["forbidden_evidence"])
     if by_name["scope_leakage"]:
         retrieval["scopePrecision"] = _pass_rate(by_name["scope_leakage"])
@@ -58,3 +59,32 @@ def _fail_rate(grades: list[GradeResult]) -> float:
     if not grades:
         return 0.0
     return sum(1 for grade in grades if not grade.passed) / len(grades)
+
+
+def _mean_evidence_recall(grades: list[GradeResult]) -> float:
+    values = []
+    for grade in grades:
+        expected = set(_string_list(grade.details.get("expected")))
+        actual = set(_string_list(grade.details.get("actual")))
+        if not expected:
+            continue
+        values.append(len(expected & actual) / len(expected))
+    return sum(values) / len(values) if values else 0.0
+
+
+def _mean_evidence_precision(grades: list[GradeResult]) -> float:
+    values = []
+    for grade in grades:
+        expected = set(_string_list(grade.details.get("expected")))
+        actual = set(_string_list(grade.details.get("actual")))
+        if not actual:
+            values.append(0.0 if expected else 1.0)
+            continue
+        values.append(len(expected & actual) / len(actual))
+    return sum(values) / len(values) if values else 0.0
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
