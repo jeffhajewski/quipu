@@ -19,6 +19,7 @@ from quipu_evals.artifacts import build_manifest  # noqa: E402
 from quipu_evals.benchmarks import collect_benchmarks, render_markdown  # noqa: E402
 from quipu_evals.external import load_external_suite  # noqa: E402
 from quipu_evals.locomo import load_locomo_suite, write_suite  # noqa: E402
+from quipu_evals.readiness import evaluate_readiness  # noqa: E402
 from quipu_evals import load_suite, run_suite  # noqa: E402
 
 
@@ -171,6 +172,33 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertEqual(report["benchmarkReadiness"]["status"], "not_ready")
         self.assertIn("External Smoke Benchmark Results", markdown)
         self.assertIn("not publishable", markdown)
+
+    def test_readiness_counts_lattice_storage_runs_separately_from_accuracy(self):
+        readiness = evaluate_readiness(
+            {
+                "externalBenchmark": "locomo",
+                "gitCommit": "abc123",
+                "traceArtifacts": ["core_lattice-traces.json"],
+                "verification": {"status": "passed"},
+                "runs": [
+                    {
+                        "baseline": "core_lattice",
+                        "storage": "lattice",
+                        "passed": False,
+                        "metrics": {
+                            "answer": {"exactMatch": 0.0},
+                            "grades": {"exact_answer": {"passed": 0, "total": 1}},
+                        },
+                        "artifacts": {"manifest": "core_lattice-manifest.json"},
+                    }
+                ],
+            }
+        )
+        lattice_requirement = next(
+            item for item in readiness["requirements"] if item["id"] == "lattice_storage"
+        )
+        self.assertTrue(lattice_requirement["passed"])
+        self.assertEqual(readiness["status"], "not_ready")
 
     @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
     def test_core_stdio_remember_retrieve_forget_smoke(self):

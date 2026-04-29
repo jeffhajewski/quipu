@@ -527,19 +527,33 @@ pub const Runtime = struct {
             .scoreBreakdowns = score_breakdowns,
         };
 
+        const item_qids = try allocator.alloc([]const u8, results.items.items.len);
+        defer allocator.free(item_qids);
+        for (results.items.items, 0..) |item, index| {
+            item_qids[index] = item.qid;
+        }
+
         const event_payload = try stringifyAlloc(allocator, .{
             .method = "memory.retrieve",
             .retrievalId = retrieval_id,
             .query = query,
             .itemCount = results.items.items.len,
-            .items = results.items.items,
+            .itemQids = item_qids,
             .tokenEstimate = token_estimate,
             .warnings = warnings.items,
-            .trace = trace,
+            .traceLogged = include_trace,
         });
         defer allocator.free(event_payload);
-        _ = try self.publishEvent(streams.retrieval_logged, event_payload);
-        _ = try self.publishEvent(streams.audit, event_payload);
+        if (self.publishEvent(streams.retrieval_logged, event_payload)) |_| {} else |_| {
+            if (!containsWarning(warnings.items, "retrieval_stream_write_failed")) {
+                try warnings.append(allocator, "retrieval_stream_write_failed");
+            }
+        }
+        if (self.publishEvent(streams.audit, event_payload)) |_| {} else |_| {
+            if (!containsWarning(warnings.items, "retrieval_stream_write_failed")) {
+                try warnings.append(allocator, "retrieval_stream_write_failed");
+            }
+        }
 
         const response = .{
             .jsonrpc = "2.0",

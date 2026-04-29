@@ -69,6 +69,9 @@ Quipu currently supports:
   workflow prompts for tool-calling hosts.
 - Synthetic evals that check temporal truth, cross-scope leakage, evidence
   faithfulness, forgetting leakage, and emit run manifests.
+- External benchmark readiness gates, LoCoMo smoke fixtures, a real LoCoMo
+  `locomo10.json` normalizer, retrieval trace artifacts, and reproducible
+  benchmark manifests.
 
 ## Current Benchmark Snapshot
 
@@ -97,6 +100,9 @@ Current external smoke:
 - LoCoMo mini fixture: covers single-hop, multi-hop, temporal, adversarial,
   event-summary, and forgetting paths. This validates the harness, not LoCoMo
   performance.
+- Real LoCoMo adapter: normalizes the upstream SNAP `locomo10.json` shape into
+  Quipu scenarios and can run local Q0/core benchmark passes with artifacts.
+  These runs are development outputs until the publishable gate passes.
 
 ## Try It
 
@@ -228,6 +234,9 @@ Implemented:
 - Python/TypeScript `local` helpers that auto-start the core over stdio.
 - MCP tools, resources, and prompts.
 - Synthetic eval harness, strict core eval baseline, and run manifests.
+- External benchmark readiness gate, LoCoMo mini smoke fixture, real LoCoMo
+  dataset normalizer, retrieval trace artifacts, and `just` targets for LoCoMo
+  smoke/full/download runs.
 
 Still in progress:
 
@@ -236,7 +245,9 @@ Still in progress:
 - Full migration runner and compatibility checks.
 - Provider-backed embeddings, BM25/reranking, and learned scoring.
 - LLM-backed extraction and consolidation workers.
-- Richer host integrations and external benchmark adapters.
+- Full LoCoMo baseline/ablation matrix and provider-backed answer/judge scoring.
+- LongMemEval and MemoryAgentBench adapters.
+- Richer host integrations.
 
 ## Development
 
@@ -268,6 +279,9 @@ PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
   --strict \
   --output artifacts/evals/core-results.json \
   --manifest artifacts/evals/core-manifest.json
+just benchmark-locomo-smoke
+just benchmark-locomo-full /path/to/locomo10.json
+just benchmark-locomo-download
 ```
 
 Build with an explicit LatticeDB release:
@@ -288,7 +302,8 @@ zig build -Denable-lattice=true \
 - `sdk/python/`: thin Python SDK and protocol tests.
 - `mcp/`: dependency-free MCP stdio adapter with tools, resources, and prompts.
 - `evals/`: synthetic scenario schema, fake baseline, Zig core runner, graders,
-  external smoke fixtures, run manifests, readiness gates, and tests.
+  external smoke fixtures, real LoCoMo normalizer, run manifests, readiness
+  gates, trace artifacts, and tests.
 - `docs/`: implementation notes for API, algorithms, data model, evals,
   architecture, security, and publication.
 - `examples/`: planned integration examples.

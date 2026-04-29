@@ -26,7 +26,12 @@ def evaluate_readiness(report: Mapping[str, Any]) -> dict[str, Any]:
     checks = {
         "external_dataset_adapter": bool(report.get("externalBenchmark")),
         "replay_into_daemon": any(run.get("storage") in {"memory", "lattice"} for run in runs),
-        "lattice_storage": any(run.get("storage") == "lattice" and run.get("passed") for run in runs),
+        "lattice_storage": any(
+            run.get("storage") == "lattice"
+            and "error" not in run
+            and isinstance(run.get("metrics"), Mapping)
+            for run in runs
+        ),
         "retrieval_traces": bool(report.get("traceArtifacts")),
         "answer_generation": any(_has_answer_metrics(run) for run in runs),
         "grading": any(_has_grade_metrics(run) for run in runs),
