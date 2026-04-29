@@ -32,3 +32,15 @@ the normal runtime filters.
 derived memories, and stream-backed audit records that mention the inspected
 qid. Audit records currently expose the stream name, sequence, and raw JSON
 payload.
+
+## Forgetting V0
+
+`memory.forget` accepts explicit `selector.qids` and query-based selectors with
+`selector.query`, `selector.scope`, and `selector.timeWindow`. Dry runs return
+the same closure report without mutating storage.
+
+When propagation is enabled, forgetting a raw evidence node tombstones derived
+facts, preferences, procedures, memory cards, episodes, and any core summaries
+compiled from those nodes. The result reports matched roots, deleted or redacted
+roots, invalidated fact-like memories, contaminated summaries, and per-node
+actions in `report`.

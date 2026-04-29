@@ -270,6 +270,8 @@ def _validate_forget(params: Mapping[str, Any]) -> None:
         raise QuipuProtocolError("mode is invalid")
     selector = _ensure_object(params.get("selector"), "selector")
     _reject_extra(selector, {"qids", "query", "scope", "timeWindow"}, "selector")
+    if "qids" not in selector and "query" not in selector:
+        raise QuipuProtocolError("selector.qids or selector.query is required")
     if "qids" in selector:
         _validate_qid_list(selector["qids"], "selector.qids")
     _optional_string(selector, "query", "selector")

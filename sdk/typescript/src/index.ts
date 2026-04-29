@@ -324,6 +324,9 @@ function validateForget(params: Record<string, unknown>): void {
   }
   assertObject(params.selector, "selector");
   rejectExtra(params.selector, new Set(["qids", "query", "scope", "timeWindow"]), "selector");
+  if (!("qids" in params.selector) && !("query" in params.selector)) {
+    throw new QuipuProtocolError("selector.qids or selector.query is required");
+  }
   if ("qids" in params.selector) validateQidList(params.selector.qids, "selector.qids");
   optionalString(params.selector, "query", "selector");
   if ("scope" in params.selector) validateScope(params.selector.scope);

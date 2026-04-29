@@ -81,6 +81,7 @@ const ForgetCliArgs = struct {
     mode: []const u8 = "hard_delete",
     reason: []const u8 = "cli_request",
     dry_run: bool = true,
+    query: ?[]const u8 = null,
     qids: std.ArrayList([]const u8),
     scope: ScopeCliArgs = .{},
 
@@ -391,7 +392,7 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--need NEED] | inspect ID | forget --id ID [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | verify [schema|provenance|temporal|forgetting]... | jobs materialize|lease|complete|fail ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | verify [schema|provenance|temporal|forgetting]... | jobs materialize|lease|complete|fail ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
@@ -583,7 +584,7 @@ fn buildInspectRequest(allocator: std.mem.Allocator, args: []const [:0]const u8)
 fn buildForgetRequest(allocator: std.mem.Allocator, args: []const [:0]const u8) ![]u8 {
     var parsed = try parseForgetArgs(allocator, args);
     defer parsed.deinit(allocator);
-    if (parsed.qids.items.len == 0) return error.InvalidArgs;
+    if (parsed.qids.items.len == 0 and parsed.query == null) return error.InvalidArgs;
     return stringifyAlloc(allocator, .{
         .jsonrpc = "2.0",
         .id = "cli_forget",
@@ -592,6 +593,7 @@ fn buildForgetRequest(allocator: std.mem.Allocator, args: []const [:0]const u8) 
             .mode = parsed.mode,
             .selector = .{
                 .qids = parsed.qids.items,
+                .query = parsed.query,
                 .scope = parsed.scope.json(),
             },
             .propagate = true,
@@ -707,6 +709,8 @@ fn parseForgetArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Fo
         const arg = args[index];
         if (std.mem.eql(u8, arg, "--id")) {
             try parsed.qids.append(allocator, try nextArg(args, &index));
+        } else if (std.mem.eql(u8, arg, "--query")) {
+            parsed.query = try nextArg(args, &index);
         } else if (std.mem.eql(u8, arg, "--mode")) {
             parsed.mode = try nextArg(args, &index);
         } else if (std.mem.eql(u8, arg, "--reason")) {

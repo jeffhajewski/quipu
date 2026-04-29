@@ -54,8 +54,9 @@ Quipu currently supports:
 - `memory.search`: lexical, vector, and hybrid search modes.
 - `memory.inspect`: inspect a node, its provenance, dependents, and stream-backed
   audit records.
-- `memory.forget`: dry-run reports, tombstones, redaction state, and suppression
-  of derived memories backed by forgotten evidence.
+- `memory.forget`: qid or query selectors, dry-run closure reports, tombstones,
+  redaction state, and suppression of derived memories and contaminated core
+  summaries backed by forgotten evidence.
 - `memory.feedback` and `memory.core.*` for retrieval feedback and user-managed
   core memory blocks.
 - Native LatticeDB-backed persistence with graph nodes/edges, FTS, hash-vector

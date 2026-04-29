@@ -595,9 +595,6 @@ pub const Runtime = struct {
         const selector = objectField(params, "selector") orelse {
             return errorResponse(allocator, id, "invalid_request", "selector is required");
         };
-        const qids = arrayValue(selector.get("qids")) orelse {
-            return errorResponse(allocator, id, "invalid_request", "selector.qids is required for the in-memory adapter");
-        };
         const mode = stringField(params, "mode") orelse {
             return errorResponse(allocator, id, "invalid_request", "mode is required");
         };
@@ -605,14 +602,27 @@ pub const Runtime = struct {
             return errorResponse(allocator, id, "invalid_request", "mode must be hard_delete, redact, or expire");
         }
         const dry_run = boolField(params, "dryRun") orelse false;
+        const propagate = boolField(params, "propagate") orelse true;
         const reason = stringField(params, "reason") orelse "unspecified";
+        const selector_scope = parseScope(&selector);
+        const selector_window = parseSelectorTimeWindow(&selector);
+        if (arrayValue(selector.get("qids")) == null and stringField(&selector, "query") == null) {
+            return errorResponse(allocator, id, "invalid_request", "selector.qids or selector.query is required");
+        }
+
+        var selected_qids = OwnedQids{ .allocator = allocator };
+        defer selected_qids.deinit();
+        try self.collectForgetRoots(allocator, &selector, selector_scope, selector_window, &selected_qids);
 
         var roots_matched: usize = 0;
         var nodes_deleted: usize = 0;
         var nodes_redacted: usize = 0;
         var facts_invalidated: usize = 0;
+        var summaries_contaminated: usize = 0;
         var report = OwnedForgetReport{ .allocator = allocator };
         defer report.deinit();
+        var contaminated_core_qids = OwnedQids{ .allocator = allocator };
+        defer contaminated_core_qids.deinit();
 
         const root_action: []const u8 = if (dry_run)
             if (std.mem.eql(u8, mode, "redact")) "would_redact" else "would_delete"
@@ -621,21 +631,28 @@ pub const Runtime = struct {
         else
             "deleted";
         const dependent_action: []const u8 = if (dry_run) "would_invalidate" else "invalidated";
+        const core_action: []const u8 = if (dry_run) "would_contaminate" else "contaminated";
 
-        for (qids.items) |qid_value| {
-            const qid = stringValue(qid_value) orelse continue;
+        for (selected_qids.items.items) |qid| {
             const node = (try self.store.getNode(allocator, qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
             roots_matched += 1;
             try report.append(allocator, qid, labelType(node.label), root_action);
 
-            var dependents = try self.derivedRefsByEvidence(allocator, qid);
-            defer dependents.deinit();
-            for (dependents.items.items) |dependent| {
-                if (isFactLikeType(dependent.type)) facts_invalidated += 1;
-            }
-            for (dependents.items.items) |dependent| {
-                try report.append(allocator, dependent.qid, dependent.type, dependent_action);
+            if (propagate) {
+                var dependents = try self.derivedRefsByEvidence(allocator, qid);
+                defer dependents.deinit();
+                for (dependents.items.items) |dependent| {
+                    if (isFactLikeType(dependent.type)) facts_invalidated += 1;
+                }
+                for (dependents.items.items) |dependent| {
+                    try report.append(allocator, dependent.qid, dependent.type, dependent_action);
+                }
+
+                try self.appendCoreClosureRefs(allocator, qid, &contaminated_core_qids, &report, core_action);
+                for (dependents.items.items) |dependent| {
+                    try self.appendCoreClosureRefs(allocator, dependent.qid, &contaminated_core_qids, &report, core_action);
+                }
             }
 
             if (!dry_run) {
@@ -645,7 +662,15 @@ pub const Runtime = struct {
                 } else {
                     nodes_deleted += 1;
                 }
-                _ = try self.tombstoneDerivedByEvidence(allocator, qid, reason, "hard_delete");
+                if (propagate) _ = try self.tombstoneDerivedByEvidence(allocator, qid, reason, "hard_delete");
+            }
+        }
+        summaries_contaminated = contaminated_core_qids.items.items.len;
+        if (!dry_run and propagate) {
+            for (contaminated_core_qids.items.items) |core_qid| {
+                const core_node = (try self.store.getNode(allocator, core_qid)) orelse continue;
+                defer self.store.freeNode(allocator, core_node);
+                try self.tombstoneNode(allocator, core_qid, core_node.label, reason, mode);
             }
         }
 
@@ -661,6 +686,7 @@ pub const Runtime = struct {
             .nodesDeleted = nodes_deleted,
             .nodesRedacted = nodes_redacted,
             .factsInvalidated = facts_invalidated,
+            .summariesContaminated = summaries_contaminated,
             .reason = reason,
             .report = report.items.items,
         });
@@ -679,12 +705,71 @@ pub const Runtime = struct {
                 .nodesDeleted = nodes_deleted,
                 .nodesRedacted = nodes_redacted,
                 .factsInvalidated = facts_invalidated,
-                .summariesContaminated = @as(usize, 0),
+                .summariesContaminated = summaries_contaminated,
                 .jobsQueued = &[_][]const u8{},
                 .report = report.items.items,
             },
         };
         return stringifyAlloc(allocator, response);
+    }
+
+    fn collectForgetRoots(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        selector: *const ObjectMap,
+        scope: Scope,
+        window: EventWindow,
+        selected_qids: *OwnedQids,
+    ) !void {
+        if (arrayValue(selector.get("qids"))) |qids| {
+            for (qids.items) |qid_value| {
+                const qid = stringValue(qid_value) orelse continue;
+                const node = (try self.store.getNode(allocator, qid)) orelse continue;
+                defer self.store.freeNode(allocator, node);
+                if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+                if (!try scope.matchesNode(allocator, node)) continue;
+                if (!try nodeWithinEventWindow(allocator, node, window)) continue;
+                try selected_qids.appendUnique(allocator, qid);
+            }
+        }
+
+        const query = stringField(selector, "query") orelse return;
+        if (query.len == 0) return;
+        const hits = try self.store.fullTextSearch(allocator, .{ .text = query, .limit = 1000 });
+        defer freeHits(allocator, hits);
+        for (hits) |hit| {
+            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (isInternalLabel(node.label)) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            if (!try scope.matchesNode(allocator, node)) continue;
+            if (!try nodeWithinEventWindow(allocator, node, window)) continue;
+            try selected_qids.appendUnique(allocator, node.qid);
+        }
+    }
+
+    fn appendCoreClosureRefs(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        source_qid: []const u8,
+        contaminated_core_qids: *OwnedQids,
+        report: *OwnedForgetReport,
+        action: []const u8,
+    ) !void {
+        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
+        defer freeHits(allocator, hits);
+        for (hits) |hit| {
+            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!std.mem.eql(u8, node.label, "Core")) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            if (!try propertyStringArrayContains(allocator, node.properties_json, "evidenceQids", source_qid)) continue;
+            const already_seen = contaminated_core_qids.contains(node.qid);
+            try contaminated_core_qids.appendUnique(allocator, node.qid);
+            if (!already_seen) {
+                try report.append(allocator, node.qid, "core", action);
+            }
+        }
     }
 
     fn memoryFeedback(self: *Runtime, allocator: std.mem.Allocator, id: ?[]const u8, params: *const ObjectMap) ![]u8 {
@@ -1622,6 +1707,32 @@ const OwnedForgetReport = struct {
     }
 };
 
+const OwnedQids = struct {
+    allocator: std.mem.Allocator,
+    items: std.ArrayList([]const u8) = .empty,
+
+    fn appendUnique(self: *OwnedQids, allocator: std.mem.Allocator, qid: []const u8) !void {
+        if (self.contains(qid)) return;
+        const owned_qid = try allocator.dupe(u8, qid);
+        errdefer allocator.free(owned_qid);
+        try self.items.append(allocator, owned_qid);
+    }
+
+    fn contains(self: *const OwnedQids, qid: []const u8) bool {
+        for (self.items.items) |existing| {
+            if (std.mem.eql(u8, existing, qid)) return true;
+        }
+        return false;
+    }
+
+    fn deinit(self: *OwnedQids) void {
+        for (self.items.items) |qid| {
+            self.allocator.free(qid);
+        }
+        self.items.deinit(self.allocator);
+    }
+};
+
 const OwnedAuditEvents = struct {
     allocator: std.mem.Allocator,
     items: std.ArrayList(AuditEventResult) = .empty,
@@ -1673,6 +1784,14 @@ fn parseEventWindow(params: *const ObjectMap) EventWindow {
     return .{
         .start = optionalStringField(&time_obj, "eventWindowStart"),
         .end = optionalStringField(&time_obj, "eventWindowEnd"),
+    };
+}
+
+fn parseSelectorTimeWindow(selector: *const ObjectMap) EventWindow {
+    const time_obj = objectField(selector, "timeWindow") orelse return .{};
+    return .{
+        .start = optionalStringField(&time_obj, "start"),
+        .end = optionalStringField(&time_obj, "end"),
     };
 }
 
@@ -1846,6 +1965,21 @@ fn propertyBool(allocator: std.mem.Allocator, properties_json: []const u8, key: 
         .bool => |boolean| boolean,
         else => false,
     };
+}
+
+fn propertyStringArrayContains(allocator: std.mem.Allocator, properties_json: []const u8, key: []const u8, expected: []const u8) !bool {
+    var parsed = try std.json.parseFromSlice(Value, allocator, properties_json, .{});
+    defer parsed.deinit();
+    const object = switch (parsed.value) {
+        .object => |object| object,
+        else => return false,
+    };
+    const array = arrayValue(object.get(key)) orelse return false;
+    for (array.items) |item| {
+        const value = stringValue(item) orelse continue;
+        if (std.mem.eql(u8, value, expected)) return true;
+    }
+    return false;
 }
 
 fn textForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
@@ -2402,6 +2536,79 @@ test "runtime forget suppresses retrieval" {
     );
     defer std.testing.allocator.free(retrieve);
     try std.testing.expect(std.mem.indexOf(u8, retrieve, "Delete this exact string.") == null);
+}
+
+test "runtime forget supports query selectors with scope filters" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+
+    const alpha = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:alpha\"},\"messages\":[{\"role\":\"user\",\"content\":\"Scoped deletion token belongs to alpha.\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(alpha);
+    const beta = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:beta\"},\"messages\":[{\"role\":\"user\",\"content\":\"Scoped deletion token belongs to beta.\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(beta);
+
+    const forget = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"f1\",\"method\":\"memory.forget\",\"params\":{\"mode\":\"hard_delete\",\"selector\":{\"query\":\"Scoped deletion token\",\"scope\":{\"projectId\":\"repo:alpha\"}},\"dryRun\":false,\"reason\":\"test\"}}",
+    );
+    defer std.testing.allocator.free(forget);
+    try std.testing.expect(std.mem.indexOf(u8, forget, "\"rootsMatched\":1") != null);
+
+    const alpha_retrieve = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"Scoped deletion token\",\"scope\":{\"projectId\":\"repo:alpha\"},\"needs\":[\"raw\"]}}",
+    );
+    defer std.testing.allocator.free(alpha_retrieve);
+    try std.testing.expect(std.mem.indexOf(u8, alpha_retrieve, "belongs to alpha") == null);
+
+    const beta_retrieve = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q2\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"Scoped deletion token\",\"scope\":{\"projectId\":\"repo:beta\"},\"needs\":[\"raw\"]}}",
+    );
+    defer std.testing.allocator.free(beta_retrieve);
+    try std.testing.expect(std.mem.indexOf(u8, beta_retrieve, "belongs to beta") != null);
+}
+
+test "runtime forget contaminates compiled core summaries" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+
+    const remember = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"This repo uses pnpm. Run just test before committing.\",\"createdAt\":\"2026-04-01T10:00:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(remember);
+
+    const consolidate = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"method\":\"memory.core.consolidate\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"blockKey\":\"project_summary\"}}",
+    );
+    defer std.testing.allocator.free(consolidate);
+
+    const forget = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"f1\",\"method\":\"memory.forget\",\"params\":{\"mode\":\"hard_delete\",\"selector\":{\"qids\":[\"q_msg_4\"]},\"dryRun\":false,\"reason\":\"test\"}}",
+    );
+    defer std.testing.allocator.free(forget);
+    try std.testing.expect(std.mem.indexOf(u8, forget, "\"summariesContaminated\":1") != null);
+
+    const retrieve = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"pnpm\",\"scope\":{\"projectId\":\"repo:test\"},\"needs\":[\"core\"]}}",
+    );
+    defer std.testing.allocator.free(retrieve);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "Consolidated memory:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "The repo uses pnpm as its package manager.") == null);
 }
 
 test "runtime stores and replaces core blocks" {
