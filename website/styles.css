@@ -148,14 +148,20 @@ figcaption,
 .hero {
   display: grid;
   grid-template-columns: minmax(360px, 0.75fr) minmax(560px, 1.25fr);
-  gap: clamp(2rem, 5vw, 5rem);
+  column-gap: clamp(2rem, 5vw, 5rem);
+  row-gap: 2.25rem;
   max-width: 1360px;
   margin: 0 auto;
   padding: clamp(4rem, 8vw, 7.5rem) 1.25rem 4rem;
 }
 
+.hero-heading {
+  grid-column: 1 / -1;
+  max-width: 1080px;
+}
+
 .hero-copy {
-  align-self: center;
+  align-self: start;
   max-width: 600px;
 }
 
@@ -184,9 +190,9 @@ h2 {
 }
 
 h1 {
-  max-width: 760px;
-  margin-bottom: 1.25rem;
-  font-size: 7.6rem;
+  max-width: 1040px;
+  margin-bottom: 0;
+  font-size: 7.35rem;
   line-height: 0.9;
 }
 
@@ -465,6 +471,10 @@ h3 {
 
   .hero {
     padding-top: 3.5rem;
+  }
+
+  .hero-heading {
+    max-width: 860px;
   }
 
   h1 {
