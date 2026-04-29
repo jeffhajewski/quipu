@@ -15,11 +15,13 @@ sys.path.insert(0, str(ROOT / "evals" / "src"))
 from quipu_evals.core_client import CoreStdioClient  # noqa: E402
 from quipu_evals.core_runner import run_core_suite  # noqa: E402
 from quipu_evals.artifacts import build_manifest  # noqa: E402
-from quipu_evals.benchmarks import render_markdown  # noqa: E402
+from quipu_evals.benchmarks import collect_benchmarks, render_markdown  # noqa: E402
+from quipu_evals.external import load_external_suite  # noqa: E402
 from quipu_evals import load_suite, run_suite  # noqa: E402
 
 
 SUITE_PATH = ROOT / "evals" / "suites" / "quipu_synthetic.yaml"
+LOCOMO_MINI_PATH = ROOT / "evals" / "suites" / "external" / "locomo_mini.yaml"
 CORE_DIR = ROOT / "core"
 CORE_BINARY = CORE_DIR / "zig-out" / "bin" / "quipu"
 LATTICE_INCLUDE = os.environ.get("LATTICE_INCLUDE")
@@ -56,6 +58,9 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertEqual(manifest["suite"]["name"], "quipu_synthetic")
         self.assertEqual(manifest["baseline"], "q0_raw_only_fake")
         self.assertEqual(manifest["artifacts"]["results"], "artifacts/results.json")
+        self.assertIn("configHash", manifest)
+        self.assertEqual(manifest["providers"]["answer"], "deterministic_prompt_match")
+        self.assertEqual(manifest["verification"]["status"], "not_run")
 
     def test_benchmark_markdown_renders_honest_scope(self):
         markdown = render_markdown(
@@ -84,6 +89,43 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertIn("synthetic smoke benchmark", markdown)
         self.assertIn("core_in_memory", markdown)
         self.assertIn("LoCoMo", markdown)
+
+    def test_loads_locomo_external_smoke_suite(self):
+        suite = load_external_suite(LOCOMO_MINI_PATH, benchmark="locomo")
+        categories = {query.category for scenario in suite.scenarios for query in scenario.queries}
+
+        self.assertEqual(suite.metadata["format"], "quipu.external.scenario.v1")
+        self.assertEqual(suite.metadata["benchmark"], "locomo")
+        self.assertEqual(len(suite.scenarios), 1)
+        self.assertEqual(len(suite.scenarios[0].queries), 5)
+        self.assertIn("single_hop", categories)
+        self.assertIn("multi_hop", categories)
+        self.assertIn("temporal", categories)
+        self.assertIn("adversarial", categories)
+        self.assertIn("event_summary", categories)
+
+    def test_locomo_external_smoke_q0_passes(self):
+        run = run_suite(LOCOMO_MINI_PATH)
+
+        self.assertTrue(run.passed)
+        self.assertEqual(len(run.query_runs), 5)
+        self.assertEqual(len(run.forget_runs), 1)
+        self.assertEqual(run.to_json()["metrics"]["answer"]["exactMatch"], 1.0)
+
+    def test_external_smoke_report_marks_not_publishable(self):
+        report = collect_benchmarks(
+            LOCOMO_MINI_PATH,
+            include_lattice=False,
+            result_class="external_smoke",
+            external_benchmark="locomo",
+        )
+        markdown = render_markdown(report)
+
+        self.assertEqual(report["resultClass"], "external_smoke")
+        self.assertEqual(report["dataset"]["benchmark"], "locomo")
+        self.assertEqual(report["benchmarkReadiness"]["status"], "not_ready")
+        self.assertIn("External Smoke Benchmark Results", markdown)
+        self.assertIn("not publishable", markdown)
 
     @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
     def test_core_stdio_remember_retrieve_forget_smoke(self):

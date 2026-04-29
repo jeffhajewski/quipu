@@ -5,14 +5,19 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import time
 from typing import Any, Callable, Mapping
 
 from .artifacts import build_manifest, write_json
+from .baselines import registry_json
 from .core_runner import CORE_BINARY, lattice_lib_from_env, run_core_suite
+from .external import DEFAULT_EXTERNAL_SUITES, external_suite_metadata, load_external_suite
+from .readiness import evaluate_readiness
 from .runner import run_suite
+from .scenarios import load_suite
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -26,14 +31,35 @@ def collect_benchmarks(
     include_lattice: bool = False,
     lattice_include: str | None = None,
     lattice_lib: str | None = None,
+    result_class: str = "synthetic_smoke",
+    external_benchmark: str | None = None,
+    seed: int = 0,
+    verification_status: str = "not_run",
+    include_core: bool = True,
+    require_core: bool = False,
 ) -> dict[str, Any]:
     suite_path = Path(suite_path)
+    suite = (
+        load_external_suite(suite_path, benchmark=external_benchmark)
+        if external_benchmark
+        else load_suite(suite_path)
+    )
+    dataset = external_suite_metadata(suite) if external_benchmark else {
+        "format": "quipu.synthetic.scenario.v1",
+        "benchmark": "synthetic",
+        "datasetName": suite.name,
+        "datasetVersion": suite.version,
+        "source": "quipu",
+        "license": "MIT",
+        "tasks": list(suite.suites),
+    }
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     git_commit = current_git_commit()
     generated_at = now_iso()
     runs: list[dict[str, Any]] = []
+    skipped_runs: list[dict[str, str]] = []
 
     runs.append(
         run_case(
@@ -45,25 +71,33 @@ def collect_benchmarks(
             git_commit=git_commit,
             runner="quipu_evals.runner",
             storage="fake",
-            config={"suite": str(suite_path)},
+            config={"suite": str(suite_path), "resultClass": result_class, "externalBenchmark": external_benchmark},
+            seed=seed,
+            verification_status=verification_status,
         )
     )
-    runs.append(
-        run_case(
-            "core_in_memory",
-            lambda: run_core_suite(suite_path, storage="memory"),
-            suite_path=suite_path,
-            output_dir=output_dir,
-            generated_at=generated_at,
-            git_commit=git_commit,
-            runner="quipu_evals.core_runner",
-            storage="memory",
-            config={"suite": str(suite_path)},
+    core_available = shutil.which("zig") is not None
+    if include_core and (core_available or require_core):
+        runs.append(
+            run_case(
+                "core_in_memory",
+                lambda: run_core_suite(suite_path, storage="memory"),
+                suite_path=suite_path,
+                output_dir=output_dir,
+                generated_at=generated_at,
+                git_commit=git_commit,
+                runner="quipu_evals.core_runner",
+                storage="memory",
+                config={"suite": str(suite_path), "resultClass": result_class, "externalBenchmark": external_benchmark},
+                seed=seed,
+                verification_status=verification_status,
+            )
         )
-    )
+    elif include_core:
+        skipped_runs.append({"name": "core_in_memory", "reason": "zig is not installed"})
 
     lattice_available = include_lattice and bool(lattice_include) and bool(lattice_lib)
-    if lattice_available:
+    if lattice_available and (core_available or require_core):
         with tempfile.TemporaryDirectory(prefix="quipu-bench-lattice-") as db_dir:
             runs.append(
                 run_case(
@@ -83,22 +117,37 @@ def collect_benchmarks(
                     storage="lattice",
                     config={
                         "suite": str(suite_path),
+                        "resultClass": result_class,
+                        "externalBenchmark": external_benchmark,
                         "latticeInclude": lattice_include,
                         "latticeLib": lattice_lib,
                     },
                     lattice_version=lattice_version(lattice_include, lattice_lib),
+                    seed=seed,
+                    verification_status=verification_status,
                 )
             )
+    elif include_lattice and not core_available:
+        skipped_runs.append({"name": "core_lattice", "reason": "zig is not installed"})
 
-    return {
+    report = {
         "schemaVersion": "quipu.benchmark.report.v1",
         "generatedAt": generated_at,
         "gitCommit": git_commit,
+        "quipuVersion": "0.1.0",
+        "resultClass": result_class,
+        "externalBenchmark": external_benchmark,
+        "dataset": dataset,
         "suite": str(suite_path),
         "latticeRequested": include_lattice,
-        "latticeIncluded": lattice_available,
+        "latticeIncluded": any(run.get("storage") == "lattice" for run in runs),
+        "verification": {"status": verification_status},
+        "baselineRegistry": registry_json(),
         "runs": runs,
+        "skippedRuns": skipped_runs,
     }
+    report["benchmarkReadiness"] = evaluate_readiness(report)
+    return report
 
 
 def run_case(
@@ -113,6 +162,8 @@ def run_case(
     storage: str,
     config: Mapping[str, Any],
     lattice_version: str | None = None,
+    seed: int = 0,
+    verification_status: str = "not_run",
 ) -> dict[str, Any]:
     started = time.perf_counter()
     run = fn()
@@ -131,6 +182,8 @@ def run_case(
         config=config,
         lattice_version=lattice_version,
         duration_ms=round(duration_ms, 3),
+        seed=seed,
+        verification_status=verification_status,
     )
     manifest["generatedAt"] = generated_at
     write_json(manifest_path, manifest)
@@ -150,17 +203,34 @@ def run_case(
 
 
 def render_markdown(report: Mapping[str, Any]) -> str:
+    result_class = str(report.get("resultClass") or "synthetic_smoke")
+    title = "External Smoke Benchmark Results" if result_class == "external_smoke" else "Benchmark Results"
+    scope_description = (
+        [
+            "These are Quipu external smoke benchmark results. They validate the",
+            "dataset normalization, replay, retrieval, grading, and artifact path on",
+            "a small fixture. They are not publishable external benchmark numbers.",
+        ]
+        if result_class == "external_smoke"
+        else [
+            "These are Quipu synthetic smoke benchmark results. They are useful for",
+            "tracking current correctness and basic runtime health, but they are not a",
+            "claim of performance on external long-memory benchmarks yet.",
+        ]
+    )
+    dataset = report.get("dataset", {})
     lines = [
-        "# Benchmark Results",
+        f"# {title}",
         "",
-        "These are Quipu synthetic smoke benchmark results. They are useful for",
-        "tracking current correctness and basic runtime health, but they are not a",
-        "claim of performance on external long-memory benchmarks yet.",
+        *scope_description,
         "",
         "Durations are local harness wall-clock timings, not optimized daemon latency.",
         "",
         f"- Generated: `{report.get('generatedAt')}`",
         f"- Git commit: `{report.get('gitCommit') or 'unknown'}`",
+        f"- Result class: `{result_class}`",
+        f"- External benchmark: `{report.get('externalBenchmark') or '-'}`",
+        f"- Dataset: `{_mapping_get(dataset, 'datasetName', 'unknown')}` `{_mapping_get(dataset, 'datasetVersion', 'unknown')}`",
         f"- Suite: `{report.get('suite')}`",
         f"- Lattice included: `{str(report.get('latticeIncluded')).lower()}`",
         "",
@@ -177,6 +247,26 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         lines.append(
             f"| `{run.get('baseline')}` | `{run.get('storage')}` | {passed} | {queries} | {forget} | {duration} | `{lattice}` |"
         )
+    skipped = report.get("skippedRuns", [])
+    if skipped:
+        lines.extend(["", "Skipped runs:"])
+        for item in skipped:
+            if isinstance(item, Mapping):
+                lines.append(f"- `{item.get('name')}`: {item.get('reason')}")
+    lines.extend(
+        [
+            "",
+            "## Real Benchmark Readiness Gate",
+            "",
+            f"Status: `{report.get('benchmarkReadiness', {}).get('status', 'not_ready')}`",
+            "",
+            "| Requirement | Pass |",
+            "| --- | ---: |",
+        ]
+    )
+    for requirement in report.get("benchmarkReadiness", {}).get("requirements", []):
+        passed = "yes" if requirement.get("passed") else "no"
+        lines.append(f"| {requirement.get('name')} | {passed} |")
     lines.extend(
         [
             "",
@@ -190,7 +280,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             "",
             "## What This Does Not Cover Yet",
             "",
-            "- LoCoMo, LongMemEval, or MemoryAgentBench.",
+            "- Publishable LoCoMo, LongMemEval, or MemoryAgentBench results.",
             "- Real provider embeddings, reranking, or LLM extraction quality.",
             "- Long-running daemon transport latency.",
             "- Large-store retrieval latency or storage growth.",
@@ -198,6 +288,14 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _mapping_get(value: object, key: str, default: str) -> str:
+    if isinstance(value, Mapping):
+        result = value.get(key)
+        if isinstance(result, str):
+            return result
+    return default
 
 
 def current_git_commit() -> str | None:
@@ -263,21 +361,41 @@ def now_iso() -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("suite", nargs="?", default=str(DEFAULT_SUITE))
+    parser.add_argument("suite", nargs="?")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "artifacts" / "benchmarks")
     parser.add_argument("--report", type=Path, default=ROOT / "artifacts" / "benchmarks" / "report.json")
     parser.add_argument("--markdown", type=Path, help="Write a markdown summary report")
     parser.add_argument("--include-lattice", action="store_true")
     parser.add_argument("--lattice-include", default=os.environ.get("LATTICE_INCLUDE"))
     parser.add_argument("--lattice-lib", default=lattice_lib_from_env())
+    parser.add_argument("--result-class", choices=["synthetic_smoke", "external_smoke", "publishable"])
+    parser.add_argument("--external-benchmark", choices=sorted(DEFAULT_EXTERNAL_SUITES))
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--verification-status", default="not_run")
+    parser.add_argument("--skip-core", action="store_true")
+    parser.add_argument("--require-core", action="store_true")
     args = parser.parse_args()
+    result_class = args.result_class or ("external_smoke" if args.external_benchmark else "synthetic_smoke")
+    suite_path = (
+        Path(args.suite)
+        if args.suite
+        else DEFAULT_EXTERNAL_SUITES[args.external_benchmark]
+        if args.external_benchmark
+        else DEFAULT_SUITE
+    )
 
     report = collect_benchmarks(
-        args.suite,
+        suite_path,
         output_dir=args.output_dir,
         include_lattice=args.include_lattice,
         lattice_include=args.lattice_include,
         lattice_lib=args.lattice_lib,
+        result_class=result_class,
+        external_benchmark=args.external_benchmark,
+        seed=args.seed,
+        verification_status=args.verification_status,
+        include_core=not args.skip_core,
+        require_core=args.require_core or result_class == "publishable",
     )
     write_json(args.report, report)
     if args.markdown:

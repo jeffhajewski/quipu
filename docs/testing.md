@@ -27,6 +27,15 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --markdown docs/benchmark-results.md
 ```
 
+External smoke:
+
+```bash
+just benchmark-locomo-smoke
+```
+
+This writes ignored artifacts under `artifacts/benchmarks/locomo-smoke/` and
+keeps the report marked `external_smoke`, not `publishable`.
+
 Optional LatticeDB-backed eval smoke:
 
 ```bash

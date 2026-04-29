@@ -6,6 +6,9 @@ Benchmark harness for Quipu memory.
 
 - `evals/suites/quipu_synthetic.yaml`: temporal truth, cross-scope leakage,
   evidence faithfulness, preference updates, and forgetting leakage.
+- `evals/suites/external/locomo_mini.yaml`: LoCoMo-shaped external smoke
+  fixture covering single-hop, multi-hop, temporal, adversarial, summary, and
+  forgetting paths.
 
 ## Run
 
@@ -58,11 +61,25 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --markdown docs/benchmark-results.md
 ```
 
-The report is intentionally scoped as a synthetic smoke benchmark. External
-benchmark adapters and large-store latency reports are still on the roadmap.
+The report is intentionally scoped as a synthetic smoke benchmark.
+
+## External Smoke
+
+Run the LoCoMo-shaped smoke fixture:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
+  --external-benchmark locomo \
+  --output-dir artifacts/benchmarks/locomo-smoke \
+  --report artifacts/benchmarks/locomo-smoke/report.json \
+  --markdown artifacts/benchmarks/locomo-smoke/report.md
+```
+
+This validates the external scenario format and artifact pipeline without model
+keys. It is not a publishable LoCoMo benchmark result.
 
 ## Planned External Adapters
 
-- LoCoMo
+- LoCoMo full dataset adapter and baselines
 - LongMemEval
 - MemoryAgentBench

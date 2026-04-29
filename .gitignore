@@ -29,6 +29,10 @@ coverage/
 .coverage
 htmlcov/
 
+# Benchmark dataset caches
+datasets/
+.quipu-datasets/
+
 # Editor and OS metadata
 .idea/
 .vscode/

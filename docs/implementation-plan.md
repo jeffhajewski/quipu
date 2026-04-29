@@ -159,11 +159,13 @@ Acceptance:
 ### 9. Benchmark Expansion
 
 Status: synthetic smoke benchmark exists for Q0, core in-memory, and optional
-Lattice-backed core runs.
+Lattice-backed core runs. A normalized external smoke path and LoCoMo mini
+fixture exist to validate replay, retrieval, grading, forgetting, manifests, and
+readiness gates before full external datasets are wired in.
 
 Remaining:
 
-- Add LoCoMo adapter.
+- Add full LoCoMo dataset adapter.
 - Add LongMemEval adapter.
 - Add MemoryAgentBench adapter.
 - Add Q0-Q13 baselines and ablations.

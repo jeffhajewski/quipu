@@ -20,6 +20,7 @@ from .graders import (
     grade_exact_answer,
     grade_forbidden_evidence,
 )
+from .metrics import grade_counts, metric_groups
 from .scenarios import Event, Query, Scenario, load_suite
 
 
@@ -69,6 +70,7 @@ class CoreSuiteRun:
         return all(run.passed for run in self.query_runs) and all(run.passed for run in self.forget_runs)
 
     def to_json(self) -> dict[str, object]:
+        grades = list(_all_grades(self))
         return {
             "suiteName": self.suite_name,
             "suiteVersion": self.suite_version,
@@ -81,8 +83,17 @@ class CoreSuiteRun:
                 "queriesTotal": len(self.query_runs),
                 "forgetOpsPassed": sum(1 for run in self.forget_runs if run.passed),
                 "forgetOpsTotal": len(self.forget_runs),
+                "grades": grade_counts(grades),
+                **metric_groups(grades),
             },
         }
+
+
+def _all_grades(run: CoreSuiteRun):
+    for query in run.query_runs:
+        yield from query.grades
+    for forget in run.forget_runs:
+        yield forget.grade
 
 
 def run_core_suite(

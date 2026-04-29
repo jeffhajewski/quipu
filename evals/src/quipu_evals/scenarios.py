@@ -63,6 +63,7 @@ class Suite:
     version: str
     suites: list[str]
     scenarios: list[Scenario]
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 def load_suite(path: Union[str, Path]) -> Suite:
@@ -75,11 +76,15 @@ def load_suite(path: Union[str, Path]) -> Suite:
 
     suite_path = Path(path)
     raw = json.loads(suite_path.read_text())
+    metadata = raw.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        raise ValueError("metadata must be an object")
     return Suite(
         name=_require_string(raw, "name"),
         version=_require_string(raw, "version"),
         suites=_require_string_list(raw, "suites"),
         scenarios=[_parse_scenario(item) for item in _require_list(raw, "scenarios")],
+        metadata=dict(metadata),
     )
 
 

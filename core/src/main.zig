@@ -205,8 +205,12 @@ fn runCommand(
         defer freeVerificationIssues(allocator, storage_issues);
         const issues = try mergeVerificationIssues(allocator, schema_issues, storage_issues);
         defer allocator.free(issues);
-        const default_checks = [_][]const u8{ "schema", "provenance", "temporal", "forgetting" };
-        const checks: []const []const u8 = if (args.len > command_index + 1) args[command_index + 1 ..] else &default_checks;
+        const default_checks = [_][]const u8{ "schema", "provenance", "temporal", "forgetting", "streams" };
+        var checks: []const []const u8 = &default_checks;
+        if (args.len > command_index + 1) {
+            const requested = args[command_index + 1 ..];
+            checks = if (requested.len == 1 and std.mem.eql(u8, requested[0], "all")) &default_checks else requested;
+        }
         const response = try stringifyAlloc(allocator, .{
             .status = if (issues.len == 0) "ok" else "failed",
             .checks = checks,
@@ -397,7 +401,7 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | verify [schema|provenance|temporal|forgetting]... | jobs materialize|lease|complete|fail ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {

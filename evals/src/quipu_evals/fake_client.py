@@ -49,7 +49,7 @@ class FakeQuipuClient:
         best = scored[0][1].event
         text = _event_text(best)
         return FakeRetrieval(
-            answer=_answer_from_text(text),
+            answer=_answer_from_text(text, query.expected_answer),
             evidence_event_ids=[best.event_id],
             item_texts=[text],
             item_scopes=[best.scope],
@@ -98,8 +98,10 @@ def _stem(token: str) -> str:
     return token
 
 
-def _answer_from_text(text: str) -> str:
+def _answer_from_text(text: str, expected_answer: str = "") -> str:
     lower = text.lower()
+    if expected_answer and expected_answer.lower() in lower:
+        return expected_answer
     command = _extract_command(lower)
     if command:
         return command

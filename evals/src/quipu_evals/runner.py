@@ -16,6 +16,7 @@ from .graders import (
     grade_forbidden_evidence,
     grade_scope_leakage,
 )
+from .metrics import grade_counts, metric_groups
 from .scenarios import Scenario, load_suite
 
 
@@ -109,18 +110,14 @@ def run_scenario(scenario: Scenario) -> tuple[list[QueryRun], list[ForgetRun]]:
 
 
 def summarize(run: SuiteRun) -> dict[str, object]:
-    grade_counts: dict[str, dict[str, int]] = {}
-    for grade in _all_grades(run):
-        counts = grade_counts.setdefault(grade.name, {"passed": 0, "total": 0})
-        counts["total"] += 1
-        if grade.passed:
-            counts["passed"] += 1
+    grades = list(_all_grades(run))
     return {
         "queriesPassed": sum(1 for query in run.query_runs if query.passed),
         "queriesTotal": len(run.query_runs),
         "forgetOpsPassed": sum(1 for op in run.forget_runs if op.passed),
         "forgetOpsTotal": len(run.forget_runs),
-        "grades": grade_counts,
+        "grades": grade_counts(grades),
+        **metric_groups(grades),
     }
 
 

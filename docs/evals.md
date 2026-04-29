@@ -2,6 +2,15 @@
 
 The eval harness starts with the shared scenario schema in `evals/suites/quipu_synthetic.yaml`. The current suite file is JSON-compatible YAML so the scaffold can load it with Python's standard library before external YAML dependencies are introduced.
 
+Quipu reports three result classes:
+
+- `synthetic_smoke`: small deterministic fixtures for CI and regression checks.
+- `external_smoke`: tiny normalized fixtures shaped like external benchmarks.
+- `publishable`: full external benchmark runs with LatticeDB storage, baselines,
+  ablations, traces, verification, and reproducible manifests.
+
+Only `publishable` reports may be used for external benchmark claims.
+
 Run the smoke baseline with:
 
 ```bash
@@ -55,5 +64,32 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --markdown docs/benchmark-results.md
 ```
 
-Use the generated report as a synthetic smoke benchmark only. External benchmark
-adapters for LoCoMo, LongMemEval, and MemoryAgentBench are still pending.
+Use the generated report as a synthetic smoke benchmark only.
+
+## External Smoke
+
+The external benchmark path starts with a normalized scenario format:
+
+- top-level metadata names the source benchmark, dataset version, license,
+  fixture format, cache environment variable, and task categories;
+- scenarios contain chronological events, messages, scopes, queries, expected
+  answers, expected evidence event IDs, forbidden evidence, forget operations,
+  and metadata;
+- all files remain JSON-compatible YAML so the current dependency-free loader
+  can parse them.
+
+LoCoMo has the first smoke fixture:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
+  --external-benchmark locomo \
+  --markdown artifacts/benchmarks/locomo-smoke/report.md
+```
+
+`just benchmark-locomo-smoke` runs the same command. It validates replay,
+retrieval, grading, forgetting, manifests, and the real-benchmark readiness
+gate without requiring external model keys. It is not a LoCoMo score.
+
+Full LoCoMo runs should use `--result-class publishable`, a real dataset path,
+LatticeDB enabled, provider configuration, verification status, and generated
+trace artifacts. LongMemEval and MemoryAgentBench remain next adapters.

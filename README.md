@@ -72,8 +72,16 @@ Quipu currently supports:
 
 ## Current Benchmark Snapshot
 
-The current benchmark surface is ready for honest synthetic smoke results. It is
-not ready for claims against LoCoMo, LongMemEval, or MemoryAgentBench yet.
+The current benchmark surface has two honest result classes:
+
+- `synthetic_smoke`: deterministic CI fixtures for temporal truth, scope,
+  evidence, preferences, and forgetting.
+- `external_smoke`: tiny normalized fixtures shaped like external benchmarks.
+
+`publishable` external results are not available yet. Do not advertise numbers
+for LoCoMo, LongMemEval, or MemoryAgentBench until a full LoCoMo run passes with
+LatticeDB storage, retrieval traces, answer and judge configuration, baselines,
+ablations, verification, and reproducible manifests.
 
 Latest local synthetic run:
 
@@ -83,6 +91,12 @@ Latest local synthetic run:
 
 See [docs/benchmark-results.md](./docs/benchmark-results.md) for the generated
 report and caveats.
+
+Current external smoke:
+
+- LoCoMo mini fixture: covers single-hop, multi-hop, temporal, adversarial,
+  event-summary, and forgetting paths. This validates the harness, not LoCoMo
+  performance.
 
 ## Try It
 
@@ -239,6 +253,9 @@ PYTHONPATH=evals/src python3 -m quipu_evals.core_runner --strict
 PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --include-lattice \
   --markdown docs/benchmark-results.md
+PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
+  --external-benchmark locomo \
+  --markdown artifacts/benchmarks/locomo-smoke/report.md
 PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
   --strict \
   --output artifacts/evals/core-results.json \
@@ -263,7 +280,7 @@ zig build -Denable-lattice=true \
 - `sdk/python/`: thin Python SDK and protocol tests.
 - `mcp/`: dependency-free MCP stdio adapter with tools, resources, and prompts.
 - `evals/`: synthetic scenario schema, fake baseline, Zig core runner, graders,
-  run manifests, and tests.
+  external smoke fixtures, run manifests, readiness gates, and tests.
 - `docs/`: implementation notes for API, algorithms, data model, evals,
   architecture, security, and publication.
 - `examples/`: planned integration examples.
