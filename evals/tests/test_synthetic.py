@@ -112,6 +112,77 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertEqual(run.to_json()["metrics"]["queriesPassed"], 5)
         self.assertEqual(run.to_json()["metrics"]["forgetOpsPassed"], 1)
 
+    @unittest.skipUnless(
+        shutil.which("zig") and LATTICE_INCLUDE and LATTICE_LIB,
+        "zig, LATTICE_INCLUDE, and LATTICE_LIB_DIR or LATTICE_LIB_PATH are required",
+    )
+    def test_core_lattice_vector_search_and_health(self):
+        env = os.environ.copy()
+        env["ZIG_GLOBAL_CACHE_DIR"] = "/tmp/quipu-zig-cache"
+        subprocess.run(
+            [
+                "zig",
+                "build",
+                "-Denable-lattice=true",
+                f"-Dlattice-include={LATTICE_INCLUDE}",
+                f"-Dlattice-lib={LATTICE_LIB}",
+            ],
+            cwd=str(CORE_DIR),
+            check=True,
+            env=env,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="quipu-lattice-vector-") as directory:
+            db_path = Path(directory) / "quipu.lattice"
+            with CoreStdioClient(CORE_BINARY, extra_args=["--db", str(db_path)]) as client:
+                health = client.call("system.health", {})
+                self.assertEqual(health["storage"]["backend"], "lattice")
+                self.assertTrue(health["storage"]["vector"])
+                self.assertEqual(health["storage"]["vectorDimensions"], 128)
+                self.assertEqual(health["storage"]["embeddingModel"], "lattice_hash_embed")
+
+                remembered = client.call(
+                    "memory.remember",
+                    {
+                        "scope": {"projectId": "repo:vector"},
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "The launch code is heliotrope.",
+                            }
+                        ],
+                        "extract": False,
+                    },
+                )
+                vector_results = client.call(
+                    "memory.search",
+                    {
+                        "query": "heliotrope launch code",
+                        "scope": {"projectId": "repo:vector"},
+                        "labels": ["message"],
+                        "mode": "vector",
+                        "limit": 5,
+                    },
+                )
+                hybrid_results = client.call(
+                    "memory.search",
+                    {
+                        "query": "heliotrope",
+                        "scope": {"projectId": "repo:vector"},
+                        "labels": ["message"],
+                        "mode": "hybrid",
+                        "limit": 5,
+                    },
+                )
+
+                self.assertEqual(remembered["status"], "stored")
+                self.assertTrue(
+                    any("heliotrope" in item["text"] for item in vector_results["results"])
+                )
+                self.assertTrue(
+                    any("heliotrope" in item["text"] for item in hybrid_results["results"])
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

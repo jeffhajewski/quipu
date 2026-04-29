@@ -2,6 +2,16 @@
 
 See [../SPEC.md](../SPEC.md) for the full design.
 
+## Search V0
+
+`memory.search` accepts `mode` values of `fts`, `vector`, `hybrid`, and `graph`.
+The in-memory adapter currently serves lexical search only; vector mode returns
+no hits when the active backend does not advertise vector capability. The
+Lattice adapter indexes deterministic `lattice_hash_embed` vectors when nodes
+are written and uses those vectors for `vector` and `hybrid` search. `hybrid`
+merges lexical and vector hits by qid before the runtime applies scope,
+deleted-state, label, and temporal filters.
+
 ## Retrieval V0
 
 The current in-memory retrieval path is deterministic and deliberately simple:
@@ -14,7 +24,7 @@ The current in-memory retrieval path is deterministic and deliberately simple:
 6. Drop items that exceed `budgetTokens`, preserving warning and trace counts.
 7. Split kept items into context sections and render the prompt from those sections.
 
-This gives later vector/BM25/reranking work a stable behavioral surface: retrieval must return scoped, evidence-backed, budgeted context packets rather than arbitrary top-k chunks.
+This gives later provider-embedding, BM25, and reranking work a stable behavioral surface: retrieval must return scoped, evidence-backed, budgeted context packets rather than arbitrary top-k chunks.
 
 ## Extraction V0
 

@@ -16,6 +16,17 @@
       "dbPath": null,
       "latticeVersion": null,
       "schemaVersion": 1,
+      "storage": {
+        "backend": "memory",
+        "durable": false,
+        "fullText": true,
+        "vector": false,
+        "streams": true,
+        "transactions": true,
+        "verification": true,
+        "vectorDimensions": null,
+        "embeddingModel": null
+      },
       "workers": {
         "extractor": "unavailable",
         "consolidator": "unavailable"

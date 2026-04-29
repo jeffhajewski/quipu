@@ -21,4 +21,5 @@ PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
 ```
 
 Set `LATTICE_INCLUDE` and `LATTICE_LIB_DIR` or `LATTICE_LIB_PATH` to enable the
-optional Lattice synthetic eval test in `evals/tests/test_synthetic.py`.
+optional Lattice synthetic eval and vector-search tests in
+`evals/tests/test_synthetic.py`.

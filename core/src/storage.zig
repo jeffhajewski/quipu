@@ -31,6 +31,18 @@ pub const VectorQuery = struct {
     limit: usize = 20,
 };
 
+pub const Capabilities = struct {
+    backend: []const u8 = "memory",
+    durable: bool = false,
+    full_text: bool = true,
+    vector: bool = false,
+    streams: bool = true,
+    transactions: bool = true,
+    verification: bool = true,
+    vector_dimensions: ?u16 = null,
+    embedding_model: ?[]const u8 = null,
+};
+
 pub const SearchHit = struct {
     qid: []const u8,
     score: f32,
@@ -57,10 +69,12 @@ pub const Adapter = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
+        capabilities: *const fn (*anyopaque) Capabilities,
         put_node: *const fn (*anyopaque, Node) anyerror!void,
         get_node: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!?Node,
         put_edge: *const fn (*anyopaque, Edge) anyerror!void,
         full_text_search: *const fn (*anyopaque, std.mem.Allocator, FullTextQuery) anyerror![]SearchHit,
+        embed_text: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror![]f32,
         vector_search: *const fn (*anyopaque, std.mem.Allocator, VectorQuery) anyerror![]SearchHit,
         append_stream: *const fn (*anyopaque, []const u8, []const u8) anyerror!StreamEntry,
         read_stream: *const fn (*anyopaque, std.mem.Allocator, []const u8, u64, usize) anyerror![]StreamEntry,
@@ -69,6 +83,10 @@ pub const Adapter = struct {
         rollback_transaction: *const fn (*anyopaque, Transaction) anyerror!void,
         verify: *const fn (*anyopaque, std.mem.Allocator) anyerror![]VerificationIssue,
     };
+
+    pub fn capabilities(self: Adapter) Capabilities {
+        return self.vtable.capabilities(self.context);
+    }
 
     pub fn putNode(self: Adapter, node: Node) !void {
         try self.vtable.put_node(self.context, node);
@@ -90,6 +108,10 @@ pub const Adapter = struct {
 
     pub fn fullTextSearch(self: Adapter, allocator: std.mem.Allocator, query: FullTextQuery) ![]SearchHit {
         return self.vtable.full_text_search(self.context, allocator, query);
+    }
+
+    pub fn embedText(self: Adapter, allocator: std.mem.Allocator, text: []const u8) ![]f32 {
+        return self.vtable.embed_text(self.context, allocator, text);
     }
 
     pub fn vectorSearch(self: Adapter, allocator: std.mem.Allocator, query: VectorQuery) ![]SearchHit {

@@ -17,5 +17,11 @@ Implemented adapters:
 The Lattice adapter stores Quipu nodes as Lattice nodes with stable public qids
 in properties, creates real Lattice edges for provenance when endpoints exist,
 and keeps shadow edge/stream records for adapter verification and stream reads.
-It uses Lattice FTS for retrieval and adds adapter-side token aggregation so the
-current natural-language retrieval semantics match the in-memory adapter.
+It uses Lattice FTS for lexical retrieval, stores deterministic
+`lattice_hash_embed` vectors on Quipu nodes, exposes Lattice vector search for
+`memory.search`, and adds adapter-side token aggregation so the current
+natural-language retrieval semantics match the in-memory adapter.
+
+`system.health` reports the active storage backend and capability flags so SDKs,
+evals, and operators can tell whether durable storage and vector search are
+available without probing backend-specific APIs.

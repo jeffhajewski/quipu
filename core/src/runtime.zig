@@ -47,7 +47,7 @@ const ScopeJson = struct {
 
 const MessageResult = struct {
     qid: []const u8,
-    @"type": []const u8,
+    type: []const u8,
     text: []const u8,
     score: f32,
     confidence: f32 = 1.0,
@@ -93,6 +93,13 @@ const EventWindow = struct {
     }
 };
 
+const SearchMode = enum {
+    fts,
+    vector,
+    hybrid,
+    graph,
+};
+
 const CoreBlockResult = struct {
     qid: []const u8,
     blockKey: []const u8,
@@ -104,13 +111,13 @@ const CoreBlockResult = struct {
 
 const NodeRefResult = struct {
     qid: []const u8,
-    @"type": []const u8,
+    type: []const u8,
     relation: []const u8,
 };
 
 const ForgetReportItem = struct {
     qid: []const u8,
-    @"type": []const u8,
+    type: []const u8,
     action: []const u8,
 };
 
@@ -176,6 +183,7 @@ pub const Runtime = struct {
                 .dbPath = self.health.db_path,
                 .latticeVersion = self.health.lattice_version,
                 .schemaVersion = self.health.schema_version,
+                .storage = storageHealth(self.store.capabilities()),
                 .workers = .{
                     .extractor = "unavailable",
                     .consolidator = "unavailable",
@@ -361,8 +369,11 @@ pub const Runtime = struct {
         const limit = integerField(params, "limit") orelse 20;
         const include_deleted = boolField(params, "includeDeleted") orelse false;
         const scope = parseScope(params);
+        const mode = parseSearchMode(stringField(params, "mode")) orelse {
+            return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
+        };
 
-        var results = try self.collectItems(allocator, query, @intCast(limit), scope, include_deleted, params.get("labels"), null, .{}, true);
+        var results = try self.collectItems(allocator, query, mode, @intCast(limit), scope, include_deleted, params.get("labels"), null, .{}, true);
         defer results.deinit();
 
         const response = .{
@@ -393,7 +404,7 @@ pub const Runtime = struct {
         const include_evidence = if (options) |opts| boolField(&opts, "includeEvidence") orelse true else true;
         const include_trace = if (options) |opts| (boolField(&opts, "includeDebug") orelse false) or (boolField(&opts, "logTrace") orelse false) else false;
 
-        var results = try self.collectItems(allocator, query, 40, scope, false, null, valid_at, event_window, include_evidence);
+        var results = try self.collectItems(allocator, query, .fts, 40, scope, false, null, valid_at, event_window, include_evidence);
         defer results.deinit();
         if (needsIncludes(needs_value, "core")) {
             try self.appendCoreItems(allocator, &results, scope, include_evidence);
@@ -471,7 +482,7 @@ pub const Runtime = struct {
             .result = .{
                 .node = .{
                     .qid = node.qid,
-                    .@"type" = labelType(node.label),
+                    .type = labelType(node.label),
                     .properties = .{ .rawJson = node.properties_json },
                 },
                 .provenance = provenance.items.items,
@@ -524,7 +535,7 @@ pub const Runtime = struct {
             defer dependents.deinit();
             facts_invalidated += dependents.items.items.len;
             for (dependents.items.items) |dependent| {
-                try report.append(allocator, dependent.qid, dependent.@"type", dependent_action);
+                try report.append(allocator, dependent.qid, dependent.type, dependent_action);
             }
 
             if (!dry_run) {
@@ -890,6 +901,7 @@ pub const Runtime = struct {
         self: *Runtime,
         allocator: std.mem.Allocator,
         query: []const u8,
+        mode: SearchMode,
         limit: usize,
         scope: Scope,
         include_deleted: bool,
@@ -898,7 +910,7 @@ pub const Runtime = struct {
         event_window: EventWindow,
         include_evidence: bool,
     ) !OwnedItems {
-        const hits = try self.store.fullTextSearch(allocator, .{ .text = query, .limit = @max(limit * 4, limit) });
+        const hits = try self.collectSearchHits(allocator, query, mode, @max(limit * 4, limit));
         defer freeHits(allocator, hits);
 
         var owned = OwnedItems{ .allocator = allocator };
@@ -932,7 +944,7 @@ pub const Runtime = struct {
             errdefer allocator.free(result_qid);
             try owned.items.append(allocator, .{
                 .qid = result_qid,
-                .@"type" = labelType(node.label),
+                .type = labelType(node.label),
                 .text = text,
                 .score = hit.score,
                 .state = state,
@@ -943,6 +955,46 @@ pub const Runtime = struct {
             if (owned.items.items.len >= limit) break;
         }
         return owned;
+    }
+
+    fn collectSearchHits(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, mode: SearchMode, limit: usize) ![]storage.SearchHit {
+        return switch (mode) {
+            .fts, .graph => self.store.fullTextSearch(allocator, .{ .text = query, .limit = limit }),
+            .vector => self.vectorTextSearch(allocator, query, limit) catch |err| switch (err) {
+                error.Unsupported => allocator.alloc(storage.SearchHit, 0),
+                else => |e| return e,
+            },
+            .hybrid => self.hybridSearch(allocator, query, limit),
+        };
+    }
+
+    fn vectorTextSearch(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, limit: usize) ![]storage.SearchHit {
+        const vector = try self.store.embedText(allocator, query);
+        defer allocator.free(vector);
+        return self.store.vectorSearch(allocator, .{ .vector = vector, .limit = limit });
+    }
+
+    fn hybridSearch(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, limit: usize) ![]storage.SearchHit {
+        const fts_hits = try self.store.fullTextSearch(allocator, .{ .text = query, .limit = limit });
+        defer freeHits(allocator, fts_hits);
+        const vector_hits = self.vectorTextSearch(allocator, query, limit) catch |err| switch (err) {
+            error.Unsupported => try allocator.alloc(storage.SearchHit, 0),
+            else => |e| return e,
+        };
+        defer freeHits(allocator, vector_hits);
+
+        var merged = std.ArrayList(storage.SearchHit).empty;
+        errdefer {
+            for (merged.items) |hit| allocator.free(hit.qid);
+            merged.deinit(allocator);
+        }
+        try appendMergedHits(allocator, &merged, fts_hits);
+        try appendMergedHits(allocator, &merged, vector_hits);
+        if (merged.items.len > limit) {
+            for (merged.items[limit..]) |hit| allocator.free(hit.qid);
+            merged.shrinkRetainingCapacity(limit);
+        }
+        return merged.toOwnedSlice(allocator);
     }
 
     fn appendCoreItems(self: *Runtime, allocator: std.mem.Allocator, owned: *OwnedItems, scope: Scope, include_evidence: bool) !void {
@@ -967,7 +1019,7 @@ pub const Runtime = struct {
             errdefer allocator.free(result_qid);
             try owned.items.append(allocator, .{
                 .qid = result_qid,
-                .@"type" = "core",
+                .type = "core",
                 .text = text,
                 .score = hit.score,
                 .state = state,
@@ -1009,7 +1061,7 @@ const OwnedItems = struct {
     fn suppressRawIfDerived(self: *OwnedItems) void {
         var has_derived = false;
         for (self.items.items) |item| {
-            if (std.mem.eql(u8, item.@"type", "fact") or std.mem.eql(u8, item.@"type", "preference") or std.mem.eql(u8, item.@"type", "procedure") or std.mem.eql(u8, item.@"type", "core")) {
+            if (std.mem.eql(u8, item.type, "fact") or std.mem.eql(u8, item.type, "preference") or std.mem.eql(u8, item.type, "procedure") or std.mem.eql(u8, item.type, "core")) {
                 has_derived = true;
                 break;
             }
@@ -1018,7 +1070,7 @@ const OwnedItems = struct {
 
         var write_index: usize = 0;
         for (self.items.items) |item| {
-            if (std.mem.eql(u8, item.@"type", "message") or std.mem.eql(u8, item.@"type", "raw")) {
+            if (std.mem.eql(u8, item.type, "message") or std.mem.eql(u8, item.type, "raw")) {
                 self.freeItem(item);
                 continue;
             }
@@ -1095,13 +1147,13 @@ const OwnedContextPacket = struct {
         var context = OwnedContextPacket{ .allocator = allocator, .warnings = warnings };
         errdefer context.deinit();
         for (items) |item| {
-            if (std.mem.eql(u8, item.@"type", "core")) {
+            if (std.mem.eql(u8, item.type, "core")) {
                 try context.core.append(allocator, item);
-            } else if (std.mem.eql(u8, item.@"type", "fact")) {
+            } else if (std.mem.eql(u8, item.type, "fact")) {
                 try context.current_facts.append(allocator, item);
-            } else if (std.mem.eql(u8, item.@"type", "preference")) {
+            } else if (std.mem.eql(u8, item.type, "preference")) {
                 try context.preferences.append(allocator, item);
-            } else if (std.mem.eql(u8, item.@"type", "procedure")) {
+            } else if (std.mem.eql(u8, item.type, "procedure")) {
                 try context.procedural.append(allocator, item);
             } else {
                 try context.episodes.append(allocator, item);
@@ -1139,7 +1191,7 @@ const OwnedNodeRefs = struct {
         errdefer allocator.free(owned_qid);
         try self.items.append(allocator, .{
             .qid = owned_qid,
-            .@"type" = node_type,
+            .type = node_type,
             .relation = relation,
         });
     }
@@ -1161,7 +1213,7 @@ const OwnedForgetReport = struct {
         errdefer allocator.free(owned_qid);
         try self.items.append(allocator, .{
             .qid = owned_qid,
-            .@"type" = node_type,
+            .type = node_type,
             .action = action,
         });
     }
@@ -1194,6 +1246,29 @@ fn parseEventWindow(params: *const ObjectMap) EventWindow {
     return .{
         .start = optionalStringField(&time_obj, "eventWindowStart"),
         .end = optionalStringField(&time_obj, "eventWindowEnd"),
+    };
+}
+
+fn parseSearchMode(value: ?[]const u8) ?SearchMode {
+    const mode = value orelse return .fts;
+    if (std.mem.eql(u8, mode, "fts")) return .fts;
+    if (std.mem.eql(u8, mode, "vector")) return .vector;
+    if (std.mem.eql(u8, mode, "hybrid")) return .hybrid;
+    if (std.mem.eql(u8, mode, "graph")) return .graph;
+    return null;
+}
+
+fn storageHealth(capabilities: storage.Capabilities) protocol.StorageHealth {
+    return .{
+        .backend = capabilities.backend,
+        .durable = capabilities.durable,
+        .fullText = capabilities.full_text,
+        .vector = capabilities.vector,
+        .streams = capabilities.streams,
+        .transactions = capabilities.transactions,
+        .verification = capabilities.verification,
+        .vectorDimensions = capabilities.vector_dimensions,
+        .embeddingModel = capabilities.embedding_model,
     };
 }
 
@@ -1397,14 +1472,14 @@ fn labelAllowed(label: []const u8, labels_value: ?Value) bool {
 
 fn itemAllowedByNeeds(item: MessageResult, needs_value: ?Value) bool {
     if (needsCount(needs_value) == 0) return true;
-    if (std.mem.eql(u8, item.@"type", "core")) return needsIncludes(needs_value, "core");
-    if (std.mem.eql(u8, item.@"type", "fact")) return needsIncludes(needs_value, "current_facts");
-    if (std.mem.eql(u8, item.@"type", "preference")) return needsIncludes(needs_value, "preferences");
-    if (std.mem.eql(u8, item.@"type", "procedure")) return needsIncludes(needs_value, "procedural");
-    if (std.mem.eql(u8, item.@"type", "message") or std.mem.eql(u8, item.@"type", "episode")) {
+    if (std.mem.eql(u8, item.type, "core")) return needsIncludes(needs_value, "core");
+    if (std.mem.eql(u8, item.type, "fact")) return needsIncludes(needs_value, "current_facts");
+    if (std.mem.eql(u8, item.type, "preference")) return needsIncludes(needs_value, "preferences");
+    if (std.mem.eql(u8, item.type, "procedure")) return needsIncludes(needs_value, "procedural");
+    if (std.mem.eql(u8, item.type, "message") or std.mem.eql(u8, item.type, "episode")) {
         return needsIncludes(needs_value, "recent_episodes") or needsIncludes(needs_value, "raw");
     }
-    if (std.mem.eql(u8, item.@"type", "raw")) return needsIncludes(needs_value, "raw");
+    if (std.mem.eql(u8, item.type, "raw")) return needsIncludes(needs_value, "raw");
     return true;
 }
 
@@ -1539,6 +1614,25 @@ fn freeHits(allocator: std.mem.Allocator, hits: []storage.SearchHit) void {
     allocator.free(hits);
 }
 
+fn appendMergedHits(allocator: std.mem.Allocator, merged: *std.ArrayList(storage.SearchHit), hits: []const storage.SearchHit) !void {
+    for (hits) |hit| {
+        if (indexOfHit(merged.items, hit.qid)) |index| {
+            merged.items[index].score += hit.score;
+            continue;
+        }
+        const qid = try allocator.dupe(u8, hit.qid);
+        errdefer allocator.free(qid);
+        try merged.append(allocator, .{ .qid = qid, .score = hit.score });
+    }
+}
+
+fn indexOfHit(hits: []const storage.SearchHit, qid: []const u8) ?usize {
+    for (hits, 0..) |hit, index| {
+        if (std.mem.eql(u8, hit.qid, qid)) return index;
+    }
+    return null;
+}
+
 fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     var writer: std.Io.Writer.Allocating = .init(allocator);
     errdefer writer.deinit();
@@ -1578,6 +1672,23 @@ test "runtime remembers and searches scoped raw messages" {
     );
     defer std.testing.allocator.free(search);
     try std.testing.expect(std.mem.indexOf(u8, search, "Use pnpm for this repo.") != null);
+}
+
+test "runtime health includes storage capabilities" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+
+    const health = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"h1\",\"method\":\"system.health\",\"params\":{}}",
+    );
+    defer std.testing.allocator.free(health);
+
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"storage\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"backend\":\"memory\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"vector\":false") != null);
 }
 
 test "runtime forget suppresses retrieval" {

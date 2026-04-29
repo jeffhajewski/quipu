@@ -12,7 +12,7 @@ Implemented now:
 
 - Zig core runtime with `system.health`, `memory.remember`, `memory.search`, `memory.retrieve`, `memory.inspect`, `memory.forget`, `memory.feedback`, `memory.core.get`, and `memory.core.update`.
 - In-memory storage adapter with graph-like nodes/edges, simple full-text search, streams, transaction stubs, and invariant verification.
-- Optional LatticeDB-backed storage adapter for durable node/edge storage, Lattice FTS retrieval, adapter-side stream records, persistence across process restarts, and invariant verification.
+- Optional LatticeDB-backed storage adapter for durable node/edge storage, Lattice FTS retrieval, hash-vector indexing/search, adapter-side stream records, persistence across process restarts, and invariant verification.
 - Deterministic extraction for package manager facts, response-style preferences, and test-command procedures, including temporal supersession and evidence links.
 - Retrieval V0 that returns both a rendered prompt and structured context packet, with scope filtering, needs filtering, token budgeting, `validAt`, event windows, warnings, and optional trace output.
 - Forgetting paths for dry-run reports, hard-delete tombstones, redaction state, and invalidation of derived memories backed by forgotten evidence.
@@ -25,7 +25,7 @@ Not implemented yet:
 
 - LatticeDB migrations and release-pinned dependency packaging.
 - Long-running socket or HTTP daemon process.
-- Real vector/BM25/reranking retrieval.
+- Provider-backed embeddings, BM25/reranking retrieval, and learned scoring.
 - LLM-backed extraction, consolidation workers, and plugin provider loading.
 - MCP resources/prompts and richer host integrations beyond the tool bridge.
 

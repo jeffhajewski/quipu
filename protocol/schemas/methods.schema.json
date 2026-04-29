@@ -92,7 +92,7 @@
     },
     "systemHealthResult": {
       "type": "object",
-      "required": ["status", "version", "protocolVersion", "schemaVersion", "workers"],
+      "required": ["status", "version", "protocolVersion", "schemaVersion", "storage", "workers"],
       "additionalProperties": false,
       "properties": {
         "status": { "type": "string", "enum": ["ok", "degraded", "error"] },
@@ -101,10 +101,27 @@
         "dbPath": { "type": ["string", "null"] },
         "latticeVersion": { "type": ["string", "null"] },
         "schemaVersion": { "type": "integer", "minimum": 0 },
+        "storage": { "$ref": "#/$defs/storageCapabilities" },
         "workers": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/workerState" }
         }
+      }
+    },
+    "storageCapabilities": {
+      "type": "object",
+      "required": ["backend", "durable", "fullText", "vector", "streams", "transactions", "verification"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "type": "string" },
+        "durable": { "type": "boolean" },
+        "fullText": { "type": "boolean" },
+        "vector": { "type": "boolean" },
+        "streams": { "type": "boolean" },
+        "transactions": { "type": "boolean" },
+        "verification": { "type": "boolean" },
+        "vectorDimensions": { "type": ["integer", "null"], "minimum": 1 },
+        "embeddingModel": { "type": ["string", "null"] }
       }
     },
     "memoryRememberParams": {

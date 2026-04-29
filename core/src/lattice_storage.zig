@@ -8,6 +8,8 @@ const c = @cImport({
 const node_marker = "quipunodeall";
 const edge_marker = "quipuedgeall";
 const stream_marker = "quipustreamall";
+const vector_dimensions: u16 = 128;
+const embedding_model = "lattice_hash_embed";
 
 const NodeIndex = struct {
     node_id: u64,
@@ -44,8 +46,8 @@ pub const LatticeAdapter = struct {
             .read_only = false,
             .cache_size_mb = 100,
             .page_size = 4096,
-            .enable_vector = false,
-            .vector_dimensions = 128,
+            .enable_vector = true,
+            .vector_dimensions = vector_dimensions,
         };
         var db: ?*c.lattice_database = null;
         try check(c.lattice_open(path_z.ptr, &opts, &db));
@@ -90,6 +92,20 @@ pub const LatticeAdapter = struct {
 
     pub fn nextRuntimeId(self: *const LatticeAdapter) u64 {
         return @max(self.next_runtime_id, 1);
+    }
+
+    fn capabilities(_: *anyopaque) storage.Capabilities {
+        return .{
+            .backend = "lattice",
+            .durable = true,
+            .full_text = true,
+            .vector = true,
+            .streams = true,
+            .transactions = true,
+            .verification = true,
+            .vector_dimensions = vector_dimensions,
+            .embedding_model = embedding_model,
+        };
     }
 
     fn loadIndexes(self: *LatticeAdapter) !void {
@@ -147,6 +163,7 @@ pub const LatticeAdapter = struct {
         const index_text = try self.indexText(self.allocator, node_marker, node.qid, node.label, node.properties_json);
         defer self.allocator.free(index_text);
         try check(c.lattice_fts_index(tx, @intCast(node_id), index_text.ptr, index_text.len));
+        try self.setNodeVector(tx, node_id, index_text);
         try check(c.lattice_commit(tx));
 
         try self.indexNode(node.qid, node_id, node.label);
@@ -250,9 +267,17 @@ pub const LatticeAdapter = struct {
             var distance: f32 = 0;
             try check(c.lattice_vector_result_get(result, index, &node_id, &distance));
             const qid = (try self.readStringPropertyInTxn(allocator, tx, @intCast(node_id), "qid")) orelse continue;
+            if (!self.qid_to_node.contains(qid)) {
+                allocator.free(qid);
+                continue;
+            }
             try hits.append(allocator, .{ .qid = qid, .score = 1.0 / (1.0 + distance) });
         }
         return hits.toOwnedSlice(allocator);
+    }
+
+    fn embedText(_: *anyopaque, allocator: std.mem.Allocator, text: []const u8) ![]f32 {
+        return hashEmbed(allocator, text);
     }
 
     fn appendStream(context: *anyopaque, stream: []const u8, payload_json: []const u8) !storage.StreamEntry {
@@ -518,6 +543,13 @@ pub const LatticeAdapter = struct {
         try check(c.lattice_edge_set_property(tx, @intCast(edge_id), key, &property));
     }
 
+    fn setNodeVector(self: *LatticeAdapter, tx: *c.lattice_txn, node_id: u64, text: []const u8) !void {
+        const vector = try hashEmbed(self.allocator, text);
+        defer self.allocator.free(vector);
+        if (vector.len == 0) return;
+        try check(c.lattice_node_set_vector(tx, @intCast(node_id), "embedding", vector.ptr, @intCast(vector.len)));
+    }
+
     fn readStringPropertyInTxn(
         self: *LatticeAdapter,
         allocator: std.mem.Allocator,
@@ -644,10 +676,12 @@ pub const LatticeAdapter = struct {
     }
 
     const vtable = storage.Adapter.VTable{
+        .capabilities = capabilities,
         .put_node = putNode,
         .get_node = getNode,
         .put_edge = putEdge,
         .full_text_search = fullTextSearch,
+        .embed_text = embedText,
         .vector_search = vectorSearch,
         .append_stream = appendStream,
         .read_stream = readStream,
@@ -657,6 +691,15 @@ pub const LatticeAdapter = struct {
         .verify = verify,
     };
 };
+
+fn hashEmbed(allocator: std.mem.Allocator, text: []const u8) ![]f32 {
+    var vector_ptr: [*c]f32 = null;
+    var dims: u32 = 0;
+    try check(c.lattice_hash_embed(text.ptr, text.len, vector_dimensions, &vector_ptr, &dims));
+    defer if (vector_ptr != null) c.lattice_hash_embed_free(vector_ptr, dims);
+    if (vector_ptr == null or dims == 0) return allocator.alloc(f32, 0);
+    return try allocator.dupe(f32, vector_ptr[0..dims]);
+}
 
 fn stringValue(value: []const u8) c.lattice_value {
     return .{

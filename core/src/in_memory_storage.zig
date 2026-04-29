@@ -83,6 +83,18 @@ pub const InMemoryAdapter = struct {
         };
     }
 
+    fn capabilities(_: *anyopaque) storage.Capabilities {
+        return .{
+            .backend = "memory",
+            .durable = false,
+            .full_text = true,
+            .vector = false,
+            .streams = true,
+            .transactions = true,
+            .verification = true,
+        };
+    }
+
     fn putNode(context: *anyopaque, node: storage.Node) !void {
         const self = ctx(context);
         const key = try self.allocator.dupe(u8, node.qid);
@@ -142,6 +154,10 @@ pub const InMemoryAdapter = struct {
 
     fn vectorSearch(_: *anyopaque, allocator: std.mem.Allocator, _: storage.VectorQuery) ![]storage.SearchHit {
         return allocator.alloc(storage.SearchHit, 0);
+    }
+
+    fn embedText(_: *anyopaque, _: std.mem.Allocator, _: []const u8) ![]f32 {
+        return error.Unsupported;
     }
 
     fn appendStream(context: *anyopaque, stream: []const u8, payload_json: []const u8) !storage.StreamEntry {
@@ -386,10 +402,12 @@ pub const InMemoryAdapter = struct {
     }
 
     const vtable = storage.Adapter.VTable{
+        .capabilities = capabilities,
         .put_node = putNode,
         .get_node = getNode,
         .put_edge = putEdge,
         .full_text_search = fullTextSearch,
+        .embed_text = embedText,
         .vector_search = vectorSearch,
         .append_stream = appendStream,
         .read_stream = readStream,
@@ -419,6 +437,18 @@ test "in-memory adapter stores nodes and searches text" {
 
     try std.testing.expectEqual(@as(usize, 1), hits.len);
     try std.testing.expectEqualStrings("q_msg_1", hits[0].qid);
+}
+
+test "in-memory adapter reports storage capabilities" {
+    var adapter_state = InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    const adapter = adapter_state.adapter();
+    const caps = adapter.capabilities();
+
+    try std.testing.expectEqualStrings("memory", caps.backend);
+    try std.testing.expect(!caps.durable);
+    try std.testing.expect(caps.full_text);
+    try std.testing.expect(!caps.vector);
 }
 
 test "in-memory verification reports dangling edges" {

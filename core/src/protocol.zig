@@ -4,12 +4,25 @@ pub const ProtocolError = error{
     InvalidRequest,
 };
 
+pub const StorageHealth = struct {
+    backend: []const u8 = "memory",
+    durable: bool = false,
+    fullText: bool = true,
+    vector: bool = false,
+    streams: bool = true,
+    transactions: bool = true,
+    verification: bool = true,
+    vectorDimensions: ?u16 = null,
+    embeddingModel: ?[]const u8 = null,
+};
+
 pub const Health = struct {
     version: []const u8 = "0.1.0",
     protocol_version: []const u8 = "2026-04-quipu-v1",
     db_path: ?[]const u8 = null,
     lattice_version: ?[]const u8 = null,
     schema_version: u32 = 1,
+    storage: StorageHealth = .{},
 
     pub fn default() Health {
         return .{};
@@ -56,6 +69,7 @@ fn healthResponse(allocator: std.mem.Allocator, id: ?[]const u8, health: Health)
             .dbPath = health.db_path,
             .latticeVersion = health.lattice_version,
             .schemaVersion = health.schema_version,
+            .storage = health.storage,
             .workers = .{
                 .extractor = "unavailable",
                 .consolidator = "unavailable",
