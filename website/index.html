@@ -179,23 +179,6 @@
               submit requests instead of duplicating memory behavior.
             </figcaption>
           </figure>
-          <div class="ascii-panel" role="img" aria-label="Quipu architecture flow">
-            <pre><code>agent / app / mcp host
-        |
-        v
-thin sdk or cli  -- JSON-RPC 2.0 -->  quipu core runtime
-                                           |
-              +----------------------------+----------------------------+
-              |                            |                            |
-              v                            v                            v
-       raw evidence                 derived memory              retrieval packet
-       messages/events              facts/procedures            scoped + cited
-              |                            |                            |
-              +------------ provenance edges + temporal validity --------+
-                                           |
-                                           v
-                                  local storage adapter</code></pre>
-          </div>
           <div class="work-notes">
             <p>
               The public API is intentionally small. SDKs validate inputs and

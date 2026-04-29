@@ -310,8 +310,7 @@ h3 {
 .reason-grid article,
 .status-columns article,
 .code-grid figure,
-.terminal,
-.ascii-panel {
+.terminal {
   background: rgba(255, 253, 247, 0.62);
 }
 
@@ -363,11 +362,6 @@ h3 {
   margin: 0 0 1.5rem;
 }
 
-.ascii-panel {
-  border: 1px solid var(--line);
-}
-
-.ascii-panel pre,
 .terminal pre,
 .code-grid pre {
   padding: 1.1rem;
@@ -543,7 +537,6 @@ h3 {
     gap: 0.9rem;
   }
 
-  .ascii-panel pre,
   .terminal pre,
   .code-grid pre {
     font-size: 0.78rem;
