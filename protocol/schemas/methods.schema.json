@@ -66,6 +66,7 @@
         "query",
         "requestedNeedsCount",
         "budgetTokens",
+        "candidateSources",
         "candidateCount",
         "keptCount",
         "droppedForNeeds",
@@ -77,12 +78,42 @@
         "query": { "type": "string" },
         "requestedNeedsCount": { "type": "integer", "minimum": 0 },
         "budgetTokens": { "type": "integer", "minimum": 1 },
+        "candidateSources": {
+          "type": "object",
+          "required": ["fts", "vector", "hybrid", "graph", "core"],
+          "additionalProperties": false,
+          "properties": {
+            "fts": { "type": "integer", "minimum": 0 },
+            "vector": { "type": "integer", "minimum": 0 },
+            "hybrid": { "type": "integer", "minimum": 0 },
+            "graph": { "type": "integer", "minimum": 0 },
+            "core": { "type": "integer", "minimum": 0 }
+          }
+        },
         "candidateCount": { "type": "integer", "minimum": 0 },
         "keptCount": { "type": "integer", "minimum": 0 },
         "droppedForNeeds": { "type": "integer", "minimum": 0 },
         "droppedForBudget": { "type": "integer", "minimum": 0 },
         "tokenEstimate": { "type": "integer", "minimum": 0 },
-        "validAt": { "type": ["string", "null"], "format": "date-time" }
+        "validAt": { "type": ["string", "null"], "format": "date-time" },
+        "scoreBreakdowns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["qid", "type", "score", "lexical", "temporal", "scope", "confidence", "recency"],
+            "additionalProperties": false,
+            "properties": {
+              "qid": { "$ref": "#/$defs/qid" },
+              "type": { "type": "string" },
+              "score": { "type": "number" },
+              "lexical": { "type": "number" },
+              "temporal": { "type": "number" },
+              "scope": { "type": "number" },
+              "confidence": { "type": "number" },
+              "recency": { "type": "number" }
+            }
+          }
+        }
       }
     },
     "systemHealthParams": {

@@ -79,12 +79,33 @@ const RetrievalTrace = struct {
     query: []const u8,
     requestedNeedsCount: usize,
     budgetTokens: i64,
+    candidateSources: CandidateSources = .{},
     candidateCount: usize,
     keptCount: usize,
     droppedForNeeds: usize,
     droppedForBudget: usize,
     tokenEstimate: usize,
     validAt: ?[]const u8 = null,
+    scoreBreakdowns: []const ScoreBreakdown = &.{},
+};
+
+const CandidateSources = struct {
+    fts: usize = 0,
+    vector: usize = 0,
+    hybrid: usize = 0,
+    graph: usize = 0,
+    core: usize = 0,
+};
+
+const ScoreBreakdown = struct {
+    qid: []const u8,
+    type: []const u8,
+    score: f32,
+    lexical: f32,
+    temporal: f32,
+    scope: f32,
+    confidence: f32,
+    recency: f32,
 };
 
 const EventWindow = struct {
@@ -476,6 +497,7 @@ pub const Runtime = struct {
         if (results.items.items.len == 0) {
             try warnings.append(allocator, "no_memory_items");
         }
+        try appendRetrievalWarnings(allocator, &warnings, results.items.items, include_evidence);
 
         var context = try OwnedContextPacket.fromItems(allocator, results.items.items, warnings.items);
         defer context.deinit();
@@ -485,16 +507,23 @@ pub const Runtime = struct {
         const prompt = try promptFromContext(allocator, context.view());
         defer allocator.free(prompt);
         const token_estimate = @max(@as(usize, 1), prompt.len / 4);
+        const score_breakdowns = try buildScoreBreakdowns(allocator, results.items.items);
+        defer allocator.free(score_breakdowns);
         const trace = RetrievalTrace{
             .query = query,
             .requestedNeedsCount = needsCount(needs_value),
             .budgetTokens = budget,
+            .candidateSources = .{
+                .fts = candidate_count,
+                .core = context.core.items.len,
+            },
             .candidateCount = candidate_count,
             .keptCount = results.items.items.len,
             .droppedForNeeds = dropped_for_needs,
             .droppedForBudget = dropped_for_budget,
             .tokenEstimate = token_estimate,
             .validAt = valid_at,
+            .scoreBreakdowns = score_breakdowns,
         };
 
         const event_payload = try stringifyAlloc(allocator, .{
@@ -1928,6 +1957,76 @@ fn freeEvidence(allocator: std.mem.Allocator, evidence: []const EvidenceResult) 
     allocator.free(evidence);
 }
 
+fn appendRetrievalWarnings(
+    allocator: std.mem.Allocator,
+    warnings: *std.ArrayList([]const u8),
+    items: []const MessageResult,
+    include_evidence: bool,
+) !void {
+    var weak_evidence = false;
+    var historical = false;
+    for (items) |item| {
+        if (include_evidence and evidenceExpected(item.type) and item.evidence.len == 0) {
+            weak_evidence = true;
+        }
+        if (item.validTo != null or std.mem.eql(u8, item.state, "superseded") or std.mem.eql(u8, item.state, "historical")) {
+            historical = true;
+        }
+    }
+    if (weak_evidence and !containsWarning(warnings.items, "weak_evidence")) {
+        try warnings.append(allocator, "weak_evidence");
+    }
+    if (historical and !containsWarning(warnings.items, "historical_memory")) {
+        try warnings.append(allocator, "historical_memory");
+    }
+}
+
+fn buildScoreBreakdowns(allocator: std.mem.Allocator, items: []const MessageResult) ![]ScoreBreakdown {
+    const breakdowns = try allocator.alloc(ScoreBreakdown, items.len);
+    for (items, 0..) |item, index| {
+        breakdowns[index] = .{
+            .qid = item.qid,
+            .type = item.type,
+            .score = item.score,
+            .lexical = normalizeScore(item.score),
+            .temporal = temporalScore(item),
+            .scope = 1.0,
+            .confidence = item.confidence,
+            .recency = recencyScore(item),
+        };
+    }
+    return breakdowns;
+}
+
+fn evidenceExpected(item_type: []const u8) bool {
+    return std.mem.eql(u8, item_type, "fact") or
+        std.mem.eql(u8, item_type, "preference") or
+        std.mem.eql(u8, item_type, "procedure") or
+        std.mem.eql(u8, item_type, "memory_card");
+}
+
+fn containsWarning(warnings: []const []const u8, expected: []const u8) bool {
+    for (warnings) |warning| {
+        if (std.mem.eql(u8, warning, expected)) return true;
+    }
+    return false;
+}
+
+fn normalizeScore(score: f32) f32 {
+    if (score <= 0) return 0;
+    return score / (score + 1.0);
+}
+
+fn temporalScore(item: MessageResult) f32 {
+    if (std.mem.eql(u8, item.state, "current")) return 1.0;
+    if (std.mem.eql(u8, item.state, "superseded") or std.mem.eql(u8, item.state, "historical")) return 0.5;
+    return 0.0;
+}
+
+fn recencyScore(item: MessageResult) f32 {
+    return if (item.validFrom != null) 0.75 else 0.5;
+}
+
 fn estimateItemTokens(item: MessageResult) usize {
     return @max(@as(usize, 1), item.text.len / 4 + 8);
 }
@@ -2309,6 +2408,8 @@ test "runtime retrieve assembles categorized context and trace" {
     try std.testing.expect(std.mem.indexOf(u8, retrieve, "Run just test before committing.") != null);
     try std.testing.expect(std.mem.indexOf(u8, retrieve, "\"trace\":{") != null);
     try std.testing.expect(std.mem.indexOf(u8, retrieve, "\"requestedNeedsCount\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "\"candidateSources\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "\"scoreBreakdowns\"") != null);
 
     const no_evidence = try runtime.dispatch(
         std.testing.allocator,

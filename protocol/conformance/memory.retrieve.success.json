@@ -85,12 +85,31 @@
         "query": "What should I know before editing this repo?",
         "requestedNeedsCount": 4,
         "budgetTokens": 1200,
+        "candidateSources": {
+          "fts": 1,
+          "vector": 0,
+          "hybrid": 0,
+          "graph": 0,
+          "core": 0
+        },
         "candidateCount": 1,
         "keptCount": 1,
         "droppedForNeeds": 0,
         "droppedForBudget": 0,
         "tokenEstimate": 48,
-        "validAt": null
+        "validAt": null,
+        "scoreBreakdowns": [
+          {
+            "qid": "q_fact_local1",
+            "type": "fact",
+            "score": 0.91,
+            "lexical": 0.48,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 0.94,
+            "recency": 0.75
+          }
+        ]
       }
     }
   }
