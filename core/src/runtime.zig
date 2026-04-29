@@ -198,6 +198,7 @@ pub const Runtime = struct {
         if (std.mem.eql(u8, method, "memory.feedback")) return self.memoryFeedback(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.get")) return self.memoryCoreGet(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.update")) return self.memoryCoreUpdate(allocator, id, &params);
+        if (std.mem.eql(u8, method, "memory.core.consolidate")) return self.memoryCoreConsolidate(allocator, id, &params);
 
         return errorResponse(allocator, id, "not_found", "unsupported method");
     }
@@ -829,6 +830,93 @@ pub const Runtime = struct {
             .jsonrpc = "2.0",
             .id = id,
             .result = .{ .blocks = blocks.items },
+        };
+        return stringifyAlloc(allocator, response);
+    }
+
+    fn memoryCoreConsolidate(self: *Runtime, allocator: std.mem.Allocator, id: ?[]const u8, params: *const ObjectMap) ![]u8 {
+        const scope = parseScope(params);
+        const block_key = stringField(params, "blockKey") orelse "project_summary";
+        const requested_limit = integerField(params, "limit") orelse 50;
+        if (requested_limit <= 0) {
+            return errorResponse(allocator, id, "invalid_request", "limit must be greater than zero");
+        }
+        const limit = @as(usize, @intCast(requested_limit));
+
+        var summary_writer: std.Io.Writer.Allocating = .init(allocator);
+        defer summary_writer.deinit();
+        try summary_writer.writer.writeAll("Consolidated memory:");
+
+        var evidence_qids = std.ArrayList([]const u8).empty;
+        defer {
+            for (evidence_qids.items) |qid| allocator.free(qid);
+            evidence_qids.deinit(allocator);
+        }
+
+        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
+        defer freeHits(allocator, hits);
+        for (hits) |hit| {
+            if (evidence_qids.items.len >= limit) break;
+            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!isConsolidatableLabel(node.label)) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            if (!try scope.matchesNode(allocator, node)) continue;
+            if (isDerivedLabel(node.label) and !try propertyEquals(allocator, node.properties_json, "state", "current")) continue;
+            const text = textForNode(allocator, node) catch continue;
+            defer allocator.free(text);
+            try summary_writer.writer.print("\n- ({s}) {s}", .{ node.qid, text });
+            try evidence_qids.append(allocator, try allocator.dupe(u8, node.qid));
+        }
+
+        const existing_qid = try self.findCoreBlockQid(allocator, scope, block_key);
+        defer if (existing_qid) |qid| allocator.free(qid);
+        const block_qid = if (existing_qid) |qid| try allocator.dupe(u8, qid) else try self.nextQid(allocator, "core");
+        defer allocator.free(block_qid);
+        const status: []const u8 = if (existing_qid == null) "stored" else "updated";
+
+        const summary_text = try summary_writer.toOwnedSlice();
+        defer allocator.free(summary_text);
+        const props = try stringifyAlloc(allocator, .{
+            .kind = "core",
+            .qtype = "core",
+            .blockKey = block_key,
+            .text = summary_text,
+            .managedBy = "agent",
+            .evidenceQids = evidence_qids.items,
+            .tenantId = scope.tenant_id,
+            .userId = scope.user_id,
+            .agentId = scope.agent_id,
+            .projectId = scope.project_id,
+            .deleted = false,
+        });
+        defer allocator.free(props);
+        try self.store.putNode(.{ .qid = block_qid, .label = "Core", .properties_json = props });
+
+        for (evidence_qids.items) |source_qid| {
+            try self.putDeterministicEdge(allocator, block_qid, source_qid, "COMPILED_FROM");
+        }
+
+        const event_payload = try stringifyAlloc(allocator, .{
+            .method = "memory.core.consolidate",
+            .status = status,
+            .blockQid = block_qid,
+            .blockKey = block_key,
+            .sourceCount = evidence_qids.items.len,
+        });
+        defer allocator.free(event_payload);
+        _ = try self.publishEvent(streams.consolidate_completed, event_payload);
+        _ = try self.publishEvent(streams.audit, event_payload);
+
+        const response = .{
+            .jsonrpc = "2.0",
+            .id = id,
+            .result = .{
+                .blockQid = block_qid,
+                .blockKey = block_key,
+                .status = status,
+                .sourceCount = evidence_qids.items.len,
+            },
         };
         return stringifyAlloc(allocator, response);
     }
@@ -1824,6 +1912,10 @@ fn isEvidenceLinkedLabel(label: []const u8) bool {
     return isDerivedLabel(label) or std.mem.eql(u8, label, "MemoryCard") or std.mem.eql(u8, label, "Episode");
 }
 
+fn isConsolidatableLabel(label: []const u8) bool {
+    return isDerivedLabel(label) or std.mem.eql(u8, label, "MemoryCard") or std.mem.eql(u8, label, "Episode");
+}
+
 fn isFactLikeType(node_type: []const u8) bool {
     return std.mem.eql(u8, node_type, "fact") or std.mem.eql(u8, node_type, "preference") or std.mem.eql(u8, node_type, "procedure");
 }
@@ -2338,6 +2430,34 @@ test "runtime stores and replaces core blocks" {
     );
     defer std.testing.allocator.free(get);
     try std.testing.expect(std.mem.indexOf(u8, get, "run zig build test") != null);
+}
+
+test "runtime consolidates derived memory into a core block" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+
+    const remember = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"This repo uses pnpm. Run just test before committing.\",\"createdAt\":\"2026-04-01T10:00:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(remember);
+
+    const consolidate = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"method\":\"memory.core.consolidate\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"blockKey\":\"project_summary\"}}",
+    );
+    defer std.testing.allocator.free(consolidate);
+    try std.testing.expect(std.mem.indexOf(u8, consolidate, "\"sourceCount\"") != null);
+
+    const retrieve = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"Consolidated pnpm\",\"scope\":{\"projectId\":\"repo:test\"},\"needs\":[\"core\"]}}",
+    );
+    defer std.testing.allocator.free(retrieve);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "Consolidated memory:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "The repo uses pnpm as its package manager.") != null);
 }
 
 test "runtime extracts current package manager facts" {

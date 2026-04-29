@@ -94,6 +94,12 @@ const FeedbackCliArgs = struct {
     rating: ?[]const u8 = null,
 };
 
+const ConsolidateCliArgs = struct {
+    block_key: []const u8 = "project_summary",
+    limit: i64 = 50,
+    scope: ScopeCliArgs = .{},
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -337,6 +343,15 @@ fn runCommand(
         return;
     }
 
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "consolidate")) {
+        const request = buildConsolidateRequest(allocator, args[command_index + 1 ..]) catch {
+            return printCliError(stdout, allocator, "invalid consolidate arguments");
+        };
+        defer allocator.free(request);
+        try dispatchAndPrint(stdout, allocator, runtime, request);
+        return;
+    }
+
     if (args.len > command_index and std.mem.eql(u8, args[command_index], "rpc-stdin")) {
         var stdin_buffer: [4096]u8 = undefined;
         var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
@@ -376,7 +391,7 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--need NEED] | inspect ID | forget --id ID [--yes] | feedback --retrieval ID --rating RATING | verify [schema|provenance|temporal|forgetting]... | jobs materialize|lease|complete|fail ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--need NEED] | inspect ID | forget --id ID [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | verify [schema|provenance|temporal|forgetting]... | jobs materialize|lease|complete|fail ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
@@ -390,6 +405,7 @@ fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
         std.mem.eql(u8, command, "inspect") or
         std.mem.eql(u8, command, "forget") or
         std.mem.eql(u8, command, "feedback") or
+        std.mem.eql(u8, command, "consolidate") or
         std.mem.eql(u8, command, "verify") or
         std.mem.eql(u8, command, "jobs");
 }
@@ -600,6 +616,20 @@ fn buildFeedbackRequest(allocator: std.mem.Allocator, args: []const [:0]const u8
     });
 }
 
+fn buildConsolidateRequest(allocator: std.mem.Allocator, args: []const [:0]const u8) ![]u8 {
+    const parsed = try parseConsolidateArgs(args);
+    return stringifyAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = "cli_consolidate",
+        .method = "memory.core.consolidate",
+        .params = .{
+            .blockKey = parsed.block_key,
+            .scope = parsed.scope.json(),
+            .limit = parsed.limit,
+        },
+    });
+}
+
 fn parseRememberArgs(args: []const [:0]const u8) !RememberCliArgs {
     var parsed = RememberCliArgs{};
     var index: usize = 0;
@@ -703,6 +733,24 @@ fn parseFeedbackArgs(args: []const [:0]const u8) !FeedbackCliArgs {
             parsed.retrieval_id = try nextArg(args, &index);
         } else if (std.mem.eql(u8, arg, "--rating")) {
             parsed.rating = try nextArg(args, &index);
+        } else {
+            return error.InvalidArgs;
+        }
+    }
+    return parsed;
+}
+
+fn parseConsolidateArgs(args: []const [:0]const u8) !ConsolidateCliArgs {
+    var parsed = ConsolidateCliArgs{};
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--block-key")) {
+            parsed.block_key = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--limit")) {
+            parsed.limit = try std.fmt.parseInt(i64, try nextArg(args, &index), 10);
+        } else if (try parseScopeArg(arg, args, &index, &parsed.scope)) {
+            continue;
         } else {
             return error.InvalidArgs;
         }
