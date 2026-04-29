@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "evals" / "src"))
 
 from quipu_evals.core_client import CoreStdioClient  # noqa: E402
 from quipu_evals.core_runner import run_core_suite  # noqa: E402
+from quipu_evals.artifacts import build_manifest  # noqa: E402
 from quipu_evals import load_suite, run_suite  # noqa: E402
 
 
@@ -39,6 +40,21 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertEqual(len(run.query_runs), 5)
         self.assertEqual(len(run.forget_runs), 1)
         self.assertEqual(run.to_json()["metrics"]["queriesPassed"], 5)
+
+    def test_eval_manifest_summarizes_run_artifacts(self):
+        run = run_suite(SUITE_PATH)
+        manifest = build_manifest(
+            run.to_json(),
+            suite_path=SUITE_PATH,
+            runner="test",
+            storage="fake",
+            results_path="artifacts/results.json",
+        )
+
+        self.assertEqual(manifest["schemaVersion"], "quipu.eval.run.v1")
+        self.assertEqual(manifest["suite"]["name"], "quipu_synthetic")
+        self.assertEqual(manifest["baseline"], "q0_raw_only_fake")
+        self.assertEqual(manifest["artifacts"]["results"], "artifacts/results.json")
 
     @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
     def test_core_stdio_remember_retrieve_forget_smoke(self):

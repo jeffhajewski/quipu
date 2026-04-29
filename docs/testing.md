@@ -10,6 +10,15 @@ python3 scripts/run_tests.py
 PYTHONPATH=evals/src python3 -m quipu_evals.core_runner --strict
 ```
 
+Eval runners can also write artifacts:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
+  --strict \
+  --output artifacts/evals/core-results.json \
+  --manifest artifacts/evals/core-manifest.json
+```
+
 Optional LatticeDB-backed eval smoke:
 
 ```bash

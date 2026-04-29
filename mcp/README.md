@@ -36,5 +36,18 @@ different core binary, set `QUIPU_CORE_BINARY`.
 - `quipu_core_get`
 - `quipu_core_update`
 
-Resources and prompts are intentionally empty for now. The first adapter pass is
-limited to a thin tool bridge over the public Quipu protocol.
+## Resources
+
+- `quipu://docs/readme`
+- `quipu://docs/spec`
+- `quipu://protocol/methods-schema`
+- `quipu://evals/synthetic-suite`
+
+## Prompts
+
+- `quipu_retrieve_context`: retrieve scoped memory for a host model task.
+- `quipu_remember_turn`: store a user or assistant turn before continuing.
+
+The adapter stays thin: resources and prompts help hosts discover Quipu, but all
+memory writes, reads, forgetting, and retrieval semantics still flow through the
+core JSON-RPC protocol.

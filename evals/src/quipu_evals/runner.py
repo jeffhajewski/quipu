@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Iterable, Union
 
+from .artifacts import build_manifest, write_json
 from .fake_client import Q0RawOnlyBaseline
 from .graders import (
     GradeResult,
@@ -152,9 +153,25 @@ def forget_run_to_json(run: ForgetRun) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("suite", nargs="?", default="evals/suites/quipu_synthetic.yaml")
+    parser.add_argument("--output", type=Path, help="Write the full run result JSON to this path")
+    parser.add_argument("--manifest", type=Path, help="Write a compact eval run manifest to this path")
     args = parser.parse_args()
     run = run_suite(args.suite)
-    print(json.dumps(run.to_json(), indent=2, sort_keys=True))
+    run_json = run.to_json()
+    if args.output:
+        write_json(args.output, run_json)
+    if args.manifest:
+        write_json(
+            args.manifest,
+            build_manifest(
+                run_json,
+                suite_path=args.suite,
+                runner="quipu_evals.runner",
+                storage="fake",
+                results_path=args.output,
+            ),
+        )
+    print(json.dumps(run_json, indent=2, sort_keys=True))
     return 0 if run.passed else 1
 
 

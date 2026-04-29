@@ -65,9 +65,10 @@ Quipu currently supports:
   extraction, consolidation, forgetting, retrieval logging, and feedback work.
 - Python and TypeScript SDKs that validate JSON-RPC shape and talk to a local
   `quipu serve-stdio` process.
-- A dependency-free MCP stdio adapter for tool-calling hosts.
+- A dependency-free MCP stdio adapter with tools, docs/schema resources, and
+  workflow prompts for tool-calling hosts.
 - Synthetic evals that check temporal truth, cross-scope leakage, evidence
-  faithfulness, and forgetting leakage.
+  faithfulness, forgetting leakage, and emit run manifests.
 
 ## Try It
 
@@ -106,6 +107,11 @@ quipu --db "$HOME/.quipu/memory.lattice" retrieve \
   --query "test command" \
   --need procedural \
   --debug
+quipu --db "$HOME/.quipu/memory.lattice" consolidate --project repo:quipu
+quipu --db "$HOME/.quipu/memory.lattice" forget \
+  --project repo:quipu \
+  --query "pnpm" \
+  --dry-run
 ```
 
 ## SDK Examples
@@ -190,8 +196,8 @@ Implemented:
 - Retrieval, inspection, feedback, core memory blocks, forgetting, and audit
   stream logging.
 - Python/TypeScript SDK validators and stdio clients.
-- MCP tool bridge.
-- Synthetic eval harness and strict core eval baseline.
+- MCP tools, resources, and prompts.
+- Synthetic eval harness, strict core eval baseline, and run manifests.
 
 Still in progress:
 
@@ -200,7 +206,7 @@ Still in progress:
 - LatticeDB migrations and schema versioning.
 - Provider-backed embeddings, BM25/reranking, and learned scoring.
 - LLM-backed extraction and consolidation workers.
-- Richer MCP resources/prompts and host integrations.
+- Richer host integrations and external benchmark adapters.
 
 ## Development
 
@@ -214,6 +220,10 @@ just ci
 cd core && zig build test
 cd sdk/typescript && npm test
 PYTHONPATH=evals/src python3 -m quipu_evals.core_runner --strict
+PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
+  --strict \
+  --output artifacts/evals/core-results.json \
+  --manifest artifacts/evals/core-manifest.json
 ```
 
 Build with an explicit LatticeDB release:
@@ -232,9 +242,9 @@ zig build -Denable-lattice=true \
 - `protocol/`: JSON-RPC schemas and conformance fixtures.
 - `sdk/typescript/`: thin TypeScript SDK and protocol tests.
 - `sdk/python/`: thin Python SDK and protocol tests.
-- `mcp/`: dependency-free MCP stdio tool adapter.
+- `mcp/`: dependency-free MCP stdio adapter with tools, resources, and prompts.
 - `evals/`: synthetic scenario schema, fake baseline, Zig core runner, graders,
-  and tests.
+  run manifests, and tests.
 - `docs/`: implementation notes for API, algorithms, data model, evals,
   architecture, security, and publication.
 - `examples/`: planned integration examples.

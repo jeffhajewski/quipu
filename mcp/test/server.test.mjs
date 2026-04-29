@@ -31,6 +31,8 @@ test("initialize advertises tools capability", async () => {
   assert.equal(response.id, "init");
   assert.equal(response.result.serverInfo.name, "quipu-mcp");
   assert.deepEqual(response.result.capabilities.tools, {});
+  assert.deepEqual(response.result.capabilities.resources, {});
+  assert.deepEqual(response.result.capabilities.prompts, {});
 });
 
 test("tools/list exposes Quipu protocol tools", async () => {
@@ -50,6 +52,64 @@ test("tools/list exposes Quipu protocol tools", async () => {
   assert.ok(names.includes("quipu_retrieve"));
   assert.ok(names.includes("quipu_forget"));
   assert.ok(names.includes("quipu_core_update"));
+});
+
+test("resources/list and resources/read expose project docs", async () => {
+  const server = createMcpServer(async () => {
+    throw new Error("transport should not be called");
+  });
+
+  const listed = await server.handleMessage({
+    jsonrpc: "2.0",
+    id: "resources",
+    method: "resources/list",
+    params: {},
+  });
+  const uris = listed.result.resources.map((resource) => resource.uri);
+
+  assert.ok(uris.includes("quipu://docs/readme"));
+  assert.ok(uris.includes("quipu://protocol/methods-schema"));
+
+  const read = await server.handleMessage({
+    jsonrpc: "2.0",
+    id: "read",
+    method: "resources/read",
+    params: { uri: "quipu://docs/readme" },
+  });
+
+  assert.equal(read.result.contents[0].uri, "quipu://docs/readme");
+  assert.equal(read.result.contents[0].mimeType, "text/markdown");
+  assert.match(read.result.contents[0].text, /# Quipu/);
+});
+
+test("prompts/list and prompts/get expose Quipu workflows", async () => {
+  const server = createMcpServer(async () => {
+    throw new Error("transport should not be called");
+  });
+
+  const listed = await server.handleMessage({
+    jsonrpc: "2.0",
+    id: "prompts",
+    method: "prompts/list",
+    params: {},
+  });
+  const names = listed.result.prompts.map((prompt) => prompt.name);
+
+  assert.ok(names.includes("quipu_retrieve_context"));
+  assert.ok(names.includes("quipu_remember_turn"));
+
+  const prompt = await server.handleMessage({
+    jsonrpc: "2.0",
+    id: "prompt",
+    method: "prompts/get",
+    params: {
+      name: "quipu_retrieve_context",
+      arguments: { query: "What test command should I run?", projectId: "repo:test" },
+    },
+  });
+
+  assert.match(prompt.result.messages[0].content.text, /quipu_retrieve/);
+  assert.match(prompt.result.messages[0].content.text, /repo:test/);
 });
 
 test("tools/call delegates retrieve arguments to Quipu JSON-RPC", async () => {
