@@ -207,6 +207,7 @@ Implemented:
 - Contract-first JSON-RPC protocol schemas and conformance fixtures.
 - Zig runtime for the public memory methods.
 - In-memory and LatticeDB `0.6.0` storage adapters.
+- Schema metadata, initial migration record, and schema-aware verification.
 - Retrieval, inspection, feedback, core memory blocks, forgetting, and audit
   stream logging.
 - Python/TypeScript SDK validators and stdio clients.
@@ -217,7 +218,7 @@ Still in progress:
 
 - Long-running socket or HTTP daemon.
 - Release artifacts for Quipu itself.
-- LatticeDB migrations and schema versioning.
+- Full migration runner and compatibility checks.
 - Provider-backed embeddings, BM25/reranking, and learned scoring.
 - LLM-backed extraction and consolidation workers.
 - Richer host integrations and external benchmark adapters.

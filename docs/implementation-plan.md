@@ -27,11 +27,11 @@ Acceptance:
 
 ### 2. Schema Metadata and Migrations
 
-Status: schema metadata exists at a basic level; migrations are not complete.
+Status: schema metadata, an initial migration record, and schema-aware
+`quipu verify` checks exist. A full migration runner is not complete.
 
 Remaining:
 
-- Persist migration records in the database.
 - Add an idempotent migration runner.
 - Verify base node fields, known edge types, stream/job invariants, index policy,
   and migration compatibility.

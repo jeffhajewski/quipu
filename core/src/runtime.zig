@@ -2055,7 +2055,7 @@ fn isFactLikeType(node_type: []const u8) bool {
 }
 
 fn isInternalLabel(label: []const u8) bool {
-    return std.mem.eql(u8, label, "Job") or std.mem.eql(u8, label, "Idempotency");
+    return std.mem.eql(u8, label, "Job") or std.mem.eql(u8, label, "Idempotency") or std.mem.eql(u8, label, "Schema") or std.mem.eql(u8, label, "Migration");
 }
 
 fn labelRequestedExplicitly(label: []const u8, labels_value: ?Value) bool {

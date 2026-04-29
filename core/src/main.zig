@@ -120,6 +120,7 @@ pub fn main(init: std.process.Init) !void {
     if (build_options.enable_lattice and config.db_path != null) {
         var adapter_state = try lattice_storage.LatticeAdapter.open(allocator, config.db_path.?);
         defer adapter_state.deinit();
+        try schema.ensure(allocator, adapter_state.adapter());
         var health = protocol.Health.default();
         health.db_path = config.db_path;
         health.lattice_version = lattice_storage.LatticeAdapter.latticeVersion();
@@ -198,8 +199,12 @@ fn runCommand(
     }
 
     if (args.len > command_index and std.mem.eql(u8, args[command_index], "verify")) {
-        const issues = try store.verify(allocator);
-        defer freeVerificationIssues(allocator, issues);
+        const schema_issues = try schema.verify(allocator, store);
+        defer freeVerificationIssues(allocator, schema_issues);
+        const storage_issues = try store.verify(allocator);
+        defer freeVerificationIssues(allocator, storage_issues);
+        const issues = try mergeVerificationIssues(allocator, schema_issues, storage_issues);
+        defer allocator.free(issues);
         const default_checks = [_][]const u8{ "schema", "provenance", "temporal", "forgetting" };
         const checks: []const []const u8 = if (args.len > command_index + 1) args[command_index + 1 ..] else &default_checks;
         const response = try stringifyAlloc(allocator, .{
@@ -799,6 +804,17 @@ fn freeVerificationIssues(allocator: std.mem.Allocator, issues: []const @import(
         if (issue.qid) |qid| allocator.free(qid);
     }
     allocator.free(issues);
+}
+
+fn mergeVerificationIssues(
+    allocator: std.mem.Allocator,
+    schema_issues: []const storage.VerificationIssue,
+    storage_issues: []const storage.VerificationIssue,
+) ![]storage.VerificationIssue {
+    const merged = try allocator.alloc(storage.VerificationIssue, schema_issues.len + storage_issues.len);
+    @memcpy(merged[0..schema_issues.len], schema_issues);
+    @memcpy(merged[schema_issues.len..], storage_issues);
+    return merged;
 }
 
 fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {

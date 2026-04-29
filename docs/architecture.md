@@ -50,8 +50,11 @@ will use.
 
 ## CLI and Schema
 
-`quipu init` writes the current schema metadata node (`q_schema_current`) into the
-active store. Lattice-enabled builds use `QUIPU_DB_PATH` or
+`quipu init` writes the current schema metadata node (`q_schema_current`) and the
+initial applied migration record (`q_migration_0001_initial`) into the active
+store. `quipu verify` checks that schema metadata and migration state are
+present before returning storage invariant issues. Lattice-enabled builds use
+`QUIPU_DB_PATH` or
 `~/.quipu/default/quipu.lattice` for persistent commands when `--db` is omitted.
 
 The CLI now exposes thin wrappers over the JSON-RPC runtime:
