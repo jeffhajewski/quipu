@@ -3,20 +3,21 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 
 class CoreStdioClient:
     """Small NDJSON client for `quipu serve-stdio` integration tests."""
 
-    def __init__(self, binary: Path) -> None:
+    def __init__(self, binary: Path, extra_args: Sequence[str] = ()) -> None:
         self.binary = binary
+        self.extra_args = list(extra_args)
         self.process: Optional[subprocess.Popen[str]] = None
         self.next_id = 1
 
     def __enter__(self) -> "CoreStdioClient":
         self.process = subprocess.Popen(
-            [str(self.binary), "serve-stdio"],
+            [str(self.binary), *self.extra_args, "serve-stdio"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

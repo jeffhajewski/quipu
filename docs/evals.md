@@ -17,3 +17,13 @@ PYTHONPATH=evals/src python3 -m quipu_evals.core_runner
 ```
 
 This baseline is expected to pass current-fact, historical valid-at, cross-scope, preference-update, and deletion-leak checks against the synthetic smoke suite.
+
+The same suite can run against the optional LatticeDB adapter:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
+  --storage lattice \
+  --lattice-include /path/to/latticedb/include \
+  --lattice-lib /path/to/latticedb/lib \
+  --strict
+```

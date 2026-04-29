@@ -123,6 +123,10 @@ pub const Runtime = struct {
         return .{ .store = store, .health = health };
     }
 
+    pub fn initWithNextId(store: storage.Adapter, health: protocol.Health, next_id: u64) Runtime {
+        return .{ .store = store, .health = health, .next_id = @max(next_id, 1) };
+    }
+
     pub fn dispatch(self: *Runtime, allocator: std.mem.Allocator, request_json: []const u8) ![]u8 {
         var parsed = std.json.parseFromSlice(Value, allocator, request_json, .{}) catch {
             return errorResponse(allocator, null, "invalid_request", "request body must be valid JSON");

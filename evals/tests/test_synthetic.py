@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +20,10 @@ from quipu_evals import load_suite, run_suite  # noqa: E402
 SUITE_PATH = ROOT / "evals" / "suites" / "quipu_synthetic.yaml"
 CORE_DIR = ROOT / "core"
 CORE_BINARY = CORE_DIR / "zig-out" / "bin" / "quipu"
+LATTICE_INCLUDE = os.environ.get("LATTICE_INCLUDE")
+LATTICE_LIB = os.environ.get("LATTICE_LIB_DIR") or (
+    str(Path(os.environ["LATTICE_LIB_PATH"]).parent) if os.environ.get("LATTICE_LIB_PATH") else None
+)
 
 
 class SyntheticEvalTests(unittest.TestCase):
@@ -87,6 +92,25 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertTrue(by_query["q_pref_historical"].passed)
         self.assertEqual(run.forget_runs[0].deleted_roots, 1)
         self.assertTrue(run.forget_runs[0].passed)
+
+    @unittest.skipUnless(
+        shutil.which("zig") and LATTICE_INCLUDE and LATTICE_LIB,
+        "zig, LATTICE_INCLUDE, and LATTICE_LIB_DIR or LATTICE_LIB_PATH are required",
+    )
+    def test_core_lattice_synthetic_eval_marks_current_capabilities(self):
+        with tempfile.TemporaryDirectory(prefix="quipu-lattice-test-") as directory:
+            run = run_core_suite(
+                SUITE_PATH,
+                storage="lattice",
+                db_dir=Path(directory),
+                lattice_include=LATTICE_INCLUDE,
+                lattice_lib=LATTICE_LIB,
+            )
+
+        self.assertEqual(run.to_json()["baseline"], "core_lattice")
+        self.assertTrue(run.passed)
+        self.assertEqual(run.to_json()["metrics"]["queriesPassed"], 5)
+        self.assertEqual(run.to_json()["metrics"]["forgetOpsPassed"], 1)
 
 
 if __name__ == "__main__":

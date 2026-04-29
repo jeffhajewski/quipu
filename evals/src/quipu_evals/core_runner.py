@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from typing import Mapping
 
 from .core_client import CoreStdioClient
@@ -58,6 +59,7 @@ class CoreForgetRun:
 class CoreSuiteRun:
     suite_name: str
     suite_version: str
+    baseline: str
     query_runs: list[CoreQueryRun]
     forget_runs: list[CoreForgetRun]
 
@@ -69,7 +71,7 @@ class CoreSuiteRun:
         return {
             "suiteName": self.suite_name,
             "suiteVersion": self.suite_version,
-            "baseline": "core_in_memory",
+            "baseline": self.baseline,
             "passed": self.passed,
             "queries": [query_run_to_json(run) for run in self.query_runs],
             "forgetOps": [forget_run_to_json(run) for run in self.forget_runs],
@@ -82,20 +84,34 @@ class CoreSuiteRun:
         }
 
 
-def run_core_suite(path: str | Path) -> CoreSuiteRun:
-    ensure_core_binary()
+def run_core_suite(
+    path: str | Path,
+    *,
+    storage: str = "memory",
+    db_dir: Path | None = None,
+    lattice_include: str | None = None,
+    lattice_lib: str | None = None,
+) -> CoreSuiteRun:
+    ensure_core_binary(storage=storage, lattice_include=lattice_include, lattice_lib=lattice_lib)
     suite = load_suite(path)
     query_runs: list[CoreQueryRun] = []
     forget_runs: list[CoreForgetRun] = []
     for scenario in suite.scenarios:
-        scenario_query_runs, scenario_forget_runs = run_core_scenario(scenario)
+        db_path = None
+        if storage == "lattice":
+            if db_dir is None:
+                raise ValueError("db_dir is required for lattice storage")
+            db_path = db_dir / f"{scenario.scenario_id}.lattice"
+        scenario_query_runs, scenario_forget_runs = run_core_scenario(scenario, db_path=db_path)
         query_runs.extend(scenario_query_runs)
         forget_runs.extend(scenario_forget_runs)
-    return CoreSuiteRun(suite.name, suite.version, query_runs, forget_runs)
+    baseline = "core_lattice" if storage == "lattice" else "core_in_memory"
+    return CoreSuiteRun(suite.name, suite.version, baseline, query_runs, forget_runs)
 
 
-def run_core_scenario(scenario: Scenario) -> tuple[list[CoreQueryRun], list[CoreForgetRun]]:
-    with CoreStdioClient(CORE_BINARY) as client:
+def run_core_scenario(scenario: Scenario, *, db_path: Path | None = None) -> tuple[list[CoreQueryRun], list[CoreForgetRun]]:
+    extra_args = ["--db", str(db_path)] if db_path is not None else []
+    with CoreStdioClient(CORE_BINARY, extra_args=extra_args) as client:
         event_to_message_qids: dict[str, list[str]] = {}
         for event in sorted(scenario.events, key=lambda item: item.time):
             remembered = remember_event(client, event)
@@ -216,12 +232,29 @@ def answer_from_prompt(prompt: str, expected_answer: str) -> str:
     return expected_answer if re.search(pattern, prompt.lower()) else ""
 
 
-def ensure_core_binary() -> None:
+def ensure_core_binary(*, storage: str = "memory", lattice_include: str | None = None, lattice_lib: str | None = None) -> None:
     if not shutil.which("zig"):
         raise RuntimeError("zig is required to run core eval smoke")
     env = os.environ.copy()
     env["ZIG_GLOBAL_CACHE_DIR"] = "/tmp/quipu-zig-cache"
-    subprocess.run(["zig", "build"], cwd=str(CORE_DIR), check=True, env=env)
+    command = ["zig", "build"]
+    if storage == "lattice":
+        command.append("-Denable-lattice=true")
+        if lattice_include:
+            command.append(f"-Dlattice-include={lattice_include}")
+        if lattice_lib:
+            command.append(f"-Dlattice-lib={lattice_lib}")
+    subprocess.run(command, cwd=str(CORE_DIR), check=True, env=env)
+
+
+def lattice_lib_from_env() -> str | None:
+    if value := os.environ.get("LATTICE_LIB_DIR"):
+        return value
+    if value := os.environ.get("LATTICE_LIB_PATH"):
+        return str(Path(value).parent)
+    if value := os.environ.get("LATTICE_PREFIX"):
+        return str(Path(value) / "lib")
+    return None
 
 
 def query_run_to_json(run: CoreQueryRun) -> dict[str, object]:
@@ -250,9 +283,34 @@ def forget_run_to_json(run: CoreForgetRun) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("suite", nargs="?", default=str(ROOT / "evals" / "suites" / "quipu_synthetic.yaml"))
+    parser.add_argument("--storage", choices=["memory", "lattice"], default="memory")
+    parser.add_argument("--db-dir", type=Path, help="Directory for per-scenario LatticeDB files")
+    parser.add_argument("--lattice-include", default=os.environ.get("LATTICE_INCLUDE"))
+    parser.add_argument("--lattice-lib", default=lattice_lib_from_env())
     parser.add_argument("--strict", action="store_true", help="Return non-zero when any scenario fails")
     args = parser.parse_args()
-    run = run_core_suite(args.suite)
+
+    if args.storage == "lattice":
+        if args.db_dir is not None:
+            args.db_dir.mkdir(parents=True, exist_ok=True)
+            run = run_core_suite(
+                args.suite,
+                storage=args.storage,
+                db_dir=args.db_dir,
+                lattice_include=args.lattice_include,
+                lattice_lib=args.lattice_lib,
+            )
+        else:
+            with tempfile.TemporaryDirectory(prefix="quipu-lattice-eval-") as directory:
+                run = run_core_suite(
+                    args.suite,
+                    storage=args.storage,
+                    db_dir=Path(directory),
+                    lattice_include=args.lattice_include,
+                    lattice_lib=args.lattice_lib,
+                )
+    else:
+        run = run_core_suite(args.suite)
     print(json.dumps(run.to_json(), indent=2, sort_keys=True))
     return 0 if run.passed or not args.strict else 1
 
