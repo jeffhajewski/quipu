@@ -25,3 +25,10 @@ the normal runtime filters.
 `system.health.result.storage` reports backend capability flags, including
 `backend`, `durable`, `fullText`, `vector`, `vectorDimensions`, and
 `embeddingModel`.
+
+## Inspection V0
+
+`memory.inspect` returns the stored node, provenance references, dependent
+derived memories, and stream-backed audit records that mention the inspected
+qid. Audit records currently expose the stream name, sequence, and raw JSON
+payload.

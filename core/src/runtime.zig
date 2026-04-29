@@ -103,6 +103,7 @@ const SearchMode = enum {
 const stream_raw_event = "quipu.raw_event";
 const stream_forget_completed = "quipu.forget.completed";
 const stream_feedback_received = "quipu.feedback.received";
+const stream_retrieval_logged = "quipu.retrieval.logged";
 const stream_audit = "quipu.audit";
 
 const CoreBlockResult = struct {
@@ -124,6 +125,12 @@ const ForgetReportItem = struct {
     qid: []const u8,
     type: []const u8,
     action: []const u8,
+};
+
+const AuditEventResult = struct {
+    stream: []const u8,
+    sequence: u64,
+    rawJson: []const u8,
 };
 
 pub const Runtime = struct {
@@ -463,6 +470,20 @@ pub const Runtime = struct {
             .validAt = valid_at,
         };
 
+        const event_payload = try stringifyAlloc(allocator, .{
+            .method = "memory.retrieve",
+            .retrievalId = retrieval_id,
+            .query = query,
+            .itemCount = results.items.items.len,
+            .items = results.items.items,
+            .tokenEstimate = token_estimate,
+            .warnings = warnings.items,
+            .trace = trace,
+        });
+        defer allocator.free(event_payload);
+        try self.publishEvent(stream_retrieval_logged, event_payload);
+        try self.publishEvent(stream_audit, event_payload);
+
         const response = .{
             .jsonrpc = "2.0",
             .id = id,
@@ -493,6 +514,8 @@ pub const Runtime = struct {
         defer provenance.deinit();
         var dependents = try self.derivedRefsByEvidence(allocator, qid);
         defer dependents.deinit();
+        var audit = try self.auditEventsForQid(allocator, qid);
+        defer audit.deinit();
 
         const response = .{
             .jsonrpc = "2.0",
@@ -505,7 +528,7 @@ pub const Runtime = struct {
                 },
                 .provenance = provenance.items.items,
                 .dependents = dependents.items.items,
-                .audit = &[_]u8{},
+                .audit = audit.items.items,
             },
         };
         return stringifyAlloc(allocator, response);
@@ -766,6 +789,19 @@ pub const Runtime = struct {
 
     fn publishEvent(self: *Runtime, stream: []const u8, payload_json: []const u8) !void {
         _ = try self.store.appendStream(stream, payload_json);
+    }
+
+    fn auditEventsForQid(self: *Runtime, allocator: std.mem.Allocator, qid: []const u8) !OwnedAuditEvents {
+        const entries = try self.store.readStream(allocator, stream_audit, 0, 1000);
+        defer freeStreamEntries(allocator, entries);
+
+        var audit = OwnedAuditEvents{ .allocator = allocator };
+        errdefer audit.deinit();
+        for (entries) |entry| {
+            if (std.mem.indexOf(u8, entry.payload_json, qid) == null) continue;
+            try audit.append(allocator, entry.stream, entry.sequence, entry.payload_json);
+        }
+        return audit;
     }
 
     fn extractFromMessage(
@@ -1286,6 +1322,37 @@ const OwnedForgetReport = struct {
     }
 };
 
+const OwnedAuditEvents = struct {
+    allocator: std.mem.Allocator,
+    items: std.ArrayList(AuditEventResult) = .empty,
+
+    fn append(
+        self: *OwnedAuditEvents,
+        allocator: std.mem.Allocator,
+        stream: []const u8,
+        sequence: u64,
+        raw_json: []const u8,
+    ) !void {
+        const owned_stream = try allocator.dupe(u8, stream);
+        errdefer allocator.free(owned_stream);
+        const owned_json = try allocator.dupe(u8, raw_json);
+        errdefer allocator.free(owned_json);
+        try self.items.append(allocator, .{
+            .stream = owned_stream,
+            .sequence = sequence,
+            .rawJson = owned_json,
+        });
+    }
+
+    fn deinit(self: *OwnedAuditEvents) void {
+        for (self.items.items) |item| {
+            self.allocator.free(item.stream);
+            self.allocator.free(item.rawJson);
+        }
+        self.items.deinit(self.allocator);
+    }
+};
+
 fn parseScope(params: *const ObjectMap) Scope {
     const scope_obj = objectField(params, "scope") orelse return .{};
     return .{
@@ -1784,6 +1851,35 @@ test "runtime publishes audit stream entries for mutations" {
     try std.testing.expectEqual(@as(usize, 2), entries.len);
     try std.testing.expect(std.mem.indexOf(u8, entries[0].payload_json, "\"method\":\"memory.remember\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, entries[1].payload_json, "\"method\":\"memory.feedback\"") != null);
+}
+
+test "runtime logs retrievals and returns inspect audit events" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+
+    const remember = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"Inspect audit target.\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(remember);
+
+    const retrieve = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"ret1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"audit target\",\"scope\":{\"projectId\":\"repo:test\"}}}",
+    );
+    defer std.testing.allocator.free(retrieve);
+
+    const inspect = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"i1\",\"method\":\"memory.inspect\",\"params\":{\"qid\":\"q_msg_4\"}}",
+    );
+    defer std.testing.allocator.free(inspect);
+
+    try std.testing.expect(std.mem.indexOf(u8, inspect, "\"audit\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inspect, "memory.remember") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inspect, "memory.retrieve") != null);
 }
 
 test "runtime forget suppresses retrieval" {
