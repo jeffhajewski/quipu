@@ -20,6 +20,7 @@ from quipu_evals.benchmarks import collect_benchmarks, render_markdown  # noqa: 
 from quipu_evals.comparisons import published_results  # noqa: E402
 from quipu_evals.external import load_external_suite  # noqa: E402
 from quipu_evals.locomo import load_locomo_suite, write_suite  # noqa: E402
+from quipu_evals.provider_clients import CachedEmbeddingProvider, LlmJudgeResult  # noqa: E402
 from quipu_evals.readiness import evaluate_readiness  # noqa: E402
 from quipu_evals.baselines import DETERMINISTIC_ABLATIONS, DETERMINISTIC_REQUIRED_BASELINES  # noqa: E402
 from quipu_evals import load_suite, run_suite  # noqa: E402
@@ -56,6 +57,68 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertEqual(payload["baseline"], "bm25")
         self.assertEqual(payload["metrics"]["queriesTotal"], 5)
         self.assertIn("retrieval", payload["metrics"])
+
+    def test_provider_embedding_cache_reuses_vectors(self):
+        class StubEmbeddingClient:
+            class Settings:
+                embedding_model = "stub-embedding"
+
+            settings = Settings()
+
+            def __init__(self):
+                self.calls = 0
+
+            def embed_texts(self, texts):
+                self.calls += 1
+                return [[float(len(text)), 1.0] for text in texts]
+
+        with tempfile.TemporaryDirectory(prefix="quipu-provider-cache-") as directory:
+            client = StubEmbeddingClient()
+            cache = CachedEmbeddingProvider(client, cache_path=Path(directory) / "embeddings.jsonl")
+
+            first = cache.embed_texts(["alpha", "beta", "alpha"])
+            second = cache.embed_texts(["alpha"])
+
+        self.assertEqual(first[0], second[0])
+        self.assertEqual(client.calls, 1)
+
+    def test_runner_can_use_provider_backed_vector_baseline(self):
+        class StubEmbeddingProvider:
+            def embed_texts(self, texts):
+                vectors = []
+                for text in texts:
+                    lower = text.lower()
+                    vectors.append([
+                        1.0 if "pixel" in lower else 0.0,
+                        1.0 if "appointment" in lower else 0.0,
+                    ])
+                return vectors
+
+        run = run_suite(
+            LOCOMO_MINI_PATH,
+            baseline_id="vector_rag",
+            baseline_label="openrouter_vector_rag",
+            embedding_provider=StubEmbeddingProvider(),
+        )
+
+        self.assertEqual(run.to_json()["baseline"], "openrouter_vector_rag")
+        self.assertEqual(run.to_json()["metrics"]["queriesTotal"], 5)
+
+    def test_runner_can_add_llm_judge_grade(self):
+        class StubJudgeProvider:
+            def judge_answer(self, question, expected_answer, actual_answer):
+                return LlmJudgeResult(
+                    passed=actual_answer == expected_answer,
+                    score=1.0 if actual_answer == expected_answer else 0.0,
+                    reason=f"graded {question}",
+                    model="stub-judge",
+                )
+
+        run = run_suite(SUITE_PATH, baseline_id="bm25", judge_provider=StubJudgeProvider())
+        first_query = run.to_json()["queries"][0]
+        grade_names = [grade["name"] for grade in first_query["grades"]]
+
+        self.assertIn("llm_judge", grade_names)
 
     def test_eval_manifest_summarizes_run_artifacts(self):
         run = run_suite(SUITE_PATH)

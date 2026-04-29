@@ -5,9 +5,14 @@ from collections import Counter, defaultdict
 import hashlib
 import math
 import re
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Protocol, Sequence
 
 from .scenarios import Event, ForgetOp, Query, Scope
+
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - exercised only when numpy is absent.
+    np = None
 
 
 @dataclass(frozen=True)
@@ -16,6 +21,23 @@ class FakeRetrieval:
     evidence_event_ids: list[str]
     item_texts: list[str]
     item_scopes: list[Scope]
+
+
+class EmbeddingProvider(Protocol):
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        pass
+
+
+class AnswerProvider(Protocol):
+    def generate_answer(self, question: str, contexts: Sequence[str]) -> str:
+        pass
+
+
+@dataclass
+class ProviderVectorIndex:
+    event_ids: list[str]
+    matrix: object
+    vectors: list[list[float]]
 
 
 @dataclass
@@ -75,9 +97,18 @@ class Candidate:
 class FakeQuipuClient:
     """Raw-only in-memory client for eval harness smoke tests."""
 
-    def __init__(self, config: BaselineConfig | str = "q0_raw_only_fake") -> None:
+    def __init__(
+        self,
+        config: BaselineConfig | str = "q0_raw_only_fake",
+        *,
+        embedding_provider: EmbeddingProvider | None = None,
+        answer_provider: AnswerProvider | None = None,
+    ) -> None:
         self.config = baseline_config(config)
         self._events: list[StoredEvent] = []
+        self.embedding_provider = embedding_provider
+        self.answer_provider = answer_provider
+        self._provider_vector_indexes: dict[tuple[str, ...], ProviderVectorIndex] = {}
 
     def remember_event(self, event: Event) -> None:
         self._events.append(StoredEvent(event=event))
@@ -97,8 +128,13 @@ class FakeQuipuClient:
         selected = self._suppress_superseded(selected) if self.config.suppress_superseded else selected
         texts = [candidate.text for candidate in selected]
         combined_text = " ".join(texts)
+        answer = (
+            self.answer_provider.generate_answer(query.query, texts)
+            if self.answer_provider is not None
+            else _answer_from_text(combined_text, query.expected_answer)
+        )
         return FakeRetrieval(
-            answer=_answer_from_text(combined_text, query.expected_answer),
+            answer=answer,
             evidence_event_ids=[candidate.stored.event.event_id for candidate in selected],
             item_texts=texts,
             item_scopes=[candidate.stored.event.scope for candidate in selected],
@@ -148,17 +184,16 @@ class FakeQuipuClient:
         if self.config.mode == "bm25":
             return _bm25_scores(query, docs)
         if self.config.mode == "vector":
+            if self.embedding_provider is not None:
+                return self._provider_vector_scores(query, docs)
             return {
                 stored.event.event_id: _cosine(_embedding(query), _embedding(text))
                 for stored, text in docs
             }
         if self.config.mode == "hybrid":
             bm25 = _normalize(_bm25_scores(query, docs))
-            vector = _normalize(
-                {
-                    stored.event.event_id: _cosine(_embedding(query), _embedding(text))
-                    for stored, text in docs
-                }
+            vector = _normalize(self._provider_vector_scores(query, docs)) if self.embedding_provider is not None else _normalize(
+                {stored.event.event_id: _cosine(_embedding(query), _embedding(text)) for stored, text in docs}
             )
             return {
                 stored.event.event_id: bm25.get(stored.event.event_id, 0.0) * 0.6 + vector.get(stored.event.event_id, 0.0) * 0.4
@@ -167,6 +202,43 @@ class FakeQuipuClient:
         if self.config.mode == "graph":
             return _graph_scores(query, docs)
         raise ValueError(f"unknown baseline mode: {self.config.mode}")
+
+    def _provider_vector_scores(self, query: str, docs: list[tuple[StoredEvent, str]]) -> dict[str, float]:
+        if self.embedding_provider is None:
+            return {}
+        key = tuple(stored.event.event_id for stored, _ in docs)
+        index = self._provider_vector_indexes.get(key)
+        if index is None:
+            vectors = self.embedding_provider.embed_texts([text for _, text in docs])
+            if np is not None:
+                matrix = np.asarray(vectors, dtype=np.float32)
+                matrix = np.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0)
+                norms = np.linalg.norm(matrix, axis=1)
+                norms[(norms == 0) | ~np.isfinite(norms)] = 1.0
+                matrix = matrix / norms[:, None]
+            else:
+                matrix = None
+            index = ProviderVectorIndex(
+                event_ids=[stored.event.event_id for stored, _ in docs],
+                matrix=matrix,
+                vectors=vectors,
+            )
+            self._provider_vector_indexes[key] = index
+        query_vector = self.embedding_provider.embed_texts([query])[0]
+        if np is not None and index.matrix is not None:
+            query_array = np.asarray(query_vector, dtype=np.float32)
+            query_array = np.nan_to_num(query_array, nan=0.0, posinf=0.0, neginf=0.0)
+            norm = float(np.linalg.norm(query_array))
+            if norm == 0 or not math.isfinite(norm):
+                return {event_id: 0.0 for event_id in index.event_ids}
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                scores = index.matrix @ (query_array / norm)
+            scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
+            return {event_id: float(score) for event_id, score in zip(index.event_ids, scores)}
+        return {
+            event_id: _cosine(query_vector, vector)
+            for event_id, vector in zip(index.event_ids, index.vectors)
+        }
 
     def _limit(self, candidates: list[Candidate]) -> list[Candidate]:
         if self.config.recency_weight:

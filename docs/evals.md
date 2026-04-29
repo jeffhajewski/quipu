@@ -40,6 +40,40 @@ These are deterministic fixture implementations for reproducible comparisons;
 provider-backed embeddings, reranking, extraction, and judging are configured
 separately from this runner.
 
+Provider-backed semantic baselines are available through OpenRouter. The
+benchmark convention used by Mem0 OSS is OpenAI `text-embedding-3-small` for
+embeddings, with `gpt-4o-mini` for extraction and `gpt-4o` as the default
+answerer/judge in its public runner. Quipu defaults the OpenRouter embedding
+model to `openai/text-embedding-3-small` so semantic retrieval can be compared
+against BM25 under the same local harness metrics.
+
+```bash
+export OPENROUTER_API_KEY=...
+PYTHONPATH=evals/src python3 -m quipu_evals.runner \
+  evals/suites/external/locomo_mini.yaml \
+  --baseline vector_rag \
+  --embedding-provider openrouter \
+  --embedding-cache artifacts/provider-cache/openrouter-embeddings.jsonl
+```
+
+Optional LLM answer and judge hooks are also wired through OpenRouter:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.runner \
+  evals/suites/external/locomo_mini.yaml \
+  --baseline hybrid_bm25_vector \
+  --embedding-provider openrouter \
+  --answer-provider openrouter \
+  --judge-provider openrouter
+```
+
+Model overrides:
+
+- `OPENROUTER_EMBEDDING_MODEL`, default `openai/text-embedding-3-small`
+- `OPENROUTER_ANSWER_MODEL`, default `openai/gpt-4o`
+- `OPENROUTER_JUDGE_MODEL`, default `openai/gpt-4o`
+- `OPENROUTER_EMBEDDING_BATCH_SIZE`, default `32`
+
 The in-memory core smoke baseline runs the compiled Zig process through `quipu serve-stdio`:
 
 ```bash

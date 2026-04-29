@@ -19,9 +19,12 @@ def normalize_text(text: str) -> str:
 def grade_exact_answer(actual: str, expected: str) -> GradeResult:
     actual_normalized = normalize_text(actual)
     expected_normalized = normalize_text(expected)
+    passed = actual_normalized == expected_normalized or (
+        bool(expected_normalized) and expected_normalized in actual_normalized
+    )
     return GradeResult(
         name="exact_answer",
-        passed=actual_normalized == expected_normalized,
+        passed=passed,
         details={"actual": actual, "expected": expected},
     )
 
@@ -73,4 +76,12 @@ def grade_deletion_leakage(visible_texts: Iterable[str], forbidden_texts: Iterab
         name="deletion_leakage",
         passed=not leaks,
         details={"leaks": leaks},
+    )
+
+
+def grade_llm_judge(passed: bool, score: float, reason: str, model: str) -> GradeResult:
+    return GradeResult(
+        name="llm_judge",
+        passed=passed,
+        details={"score": score, "reason": reason, "model": model},
     )

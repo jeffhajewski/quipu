@@ -14,9 +14,11 @@ from .graders import (
     grade_evidence_ids,
     grade_exact_answer,
     grade_forbidden_evidence,
+    grade_llm_judge,
     grade_scope_leakage,
 )
 from .metrics import grade_counts, metric_groups
+from .provider_clients import OpenRouterClient, openrouter_providers_from_env
 from .scenarios import Scenario, load_suite
 
 
@@ -67,25 +69,50 @@ class SuiteRun:
         }
 
 
-def run_suite(path: Union[str, Path], *, baseline_id: str = "q0_raw_only_fake") -> SuiteRun:
+def run_suite(
+    path: Union[str, Path],
+    *,
+    baseline_id: str = "q0_raw_only_fake",
+    baseline_label: str | None = None,
+    embedding_provider: object | None = None,
+    answer_provider: object | None = None,
+    judge_provider: object | None = None,
+) -> SuiteRun:
     suite = load_suite(path)
     query_runs: list[QueryRun] = []
     forget_runs: list[ForgetRun] = []
     for scenario in suite.scenarios:
-        scenario_query_runs, scenario_forget_runs = run_scenario(scenario, baseline_id=baseline_id)
+        scenario_query_runs, scenario_forget_runs = run_scenario(
+            scenario,
+            baseline_id=baseline_id,
+            embedding_provider=embedding_provider,
+            answer_provider=answer_provider,
+            judge_provider=judge_provider,
+        )
         query_runs.extend(scenario_query_runs)
         forget_runs.extend(scenario_forget_runs)
     return SuiteRun(
         suite_name=suite.name,
         suite_version=suite.version,
-        baseline=baseline_id,
+        baseline=baseline_label or baseline_id,
         query_runs=query_runs,
         forget_runs=forget_runs,
     )
 
 
-def run_scenario(scenario: Scenario, *, baseline_id: str = "q0_raw_only_fake") -> tuple[list[QueryRun], list[ForgetRun]]:
-    client = FakeQuipuClient(baseline_id)
+def run_scenario(
+    scenario: Scenario,
+    *,
+    baseline_id: str = "q0_raw_only_fake",
+    embedding_provider: object | None = None,
+    answer_provider: object | None = None,
+    judge_provider: object | None = None,
+) -> tuple[list[QueryRun], list[ForgetRun]]:
+    client = FakeQuipuClient(
+        baseline_id,
+        embedding_provider=embedding_provider,
+        answer_provider=answer_provider,
+    )
     for event in sorted(scenario.events, key=lambda item: item.time):
         client.remember_event(event)
 
@@ -98,6 +125,9 @@ def run_scenario(scenario: Scenario, *, baseline_id: str = "q0_raw_only_fake") -
             grade_forbidden_evidence(retrieval.evidence_event_ids, query.must_not_use_event_ids),
             grade_scope_leakage(retrieval.item_scopes, query.scope),
         ]
+        if judge_provider is not None:
+            judgment = judge_provider.judge_answer(query.query, query.expected_answer, retrieval.answer)
+            grades.append(grade_llm_judge(judgment.passed, judgment.score, judgment.reason, judgment.model))
         query_runs.append(QueryRun(scenario.scenario_id, query.query_id, grades))
 
     forget_runs = []
@@ -151,10 +181,38 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("suite", nargs="?", default="evals/suites/quipu_synthetic.yaml")
     parser.add_argument("--baseline", choices=supported_baseline_ids(), default="q0_raw_only_fake")
+    parser.add_argument("--embedding-provider", choices=["deterministic", "openrouter"], default="deterministic")
+    parser.add_argument("--answer-provider", choices=["deterministic", "openrouter"], default="deterministic")
+    parser.add_argument("--judge-provider", choices=["none", "openrouter"], default="none")
+    parser.add_argument("--embedding-cache", type=Path, help="JSONL cache for provider embedding vectors")
     parser.add_argument("--output", type=Path, help="Write the full run result JSON to this path")
     parser.add_argument("--manifest", type=Path, help="Write a compact eval run manifest to this path")
     args = parser.parse_args()
-    run = run_suite(args.suite, baseline_id=args.baseline)
+    embedding_provider = None
+    answer_provider = None
+    judge_provider = None
+    openrouter_client: OpenRouterClient | None = None
+    if args.embedding_provider == "openrouter":
+        embedding_provider, openrouter_client = openrouter_providers_from_env(cache_path=args.embedding_cache)
+    if args.answer_provider == "openrouter":
+        openrouter_client = openrouter_client or OpenRouterClient()
+        answer_provider = openrouter_client
+    if args.judge_provider == "openrouter":
+        openrouter_client = openrouter_client or OpenRouterClient()
+        judge_provider = openrouter_client
+    baseline_label = (
+        f"openrouter_{args.baseline}"
+        if args.embedding_provider == "openrouter" or args.answer_provider == "openrouter" or args.judge_provider == "openrouter"
+        else args.baseline
+    )
+    run = run_suite(
+        args.suite,
+        baseline_id=args.baseline,
+        baseline_label=baseline_label,
+        embedding_provider=embedding_provider,
+        answer_provider=answer_provider,
+        judge_provider=judge_provider,
+    )
     run_json = run.to_json()
     if args.output:
         write_json(args.output, run_json)
@@ -167,7 +225,20 @@ def main() -> int:
                 runner="quipu_evals.runner",
                 storage="fake",
                 results_path=args.output,
-                config={"suite": str(args.suite), "baseline": args.baseline},
+                config={
+                    "suite": str(args.suite),
+                    "baseline": args.baseline,
+                    "embeddingProvider": args.embedding_provider,
+                    "answerProvider": args.answer_provider,
+                    "judgeProvider": args.judge_provider,
+                },
+                providers={
+                    "extractor": "deterministic_fixture",
+                    "embedder": args.embedding_provider,
+                    "reranker": "none",
+                    "answer": args.answer_provider,
+                    "judge": args.judge_provider,
+                },
             ),
         )
     print(json.dumps(run_json, indent=2, sort_keys=True))

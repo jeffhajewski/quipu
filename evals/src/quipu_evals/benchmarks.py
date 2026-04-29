@@ -17,6 +17,7 @@ from .comparisons import published_results
 from .core_runner import CORE_BINARY, lattice_lib_from_env, run_core_suite
 from .external import DEFAULT_EXTERNAL_SUITES, external_suite_metadata, is_normalized_external_suite, load_external_suite
 from .locomo import download_locomo, load_locomo_suite, write_suite
+from .provider_clients import ProviderError, openrouter_providers_from_env
 from .readiness import evaluate_readiness
 from .runner import run_suite
 from .scenarios import load_suite
@@ -43,6 +44,8 @@ def collect_benchmarks(
     require_lattice: bool = False,
     include_baselines: bool = False,
     include_ablations: bool = False,
+    include_provider_baselines: bool = False,
+    provider_options: Mapping[str, Any] | None = None,
     reuse_existing: bool = False,
 ) -> dict[str, Any]:
     suite_path = Path(suite_path)
@@ -68,6 +71,7 @@ def collect_benchmarks(
     generated_at = now_iso()
     runs: list[dict[str, Any]] = []
     skipped_runs: list[dict[str, str]] = []
+    provider_options = provider_options or {}
 
     runs.append(
         run_case(
@@ -113,6 +117,53 @@ def collect_benchmarks(
                     reuse_existing=reuse_existing,
                 )
             )
+    if include_provider_baselines:
+        try:
+            openrouter_embedding_provider, openrouter_client = openrouter_providers_from_env(
+                cache_path=provider_options.get("embedding_cache")
+            )
+        except ProviderError as exc:
+            skipped_runs.append({"name": "openrouter_provider_baselines", "reason": str(exc)})
+        else:
+            openrouter_provider_names = {
+                "extractor": "deterministic_fixture",
+                "embedder": f"openrouter:{openrouter_client.settings.embedding_model}",
+                "reranker": "none",
+                "answer": "deterministic_prompt_match",
+                "judge": "rule_based",
+            }
+            for baseline_id in ("vector_rag", "hybrid_bm25_vector"):
+                baseline_label = f"openrouter_{baseline_id}"
+                runs.append(
+                    run_case(
+                        baseline_label,
+                        lambda baseline_id=baseline_id, baseline_label=baseline_label: run_suite(
+                            suite_path,
+                            baseline_id=baseline_id,
+                            baseline_label=baseline_label,
+                            embedding_provider=openrouter_embedding_provider,
+                        ),
+                        suite_path=suite_path,
+                        output_dir=output_dir,
+                        generated_at=generated_at,
+                        git_commit=git_commit,
+                        runner="quipu_evals.runner",
+                        storage="provider",
+                        config={
+                            "suite": str(suite_path),
+                            "baseline": baseline_id,
+                            "baselineLabel": baseline_label,
+                            "embeddingProvider": "openrouter",
+                            "embeddingModel": openrouter_client.settings.embedding_model,
+                            "resultClass": result_class,
+                            "externalBenchmark": external_benchmark,
+                        },
+                        providers=openrouter_provider_names,
+                        seed=seed,
+                        verification_status=verification_status,
+                        reuse_existing=reuse_existing,
+                    )
+                )
     if include_ablations:
         for ablation_id in DETERMINISTIC_ABLATIONS:
             runs.append(
@@ -299,6 +350,7 @@ def run_case(
     verification_status: str = "not_run",
     reuse_existing: bool = False,
     core_reuse_existing: bool = False,
+    providers: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     results_path = output_dir / f"{slug}-results.json"
     manifest_path = output_dir / f"{slug}-manifest.json"
@@ -334,6 +386,7 @@ def run_case(
         seed=seed,
         verification_status=case_verification_status,
         extra_artifacts=extra_artifacts,
+        providers=providers,
     )
     manifest["generatedAt"] = generated_at
     write_json(manifest_path, manifest)
@@ -663,6 +716,12 @@ def main() -> int:
     parser.add_argument("--require-lattice", action="store_true")
     parser.add_argument("--include-baselines", action="store_true")
     parser.add_argument("--include-ablations", action="store_true")
+    parser.add_argument("--include-provider-baselines", action="store_true")
+    parser.add_argument(
+        "--provider-embedding-cache",
+        type=Path,
+        default=Path(os.environ.get("QUIPU_PROVIDER_EMBEDDING_CACHE", "artifacts/provider-cache/openrouter-embeddings.jsonl")),
+    )
     parser.add_argument("--reuse-existing", action="store_true", help="Reuse existing per-run artifacts in the output directory")
     parser.add_argument("--download-locomo", action="store_true")
     parser.add_argument("--dataset-cache", type=Path, default=Path(os.environ.get("QUIPU_DATASET_CACHE", ".quipu-datasets")))
@@ -705,6 +764,8 @@ def main() -> int:
         require_lattice=args.require_lattice or result_class == "publishable",
         include_baselines=args.include_baselines or result_class == "publishable",
         include_ablations=args.include_ablations or result_class == "publishable",
+        include_provider_baselines=args.include_provider_baselines,
+        provider_options={"embedding_cache": args.provider_embedding_cache},
         reuse_existing=args.reuse_existing,
         locomo_options={
             "max_conversations": args.locomo_max_conversations,

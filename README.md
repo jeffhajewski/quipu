@@ -108,10 +108,16 @@ Current external benchmark status:
 - Real LoCoMo adapter: normalizes the upstream SNAP `locomo10.json` shape into
   Quipu scenarios and can run local deterministic baseline, ablation, and core
   benchmark passes with artifacts.
-- Full LoCoMo local run: readiness `ready`, 1,986 questions, LatticeDB `0.6.0`
-  verification passed on all 10 conversations, core Lattice deterministic exact
-  match 13.7%, evidence recall 19.6%, with reports under
-  `artifacts/benchmarks/locomo-full/`.
+- Full LoCoMo local raw-retrieval run: 1,986 questions, LatticeDB `0.6.0`,
+  core Lattice answer-containment exact match 28.55%, evidence recall 58.27%,
+  with reports under `artifacts/benchmarks/locomo-core-lattice-raw-fast-full/`.
+- Same-suite provider semantic baselines using OpenRouter
+  `openai/text-embedding-3-small`: vector RAG exact 25.28%, evidence recall
+  57.90%; hybrid BM25/vector exact 26.64%, evidence recall 58.07%, with
+  reports under `artifacts/benchmarks/locomo-full-openrouter-semantic/`.
+- Local BM25 on the same normalized suite: exact 24.12%, evidence recall
+  50.42%. Full context remains the local upper bound at exact 42.80% and
+  evidence recall 99.70%.
 - External benchmark reports include published reference points from other
   memory systems where available. They are orientation only: answer models,
   judges, retrieval cutoffs, dataset slices, and methodologies differ.
