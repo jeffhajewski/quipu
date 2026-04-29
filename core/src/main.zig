@@ -22,6 +22,11 @@ const MaterializeCliArgs = struct {
     }
 };
 
+const FailCliArgs = struct {
+    qid: []const u8,
+    error_json: []const u8 = "{}",
+};
+
 const ScopeCliArgs = struct {
     tenant_id: ?[]const u8 = null,
     user_id: ?[]const u8 = null,
@@ -202,14 +207,52 @@ fn runCommand(
     }
 
     if (args.len > command_index and std.mem.eql(u8, args[command_index], "jobs")) {
-        if (args.len <= command_index + 1 or !std.mem.eql(u8, args[command_index + 1], "materialize")) {
+        if (args.len <= command_index + 1) {
             const response = try stringifyAlloc(allocator, .{
                 .status = "error",
-                .message = "usage: quipu [--db PATH] jobs materialize [--after SEQ] [--limit N] [--max-attempts N] [STREAM...]",
+                .message = "usage: quipu [--db PATH] jobs materialize|lease|complete|fail ...",
             });
             defer allocator.free(response);
             try stdout.print("{s}\n", .{response});
             return;
+        }
+        if (std.mem.eql(u8, args[command_index + 1], "lease")) {
+            const parsed = parseLeaseArgs(args[command_index + 2 ..]) catch {
+                return printCliError(stdout, allocator, "invalid jobs lease arguments");
+            };
+            const leases = try jobs.leasePendingJobs(allocator, store, parsed);
+            defer jobs.freeLeaseResults(allocator, leases);
+            const response = try stringifyAlloc(allocator, .{
+                .status = "ok",
+                .leasedCount = leases.len,
+                .leases = leases,
+            });
+            defer allocator.free(response);
+            try stdout.print("{s}\n", .{response});
+            return;
+        }
+        if (std.mem.eql(u8, args[command_index + 1], "complete")) {
+            const qid = parseJobQid(args[command_index + 2 ..]) catch {
+                return printCliError(stdout, allocator, "invalid jobs complete arguments");
+            };
+            try jobs.completeJob(allocator, store, qid, 0);
+            const response = try stringifyAlloc(allocator, .{ .status = "ok", .jobQid = qid });
+            defer allocator.free(response);
+            try stdout.print("{s}\n", .{response});
+            return;
+        }
+        if (std.mem.eql(u8, args[command_index + 1], "fail")) {
+            const parsed = parseFailArgs(args[command_index + 2 ..]) catch {
+                return printCliError(stdout, allocator, "invalid jobs fail arguments");
+            };
+            const status = try jobs.failJob(allocator, store, parsed.qid, parsed.error_json, 0);
+            const response = try stringifyAlloc(allocator, .{ .status = status, .jobQid = parsed.qid });
+            defer allocator.free(response);
+            try stdout.print("{s}\n", .{response});
+            return;
+        }
+        if (!std.mem.eql(u8, args[command_index + 1], "materialize")) {
+            return printCliError(stdout, allocator, "unsupported jobs subcommand");
         }
         var parsed = parseMaterializeArgs(allocator, args[command_index + 2 ..]) catch {
             const response = try stringifyAlloc(allocator, .{
@@ -333,7 +376,7 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--need NEED] | inspect ID | forget --id ID [--yes] | feedback --retrieval ID --rating RATING | verify [schema|provenance|temporal|forgetting]... | jobs materialize [--after SEQ] [--limit N] [--max-attempts N] [STREAM...] | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--need NEED] | inspect ID | forget --id ID [--yes] | feedback --retrieval ID --rating RATING | verify [schema|provenance|temporal|forgetting]... | jobs materialize|lease|complete|fail ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
@@ -406,6 +449,58 @@ fn parseMaterializeArgs(allocator: std.mem.Allocator, args: []const [:0]const u8
         }
     }
     return parsed;
+}
+
+fn parseLeaseArgs(args: []const [:0]const u8) !jobs.LeaseOptions {
+    var parsed = jobs.LeaseOptions{
+        .worker_kind = "",
+        .owner = "cli",
+    };
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--worker")) {
+            parsed.worker_kind = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--owner")) {
+            parsed.owner = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--limit")) {
+            parsed.limit = try std.fmt.parseInt(usize, try nextArg(args, &index), 10);
+        } else if (std.mem.eql(u8, arg, "--ttl-ms")) {
+            parsed.ttl_ms = try std.fmt.parseInt(i64, try nextArg(args, &index), 10);
+        } else {
+            return error.InvalidArgs;
+        }
+    }
+    if (parsed.worker_kind.len == 0) return error.InvalidArgs;
+    return parsed;
+}
+
+fn parseJobQid(args: []const [:0]const u8) ![]const u8 {
+    if (args.len == 1 and !std.mem.startsWith(u8, args[0], "--")) return args[0];
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--id")) return try nextArg(args, &index);
+    }
+    return error.InvalidArgs;
+}
+
+fn parseFailArgs(args: []const [:0]const u8) !FailCliArgs {
+    var qid: ?[]const u8 = null;
+    var error_json: []const u8 = "{}";
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--id")) {
+            qid = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--error")) {
+            error_json = try nextArg(args, &index);
+        } else if (qid == null and !std.mem.startsWith(u8, arg, "--")) {
+            qid = arg;
+        } else {
+            return error.InvalidArgs;
+        }
+    }
+    return .{ .qid = qid orelse return error.InvalidArgs, .error_json = error_json };
 }
 
 fn buildRememberRequest(allocator: std.mem.Allocator, args: []const [:0]const u8) ![]u8 {
