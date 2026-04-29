@@ -151,17 +151,95 @@ const AuditEventResult = struct {
     rawJson: []const u8,
 };
 
+const CachedRawMessage = struct {
+    qid: []const u8,
+    properties_json: []const u8,
+    text: []const u8,
+    tokens: []const []const u8,
+    deleted: bool = false,
+};
+
+const RawMessageCache = struct {
+    allocator: ?std.mem.Allocator = null,
+    complete: bool = false,
+    items: std.ArrayList(CachedRawMessage) = .empty,
+
+    fn append(self: *RawMessageCache, allocator: std.mem.Allocator, qid: []const u8, properties_json: []const u8, text: []const u8) !void {
+        if (self.indexOf(qid)) |index| {
+            self.items.items[index].deleted = false;
+            return;
+        }
+        if (self.allocator == null) self.allocator = allocator;
+        const owned_qid = try allocator.dupe(u8, qid);
+        errdefer allocator.free(owned_qid);
+        const owned_properties = try allocator.dupe(u8, properties_json);
+        errdefer allocator.free(owned_properties);
+        const owned_text = try rawMessageText(allocator, text, properties_json);
+        errdefer allocator.free(owned_text);
+        const owned_tokens = try normalizedTokens(allocator, owned_text);
+        errdefer freeStringList(allocator, owned_tokens);
+        try self.items.append(allocator, .{
+            .qid = owned_qid,
+            .properties_json = owned_properties,
+            .text = owned_text,
+            .tokens = owned_tokens,
+        });
+    }
+
+    fn appendNode(self: *RawMessageCache, allocator: std.mem.Allocator, node: storage.Node) !void {
+        const text = try textForNode(allocator, node);
+        defer allocator.free(text);
+        try self.append(allocator, node.qid, node.properties_json, text);
+    }
+
+    fn markDeleted(self: *RawMessageCache, qid: []const u8) void {
+        if (self.indexOf(qid)) |index| {
+            self.items.items[index].deleted = true;
+        }
+    }
+
+    fn indexOf(self: *const RawMessageCache, qid: []const u8) ?usize {
+        for (self.items.items, 0..) |item, index| {
+            if (std.mem.eql(u8, item.qid, qid)) return index;
+        }
+        return null;
+    }
+
+    fn deinit(self: *RawMessageCache) void {
+        const allocator = self.allocator orelse return;
+        for (self.items.items) |item| {
+            allocator.free(item.qid);
+            allocator.free(item.properties_json);
+            allocator.free(item.text);
+            freeStringList(allocator, item.tokens);
+        }
+        self.items.deinit(allocator);
+        self.* = .{};
+    }
+};
+
 pub const Runtime = struct {
     store: storage.Adapter,
     health: protocol.Health,
     next_id: u64 = 1,
+    raw_messages: RawMessageCache = .{},
+    raw_cache_complete_from_remember: bool = true,
 
     pub fn init(store: storage.Adapter, health: protocol.Health) Runtime {
         return .{ .store = store, .health = health };
     }
 
     pub fn initWithNextId(store: storage.Adapter, health: protocol.Health, next_id: u64) Runtime {
-        return .{ .store = store, .health = health, .next_id = @max(next_id, 1) };
+        return .{
+            .store = store,
+            .health = health,
+            .next_id = @max(next_id, 1),
+            .raw_cache_complete_from_remember = next_id <= 1,
+        };
+    }
+
+    pub fn deinit(self: *Runtime) void {
+        self.raw_messages.deinit();
     }
 
     pub fn dispatch(self: *Runtime, allocator: std.mem.Allocator, request_json: []const u8) ![]u8 {
@@ -335,6 +413,10 @@ pub const Runtime = struct {
             });
             defer allocator.free(message_props);
             try self.store.putNode(.{ .qid = message_qid, .label = "Message", .properties_json = message_props });
+            try self.raw_messages.append(allocator, message_qid, message_props, content);
+            if (self.raw_cache_complete_from_remember) {
+                self.raw_messages.complete = true;
+            }
             try self.putEdge(allocator, turn_qid, message_qid, "HAS_MESSAGE");
             if (extract_enabled) {
                 derived_count += try self.extractFromMessage(
@@ -477,8 +559,14 @@ pub const Runtime = struct {
         const options = objectField(params, "options");
         const include_evidence = if (options) |opts| boolField(&opts, "includeEvidence") orelse true else true;
         const include_trace = if (options) |opts| (boolField(&opts, "includeDebug") orelse false) or (boolField(&opts, "logTrace") orelse false) else false;
+        const log_retrieval = if (options) |opts| boolField(&opts, "logRetrieval") orelse (boolField(&opts, "logTrace") orelse true) else true;
+        const log_audit = if (options) |opts| boolField(&opts, "logAudit") orelse true else true;
 
-        var results = try self.collectItems(allocator, query, .fts, 40, scope, false, null, valid_at, event_window, include_evidence);
+        const raw_only = needsCount(needs_value) == 1 and needsIncludes(needs_value, "raw");
+        var results = if (raw_only)
+            try self.collectRawLexicalItems(allocator, query, 40, scope, event_window, include_evidence)
+        else
+            try self.collectItems(allocator, query, .fts, 40, scope, false, null, valid_at, event_window, include_evidence);
         defer results.deinit();
         if (needsIncludes(needs_value, "core")) {
             try self.appendCoreItems(allocator, &results, scope, include_evidence);
@@ -541,17 +629,21 @@ pub const Runtime = struct {
             .itemQids = item_qids,
             .tokenEstimate = token_estimate,
             .warnings = warnings.items,
-            .traceLogged = include_trace,
+            .traceLogged = log_retrieval,
         });
         defer allocator.free(event_payload);
-        if (self.publishEvent(streams.retrieval_logged, event_payload)) |_| {} else |_| {
-            if (!containsWarning(warnings.items, "retrieval_stream_write_failed")) {
-                try warnings.append(allocator, "retrieval_stream_write_failed");
+        if (log_retrieval) {
+            if (self.publishEvent(streams.retrieval_logged, event_payload)) |_| {} else |_| {
+                if (!containsWarning(warnings.items, "retrieval_stream_write_failed")) {
+                    try warnings.append(allocator, "retrieval_stream_write_failed");
+                }
             }
         }
-        if (self.publishEvent(streams.audit, event_payload)) |_| {} else |_| {
-            if (!containsWarning(warnings.items, "retrieval_stream_write_failed")) {
-                try warnings.append(allocator, "retrieval_stream_write_failed");
+        if (log_audit) {
+            if (self.publishEvent(streams.audit, event_payload)) |_| {} else |_| {
+                if (!containsWarning(warnings.items, "retrieval_stream_write_failed")) {
+                    try warnings.append(allocator, "retrieval_stream_write_failed");
+                }
             }
         }
 
@@ -671,6 +763,9 @@ pub const Runtime = struct {
 
             if (!dry_run) {
                 try self.tombstoneNode(allocator, qid, node.label, reason, mode);
+                if (std.mem.eql(u8, node.label, "Message")) {
+                    self.raw_messages.markDeleted(qid);
+                }
                 if (std.mem.eql(u8, mode, "redact")) {
                     nodes_redacted += 1;
                 } else {
@@ -1451,6 +1546,81 @@ pub const Runtime = struct {
         return owned;
     }
 
+    fn collectRawLexicalItems(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        query: []const u8,
+        limit: usize,
+        scope: Scope,
+        event_window: EventWindow,
+        include_evidence: bool,
+    ) !OwnedItems {
+        const query_terms = try normalizedTokens(allocator, query);
+        defer freeStringList(allocator, query_terms);
+
+        try self.ensureRawMessageCache(allocator);
+
+        var owned = OwnedItems{ .allocator = allocator };
+        errdefer owned.deinit();
+        for (self.raw_messages.items.items) |entry| {
+            if (entry.deleted) continue;
+            const node = storage.Node{ .qid = entry.qid, .label = "Message", .properties_json = entry.properties_json };
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            if (!try scope.matchesNode(allocator, node)) continue;
+            if (!try nodeWithinEventWindow(allocator, node, event_window)) continue;
+
+            const text = try allocator.dupe(u8, entry.text);
+            errdefer allocator.free(text);
+            const score = if (query_terms.len == 0) 1.0 else lexicalCachedTermFrequencyScore(query_terms, entry.tokens);
+            if (score <= 0) {
+                allocator.free(text);
+                continue;
+            }
+            const evidence = if (include_evidence) try evidenceForNode(allocator, node) else try allocator.alloc(EvidenceResult, 0);
+            errdefer freeEvidence(allocator, evidence);
+            const state = try stateForNode(allocator, node);
+            errdefer allocator.free(state);
+            const valid_from = try validFromForNode(allocator, node);
+            errdefer if (valid_from) |value_to_free| allocator.free(value_to_free);
+            const valid_to = try readOptionalPropertyString(allocator, node.properties_json, "validTo");
+            errdefer if (valid_to) |value_to_free| allocator.free(value_to_free);
+            const result_qid = try allocator.dupe(u8, node.qid);
+            errdefer allocator.free(result_qid);
+            try owned.items.append(allocator, .{
+                .qid = result_qid,
+                .type = "message",
+                .text = text,
+                .score = score,
+                .state = state,
+                .validFrom = valid_from,
+                .validTo = valid_to,
+                .evidence = evidence,
+            });
+        }
+        sortItemsByScore(&owned);
+        if (owned.items.items.len > limit) {
+            for (owned.items.items[limit..]) |item| {
+                owned.freeItem(item);
+            }
+            owned.items.shrinkRetainingCapacity(limit);
+        }
+        return owned;
+    }
+
+    fn ensureRawMessageCache(self: *Runtime, allocator: std.mem.Allocator) !void {
+        if (self.raw_messages.complete) return;
+        const candidate_hits = try self.store.fullTextSearch(allocator, .{ .text = "Message", .limit = 100_000 });
+        defer freeHits(allocator, candidate_hits);
+        for (candidate_hits) |hit| {
+            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!std.mem.eql(u8, node.label, "Message")) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            try self.raw_messages.appendNode(allocator, node);
+        }
+        self.raw_messages.complete = true;
+    }
+
     fn collectSearchHits(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, mode: SearchMode, limit: usize) ![]storage.SearchHit {
         return switch (mode) {
             .fts, .graph => self.store.fullTextSearch(allocator, .{ .text = query, .limit = limit }),
@@ -1628,6 +1798,21 @@ const OwnedItems = struct {
         freeEvidence(self.allocator, item.evidence);
     }
 };
+
+fn sortItemsByScore(owned: *OwnedItems) void {
+    var index: usize = 1;
+    while (index < owned.items.items.len) : (index += 1) {
+        var cursor = index;
+        while (cursor > 0 and itemRanksBefore(owned.items.items[cursor], owned.items.items[cursor - 1])) : (cursor -= 1) {
+            std.mem.swap(MessageResult, &owned.items.items[cursor], &owned.items.items[cursor - 1]);
+        }
+    }
+}
+
+fn itemRanksBefore(left: MessageResult, right: MessageResult) bool {
+    if (left.score != right.score) return left.score > right.score;
+    return timestampAtOrAfter(left.validFrom orelse "", right.validFrom orelse "");
+}
 
 const OwnedContextPacket = struct {
     allocator: std.mem.Allocator,
@@ -1850,6 +2035,120 @@ fn needsIncludes(needs_value: ?Value, expected: []const u8) bool {
     return false;
 }
 
+fn normalizedTokens(allocator: std.mem.Allocator, text: []const u8) ![]const []const u8 {
+    var tokens = std.ArrayList([]const u8).empty;
+    errdefer {
+        for (tokens.items) |token| {
+            allocator.free(token);
+        }
+        tokens.deinit(allocator);
+    }
+
+    var start: ?usize = null;
+    for (text, 0..) |byte, index| {
+        if (std.ascii.isAlphanumeric(byte)) {
+            if (start == null) start = index;
+            continue;
+        }
+        if (start) |token_start| {
+            try appendNormalizedToken(allocator, &tokens, text[token_start..index]);
+            start = null;
+        }
+    }
+    if (start) |token_start| {
+        try appendNormalizedToken(allocator, &tokens, text[token_start..]);
+    }
+    return tokens.toOwnedSlice(allocator);
+}
+
+fn appendNormalizedToken(allocator: std.mem.Allocator, tokens: *std.ArrayList([]const u8), raw: []const u8) !void {
+    if (raw.len == 0) return;
+    var normalized = try allocator.alloc(u8, raw.len);
+    errdefer allocator.free(normalized);
+    for (raw, 0..) |byte, index| {
+        normalized[index] = std.ascii.toLower(byte);
+    }
+    var length = normalized.len;
+    if (length > 3 and normalized[length - 1] == 's') {
+        length -= 1;
+    }
+    if (length < normalized.len) {
+        normalized = try allocator.realloc(normalized, length);
+    }
+    if (isStopWord(normalized)) {
+        allocator.free(normalized);
+        return;
+    }
+    try tokens.append(allocator, normalized);
+}
+
+fn lexicalTermFrequencyScore(allocator: std.mem.Allocator, query_terms: []const []const u8, text: []const u8) !f32 {
+    if (query_terms.len == 0) return 0;
+    const document_terms = try normalizedTokens(allocator, text);
+    defer freeStringList(allocator, document_terms);
+    return lexicalCachedTermFrequencyScore(query_terms, document_terms);
+}
+
+fn lexicalCachedTermFrequencyScore(query_terms: []const []const u8, document_terms: []const []const u8) f32 {
+    var score: f32 = 0;
+    for (query_terms) |query_term| {
+        for (document_terms) |document_term| {
+            if (std.mem.eql(u8, query_term, document_term)) {
+                score += 1;
+            }
+        }
+    }
+    return score;
+}
+
+fn isStopWord(token: []const u8) bool {
+    const stop_words = [_][]const u8{
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "be",
+        "before",
+        "did",
+        "do",
+        "for",
+        "her",
+        "his",
+        "i",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "should",
+        "that",
+        "the",
+        "this",
+        "to",
+        "was",
+        "we",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "with",
+    };
+    for (stop_words) |word| {
+        if (std.mem.eql(u8, token, word)) return true;
+    }
+    return false;
+}
+
+fn freeStringList(allocator: std.mem.Allocator, tokens: []const []const u8) void {
+    for (tokens) |token| {
+        allocator.free(token);
+    }
+    allocator.free(tokens);
+}
+
 fn paramsObject(value: ?Value) !ObjectMap {
     const present = value orelse return ObjectMap.empty;
     return switch (present) {
@@ -2022,6 +2321,128 @@ fn textForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
         return readPropertyString(allocator, node.properties_json, "rating");
     }
     return allocator.dupe(u8, node.label);
+}
+
+const CivilDate = struct {
+    year: i32,
+    month: u8,
+    day: u8,
+};
+
+fn rawMessageText(allocator: std.mem.Allocator, content: []const u8, properties_json: []const u8) ![]u8 {
+    const created_at = try readOptionalPropertyString(allocator, properties_json, "createdAt");
+    defer if (created_at) |value| allocator.free(value);
+    const timestamp = created_at orelse return allocator.dupe(u8, content);
+    const date = parseIsoDate(timestamp) catch return allocator.dupe(u8, content);
+
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll(content);
+
+    const message_date = try formatHumanDate(allocator, date);
+    defer allocator.free(message_date);
+    try writer.writer.print(" [message date: {s}", .{message_date});
+    if (containsWordIgnoreCase(content, "today")) {
+        try appendTemporalAnnotation(&writer.writer, allocator, "today", date);
+    }
+    if (containsWordIgnoreCase(content, "yesterday")) {
+        try appendTemporalAnnotation(&writer.writer, allocator, "yesterday", shiftCivilDate(date, -1));
+    }
+    if (containsWordIgnoreCase(content, "tomorrow")) {
+        try appendTemporalAnnotation(&writer.writer, allocator, "tomorrow", shiftCivilDate(date, 1));
+    }
+    try writer.writer.writeAll("]");
+    return writer.toOwnedSlice();
+}
+
+fn appendTemporalAnnotation(writer: *std.Io.Writer, allocator: std.mem.Allocator, label: []const u8, date: CivilDate) !void {
+    const formatted = try formatHumanDate(allocator, date);
+    defer allocator.free(formatted);
+    try writer.print("; {s}: {s}", .{ label, formatted });
+}
+
+fn parseIsoDate(timestamp: []const u8) !CivilDate {
+    if (timestamp.len < 10 or timestamp[4] != '-' or timestamp[7] != '-') return error.InvalidDate;
+    const year = try std.fmt.parseInt(i32, timestamp[0..4], 10);
+    const month = try std.fmt.parseInt(u8, timestamp[5..7], 10);
+    const day = try std.fmt.parseInt(u8, timestamp[8..10], 10);
+    if (month < 1 or month > 12) return error.InvalidDate;
+    if (day < 1 or day > daysInMonth(year, month)) return error.InvalidDate;
+    return .{ .year = year, .month = month, .day = day };
+}
+
+fn formatHumanDate(allocator: std.mem.Allocator, date: CivilDate) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{d} {s} {d}", .{ date.day, monthName(date.month), date.year });
+}
+
+fn shiftCivilDate(date: CivilDate, delta_days: i32) CivilDate {
+    var shifted = date;
+    var remaining = delta_days;
+    while (remaining > 0) : (remaining -= 1) {
+        const max_day = daysInMonth(shifted.year, shifted.month);
+        if (shifted.day < max_day) {
+            shifted.day += 1;
+        } else if (shifted.month < 12) {
+            shifted.month += 1;
+            shifted.day = 1;
+        } else {
+            shifted.year += 1;
+            shifted.month = 1;
+            shifted.day = 1;
+        }
+    }
+    while (remaining < 0) : (remaining += 1) {
+        if (shifted.day > 1) {
+            shifted.day -= 1;
+        } else if (shifted.month > 1) {
+            shifted.month -= 1;
+            shifted.day = daysInMonth(shifted.year, shifted.month);
+        } else {
+            shifted.year -= 1;
+            shifted.month = 12;
+            shifted.day = 31;
+        }
+    }
+    return shifted;
+}
+
+fn daysInMonth(year: i32, month: u8) u8 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(year)) 29 else 28,
+        else => 30,
+    };
+}
+
+fn isLeapYear(year: i32) bool {
+    return @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
+}
+
+fn monthName(month: u8) []const u8 {
+    return switch (month) {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        else => "Unknown",
+    };
+}
+
+fn containsWordIgnoreCase(text: []const u8, expected: []const u8) bool {
+    var tokens = std.mem.tokenizeAny(u8, text, " \t\r\n.,?!:;\"'()[]{}<>/\\|");
+    while (tokens.next()) |token| {
+        if (std.ascii.eqlIgnoreCase(token, expected)) return true;
+    }
+    return false;
 }
 
 fn stateForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
@@ -2372,6 +2793,7 @@ test "runtime remembers and searches scoped raw messages" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const remember = try runtime.dispatch(
         std.testing.allocator,
@@ -2393,6 +2815,7 @@ test "runtime health includes storage capabilities" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const health = try runtime.dispatch(
         std.testing.allocator,
@@ -2411,6 +2834,7 @@ test "runtime publishes audit stream entries for mutations" {
     defer adapter_state.deinit();
     const adapter = adapter_state.adapter();
     var runtime = Runtime.init(adapter, protocol.Health.default());
+    defer runtime.deinit();
 
     const remember = try runtime.dispatch(
         std.testing.allocator,
@@ -2437,6 +2861,7 @@ test "runtime stores tool calls observations episodes and memory cards" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const remember = try runtime.dispatch(
         std.testing.allocator,
@@ -2474,6 +2899,7 @@ test "runtime queues extract jobs from durable stream events" {
     defer adapter_state.deinit();
     const adapter = adapter_state.adapter();
     var runtime = Runtime.init(adapter, protocol.Health.default());
+    defer runtime.deinit();
 
     const remember = try runtime.dispatch(
         std.testing.allocator,
@@ -2501,6 +2927,7 @@ test "runtime logs retrievals and returns inspect audit events" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const remember = try runtime.dispatch(
         std.testing.allocator,
@@ -2530,6 +2957,7 @@ test "runtime forget suppresses retrieval" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const remember = try runtime.dispatch(
         std.testing.allocator,
@@ -2557,6 +2985,7 @@ test "runtime forget supports query selectors with scope filters" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const alpha = try runtime.dispatch(
         std.testing.allocator,
@@ -2596,6 +3025,7 @@ test "runtime forget contaminates compiled core summaries" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const remember = try runtime.dispatch(
         std.testing.allocator,
@@ -2630,6 +3060,7 @@ test "runtime stores and replaces core blocks" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const update = try runtime.dispatch(
         std.testing.allocator,
@@ -2658,6 +3089,7 @@ test "runtime consolidates derived memory into a core block" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const remember = try runtime.dispatch(
         std.testing.allocator,
@@ -2686,6 +3118,7 @@ test "runtime extracts current package manager facts" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const first = try runtime.dispatch(
         std.testing.allocator,
@@ -2722,6 +3155,7 @@ test "runtime retrieve assembles categorized context and trace" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const remember = try runtime.dispatch(
         std.testing.allocator,
@@ -2766,6 +3200,7 @@ test "runtime retrieve filters event windows and token budgets" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const old = try runtime.dispatch(
         std.testing.allocator,
@@ -2796,11 +3231,34 @@ test "runtime retrieve filters event windows and token budgets" {
     try std.testing.expect(std.mem.indexOf(u8, budgeted, "\"droppedForBudget\":2") != null);
 }
 
+test "runtime raw retrieve indexes message date annotations" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
+
+    const remember = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"Today I rescheduled the dentist appointment.\",\"createdAt\":\"2026-02-01T10:00:00Z\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(remember);
+
+    const retrieve = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"1 February 2026\",\"scope\":{\"projectId\":\"repo:test\"},\"needs\":[\"raw\"],\"options\":{\"includeDebug\":true,\"logTrace\":false,\"logAudit\":false}}}",
+    );
+    defer std.testing.allocator.free(retrieve);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "Today I rescheduled the dentist appointment.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "today: 1 February 2026") != null);
+}
+
 test "runtime extracts preference memories with temporal supersession" {
     const in_memory = @import("in_memory_storage.zig");
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const concise = try runtime.dispatch(
         std.testing.allocator,
@@ -2845,6 +3303,7 @@ test "runtime rejects invalid extractor candidates before writes" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const invalid = extractor.Candidate{
         .label = .fact,
@@ -2870,6 +3329,7 @@ test "runtime forgetting raw evidence invalidates derived facts" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const remember = try runtime.dispatch(
         std.testing.allocator,
@@ -2927,6 +3387,7 @@ test "runtime forget supports redaction state" {
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
     var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
 
     const remember = try runtime.dispatch(
         std.testing.allocator,

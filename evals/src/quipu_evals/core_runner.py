@@ -115,6 +115,9 @@ def run_core_suite(
     lattice_lib: str | None = None,
     scenario_artifact_dir: Path | None = None,
     reuse_existing: bool = False,
+    skip_verification: bool = False,
+    log_retrieval: bool = True,
+    extract: bool = True,
 ) -> CoreSuiteRun:
     ensure_core_binary(storage=storage, lattice_include=lattice_include, lattice_lib=lattice_lib)
     suite = load_suite(path)
@@ -142,6 +145,9 @@ def run_core_suite(
             scenario,
             db_path=db_path,
             retrieval_needs=retrieval_needs,
+            skip_verification=skip_verification,
+            log_retrieval=log_retrieval,
+            extract=extract,
         )
         query_runs.extend(scenario_query_runs)
         forget_runs.extend(scenario_forget_runs)
@@ -162,16 +168,26 @@ def run_core_scenario(
     *,
     db_path: Path | None = None,
     retrieval_needs: list[str] | None = None,
+    skip_verification: bool = False,
+    log_retrieval: bool = True,
+    extract: bool = True,
 ) -> tuple[list[CoreQueryRun], list[CoreForgetRun], Mapping[str, Any] | None]:
     extra_args = ["--db", str(db_path)] if db_path is not None else []
     with CoreStdioClient(CORE_BINARY, extra_args=extra_args) as client:
         event_to_message_qids: dict[str, list[str]] = {}
         for event in sorted(scenario.events, key=lambda item: item.time):
-            remembered = remember_event(client, event)
+            remembered = remember_event(client, event, extract=extract)
             event_to_message_qids[event.event_id] = list(remembered["messageQids"])
 
         query_runs = [
-            run_query(client, scenario.scenario_id, query, event_to_message_qids, retrieval_needs=retrieval_needs)
+            run_query(
+                client,
+                scenario.scenario_id,
+                query,
+                event_to_message_qids,
+                retrieval_needs=retrieval_needs,
+                log_retrieval=log_retrieval,
+            )
             for query in scenario.queries
         ]
 
@@ -204,7 +220,7 @@ def run_core_scenario(
                 )
             )
 
-    verification = verify_db(db_path, scenario.scenario_id) if db_path is not None else None
+    verification = verify_db(db_path, scenario.scenario_id) if db_path is not None and not skip_verification else None
     return query_runs, forget_runs, verification
 
 
@@ -292,11 +308,12 @@ def grade_from_json(payload: Mapping[str, Any]) -> GradeResult:
     )
 
 
-def remember_event(client: CoreStdioClient, event: Event) -> Mapping[str, object]:
+def remember_event(client: CoreStdioClient, event: Event, *, extract: bool = True) -> Mapping[str, object]:
     return client.call(
         "memory.remember",
         {
             "scope": event.scope,
+            "extract": extract,
             "messages": [
                 {
                     "role": message.role,
@@ -316,12 +333,13 @@ def run_query(
     event_to_message_qids: Mapping[str, list[str]],
     *,
     retrieval_needs: list[str] | None = None,
+    log_retrieval: bool = True,
 ) -> CoreQueryRun:
     params = {
         "query": query.query,
         "scope": query.scope,
         "time": {"validAt": query.time},
-        "options": {"includeEvidence": True, "includeDebug": True, "logTrace": True},
+        "options": {"includeEvidence": True, "includeDebug": True, "logTrace": log_retrieval, "logAudit": log_retrieval},
     }
     if retrieval_needs is not None:
         params["needs"] = retrieval_needs
@@ -438,6 +456,9 @@ def main() -> int:
     parser.add_argument("--strict", action="store_true", help="Return non-zero when any scenario fails")
     parser.add_argument("--output", type=Path, help="Write the full run result JSON to this path")
     parser.add_argument("--manifest", type=Path, help="Write a compact eval run manifest to this path")
+    parser.add_argument("--skip-verification", action="store_true", help="Skip per-scenario core DB verification")
+    parser.add_argument("--no-retrieval-log", action="store_true", help="Do not write retrieval/audit stream entries during queries")
+    parser.add_argument("--no-extract", action="store_true", help="Replay raw messages without synchronous extraction")
     args = parser.parse_args()
 
     if args.storage == "lattice":
@@ -449,6 +470,9 @@ def main() -> int:
                 db_dir=args.db_dir,
                 lattice_include=args.lattice_include,
                 lattice_lib=args.lattice_lib,
+                skip_verification=args.skip_verification,
+                log_retrieval=not args.no_retrieval_log,
+                extract=not args.no_extract,
             )
         else:
             with tempfile.TemporaryDirectory(prefix="quipu-lattice-eval-") as directory:
@@ -458,6 +482,9 @@ def main() -> int:
                     db_dir=Path(directory),
                     lattice_include=args.lattice_include,
                     lattice_lib=args.lattice_lib,
+                    skip_verification=args.skip_verification,
+                    log_retrieval=not args.no_retrieval_log,
+                    extract=not args.no_extract,
                 )
     else:
         run = run_core_suite(args.suite)

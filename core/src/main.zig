@@ -125,6 +125,7 @@ pub fn main(init: std.process.Init) !void {
         health.db_path = config.db_path;
         health.lattice_version = lattice_storage.LatticeAdapter.latticeVersion();
         var runtime = runtime_mod.Runtime.initWithNextId(adapter_state.adapter(), health, adapter_state.nextRuntimeId());
+        defer runtime.deinit();
         try runCommand(init.io, allocator, args, config.command_index, &runtime, adapter_state.adapter());
         return;
     }
@@ -132,6 +133,7 @@ pub fn main(init: std.process.Init) !void {
     var adapter_state = in_memory_storage.InMemoryAdapter.init(allocator);
     defer adapter_state.deinit();
     var runtime = runtime_mod.Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
     try runCommand(init.io, allocator, args, config.command_index, &runtime, adapter_state.adapter());
 }
 
