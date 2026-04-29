@@ -398,10 +398,20 @@ class Quipu:
     _next_id: int = field(default=1, init=False, repr=False)
 
     @classmethod
-    def local(cls, command: Optional[Sequence[str]] = None) -> "Quipu":
-        if command is None:
-            return cls()
-        return cls.stdio(command)
+    def local(
+        cls,
+        command: Optional[Sequence[str]] = None,
+        *,
+        binary: str = "quipu",
+        db_path: Optional[str] = None,
+    ) -> "Quipu":
+        if command is not None:
+            return cls.stdio(command)
+        resolved_command = [binary]
+        if db_path is not None:
+            resolved_command.extend(["--db", db_path])
+        resolved_command.append("serve-stdio")
+        return cls.stdio(resolved_command)
 
     @classmethod
     def stdio(cls, command: Sequence[str]) -> "Quipu":

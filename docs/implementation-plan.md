@@ -7,7 +7,9 @@ core prototype. Items are ordered by the path from prototype to usable release.
 
 ### 1. Daemon Transports and SDK Connection
 
-Status: not started beyond `serve-stdio`.
+Status: `serve-stdio` exists, and Python/TypeScript `local` helpers can
+auto-start that stdio core with an optional DB path. Socket, pipe, and HTTP
+daemon transports are not complete.
 
 Remaining:
 
@@ -16,8 +18,8 @@ Remaining:
 - Add localhost HTTP transport for browser/devtools use.
 - Implement daemon lifecycle commands: `start`, `stop`, `restart`, and richer
   `status`.
-- Teach Python and TypeScript SDKs to discover, connect to, auto-start, and
-  recover a running daemon.
+- Teach Python and TypeScript SDKs to discover and recover a long-running daemon
+  once socket/HTTP transports exist.
 
 Acceptance:
 

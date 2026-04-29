@@ -114,6 +114,14 @@ class QuipuClientTests(unittest.TestCase):
         self.assertEqual(calls[0]["method"], "system.health")
         validate_json_rpc_request(calls[0])
 
+    def test_local_client_builds_stdio_command(self):
+        client = Quipu.local(binary="quipu-test", db_path="/tmp/quipu.lattice")
+        try:
+            self.assertTrue(hasattr(client.transport, "command"))
+            self.assertEqual(client.transport.command, ["quipu-test", "--db", "/tmp/quipu.lattice", "serve-stdio"])
+        finally:
+            client.close()
+
     @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
     def test_stdio_client_calls_core_process(self):
         env = os.environ.copy()
@@ -136,6 +144,15 @@ class QuipuClientTests(unittest.TestCase):
             self.assertIn("The repo uses pnpm as its package manager.", retrieved["prompt"])
             self.assertEqual(len(retrieved["context"]["currentFacts"]), 1)
             self.assertEqual(retrieved["trace"]["keptCount"], 1)
+
+    @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
+    def test_local_client_auto_starts_core_stdio(self):
+        env = os.environ.copy()
+        env["ZIG_GLOBAL_CACHE_DIR"] = "/tmp/quipu-zig-cache"
+        subprocess.run(["zig", "build"], cwd=str(CORE_DIR), check=True, env=env)
+
+        with Quipu.local(binary=str(CORE_BINARY)) as client:
+            self.assertEqual(client.health()["status"], "ok")
 
 
 if __name__ == "__main__":

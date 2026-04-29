@@ -135,7 +135,7 @@ Python:
 ```python
 from quipu import Quipu
 
-with Quipu.stdio(["quipu", "--db", "/tmp/quipu.lattice", "serve-stdio"]) as q:
+with Quipu.local(db_path="/tmp/quipu.lattice") as q:
     remembered = q.remember(
         scope={"projectId": "repo:quipu"},
         messages=[{"role": "user", "content": "Use pnpm for this repo."}],
@@ -155,7 +155,7 @@ TypeScript:
 ```ts
 import { Quipu } from "@quipu/memory";
 
-const q = Quipu.stdio(["quipu", "--db", "/tmp/quipu.lattice", "serve-stdio"]);
+const q = await Quipu.local({ dbPath: "/tmp/quipu.lattice" });
 
 try {
   await q.remember({
@@ -211,6 +211,7 @@ Implemented:
 - Retrieval, inspection, feedback, core memory blocks, forgetting, and audit
   stream logging.
 - Python/TypeScript SDK validators and stdio clients.
+- Python/TypeScript `local` helpers that auto-start the core over stdio.
 - MCP tools, resources, and prompts.
 - Synthetic eval harness, strict core eval baseline, and run manifests.
 

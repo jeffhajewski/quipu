@@ -49,6 +49,12 @@ export type JsonRpcResponse =
 
 export type QuipuTransport = (request: JsonRpcRequest) => Promise<JsonRpcResponse> | JsonRpcResponse;
 
+export type QuipuLocalOptions = {
+  command?: string[];
+  binary?: string;
+  dbPath?: string;
+};
+
 export type RememberRequest = {
   sessionId?: string;
   scope?: QuipuScope;
@@ -539,9 +545,14 @@ export class Quipu {
     this.closeTransport = closeTransport;
   }
 
-  static async local(command?: string[]): Promise<Quipu> {
-    if (command) return Quipu.stdio(command);
-    return new Quipu();
+  static async local(options?: string[] | QuipuLocalOptions): Promise<Quipu> {
+    if (Array.isArray(options)) return Quipu.stdio(options);
+    if (options?.command) return Quipu.stdio(options.command);
+    const binary = options?.binary ?? process.env.QUIPU_CORE_BINARY ?? "quipu";
+    const command = [binary];
+    if (options?.dbPath) command.push("--db", options.dbPath);
+    command.push("serve-stdio");
+    return Quipu.stdio(command);
   }
 
   static stdio(command: string[]): Quipu {

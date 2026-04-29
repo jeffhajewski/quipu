@@ -107,3 +107,20 @@ test("stdio client calls core process", { skip: !hasZig }, async () => {
     client.close();
   }
 });
+
+test("local client auto-starts core stdio process", { skip: !hasZig }, async () => {
+  const build = spawnSync("zig", ["build"], {
+    cwd: coreDir,
+    env: { ...process.env, ZIG_GLOBAL_CACHE_DIR: "/tmp/quipu-zig-cache" },
+    stdio: "inherit",
+  });
+  assert.equal(build.status, 0);
+
+  const client = await Quipu.local({ binary: coreBinary });
+  try {
+    const health = await client.health();
+    assert.equal(health.status, "ok");
+  } finally {
+    client.close();
+  }
+});
