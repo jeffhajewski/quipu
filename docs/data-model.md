@@ -4,7 +4,21 @@ See [../SPEC.md](../SPEC.md) for the full design.
 
 ## Derived Memory
 
-The in-memory core currently writes three derived memory labels:
+The core writes raw, episodic, card, and derived labels.
+
+Raw labels:
+
+- `Message`: user/assistant/tool text from `memory.remember`.
+- `ToolCall`: optional tool invocation records supplied in `toolCalls`.
+- `Observation`: optional tool or environment observations supplied in
+  `observations`.
+
+Episodic/card labels:
+
+- `Episode`: deterministic conversation episode for extracted turns.
+- `MemoryCard`: atomic retrieval note linked to raw message evidence.
+
+Derived labels:
 
 - `Fact`: scoped semantic fact, such as `project.package_manager`.
 - `Preference`: scoped user preference, such as `user.response_style`.

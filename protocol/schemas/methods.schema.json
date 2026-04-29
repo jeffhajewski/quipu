@@ -43,7 +43,7 @@
         "qid": { "$ref": "#/$defs/qid" },
         "type": {
           "type": "string",
-          "enum": ["raw", "message", "episode", "fact", "preference", "procedure", "core", "summary"]
+          "enum": ["raw", "message", "episode", "memory_card", "fact", "preference", "procedure", "core", "summary"]
         },
         "text": { "type": "string" },
         "score": { "type": "number", "minimum": 0 },

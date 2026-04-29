@@ -272,6 +272,8 @@ pub const Runtime = struct {
             for (message_qids.items) |qid| allocator.free(qid);
             message_qids.deinit(allocator);
         }
+        var first_message_content: ?[]const u8 = null;
+        var first_message_created_at: ?[]const u8 = null;
 
         const extract_enabled = boolField(params, "extract") orelse true;
         var derived_count: usize = 0;
@@ -288,6 +290,10 @@ pub const Runtime = struct {
             };
             if (content.len == 0) {
                 return errorResponse(allocator, id, "invalid_request", "message.content is required");
+            }
+            if (first_message_content == null) {
+                first_message_content = content;
+                first_message_created_at = stringField(&message, "createdAt");
             }
             const message_qid = try self.nextQid(allocator, "msg");
             try message_qids.append(allocator, message_qid);
@@ -317,6 +323,15 @@ pub const Runtime = struct {
                 );
             }
         }
+
+        const episode_qid = if (extract_enabled and message_qids.items.len > 0)
+            try self.writeEpisodeForTurn(allocator, scope, session_qid, turn_qid, message_qids.items, first_message_content orelse "", first_message_created_at)
+        else
+            null;
+        defer if (episode_qid) |qid| allocator.free(qid);
+
+        const tool_call_count = try self.writeToolCalls(allocator, params, scope, turn_qid);
+        const observation_count = try self.writeObservations(allocator, params, scope, turn_qid);
 
         if (stringField(params, "idempotencyKey")) |key| {
             const idem_qid = try idempotencyQid(allocator, key);
@@ -373,6 +388,9 @@ pub const Runtime = struct {
             .messageQids = message_qids.items,
             .queuedJobs = queued_jobs.items,
             .derivedCount = derived_count,
+            .episodeQid = episode_qid,
+            .toolCallCount = tool_call_count,
+            .observationCount = observation_count,
         });
         defer allocator.free(event_payload);
         _ = try self.publishEvent(streams.raw_event, event_payload);
@@ -445,7 +463,7 @@ pub const Runtime = struct {
         const candidate_count = results.items.items.len;
         const dropped_for_needs = results.filterByNeeds(needs_value);
         if (!needsIncludes(needs_value, "raw")) {
-            results.suppressRawIfDerived();
+            results.suppressRawIfDerived(needs_value);
         }
         const dropped_for_budget = results.applyTokenBudget(@intCast(budget));
 
@@ -582,7 +600,9 @@ pub const Runtime = struct {
 
             var dependents = try self.derivedRefsByEvidence(allocator, qid);
             defer dependents.deinit();
-            facts_invalidated += dependents.items.items.len;
+            for (dependents.items.items) |dependent| {
+                if (isFactLikeType(dependent.type)) facts_invalidated += 1;
+            }
             for (dependents.items.items) |dependent| {
                 try report.append(allocator, dependent.qid, dependent.type, dependent_action);
             }
@@ -795,6 +815,20 @@ pub const Runtime = struct {
         });
     }
 
+    fn putDeterministicEdge(self: *Runtime, allocator: std.mem.Allocator, from_qid: []const u8, to_qid: []const u8, edge_type: []const u8) !void {
+        const key = try std.fmt.allocPrint(allocator, "{s}:{s}:{s}", .{ from_qid, edge_type, to_qid });
+        defer allocator.free(key);
+        const edge_qid = try hashQid(allocator, "edge", key);
+        defer allocator.free(edge_qid);
+        try self.store.putEdge(.{
+            .qid = edge_qid,
+            .from_qid = from_qid,
+            .to_qid = to_qid,
+            .edge_type = edge_type,
+            .properties_json = "{}",
+        });
+    }
+
     fn publishEvent(self: *Runtime, stream: []const u8, payload_json: []const u8) !storage.StreamEntry {
         return self.store.appendStream(stream, payload_json);
     }
@@ -868,6 +902,143 @@ pub const Runtime = struct {
         defer allocator.free(props);
         try self.store.putNode(.{ .qid = qid, .label = label, .properties_json = props });
         try self.putEdge(allocator, qid, message_qid, "EVIDENCED_BY");
+        try self.writeMemoryCardForCandidate(allocator, scope, message_qid, quote, created_at, candidate);
+    }
+
+    fn writeMemoryCardForCandidate(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        scope: Scope,
+        message_qid: []const u8,
+        quote: []const u8,
+        created_at: ?[]const u8,
+        candidate: extractor.Candidate,
+    ) !void {
+        const key = try std.fmt.allocPrint(allocator, "{s}:{s}:{s}", .{ message_qid, candidate.slot_key, candidate.value });
+        defer allocator.free(key);
+        const card_qid = try hashQid(allocator, "card", key);
+        defer allocator.free(card_qid);
+        const props = try stringifyAlloc(allocator, .{
+            .kind = "memory_card",
+            .qtype = "memory_card",
+            .cardKind = memoryCardKind(candidate.label),
+            .text = candidate.text,
+            .contextDescription = "Deterministic extraction from raw message.",
+            .slotKey = candidate.slot_key,
+            .value = candidate.value,
+            .state = "current",
+            .validFrom = created_at,
+            .validTo = @as(?[]const u8, null),
+            .evidenceQid = message_qid,
+            .quote = quote,
+            .tenantId = scope.tenant_id,
+            .userId = scope.user_id,
+            .agentId = scope.agent_id,
+            .projectId = scope.project_id,
+            .deleted = false,
+        });
+        defer allocator.free(props);
+        try self.store.putNode(.{ .qid = card_qid, .label = "MemoryCard", .properties_json = props });
+        try self.putDeterministicEdge(allocator, card_qid, message_qid, "EVIDENCED_BY");
+    }
+
+    fn writeEpisodeForTurn(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        scope: Scope,
+        session_qid: []const u8,
+        turn_qid: []const u8,
+        message_qids: []const []const u8,
+        summary: []const u8,
+        created_at: ?[]const u8,
+    ) ![]u8 {
+        const episode_qid = try hashQid(allocator, "ep", turn_qid);
+        errdefer allocator.free(episode_qid);
+        const props = try stringifyAlloc(allocator, .{
+            .kind = "episode",
+            .qtype = "episode",
+            .episodeType = "conversation",
+            .sessionQid = session_qid,
+            .turnQid = turn_qid,
+            .summary = summary,
+            .text = summary,
+            .eventTime = created_at,
+            .state = "current",
+            .evidenceQid = if (message_qids.len > 0) message_qids[0] else null,
+            .quote = summary,
+            .tenantId = scope.tenant_id,
+            .userId = scope.user_id,
+            .agentId = scope.agent_id,
+            .projectId = scope.project_id,
+            .evidenceQids = message_qids,
+            .deleted = false,
+        });
+        defer allocator.free(props);
+        try self.store.putNode(.{ .qid = episode_qid, .label = "Episode", .properties_json = props });
+        try self.putDeterministicEdge(allocator, episode_qid, turn_qid, "DERIVED_FROM");
+        for (message_qids) |message_qid| {
+            try self.putDeterministicEdge(allocator, episode_qid, message_qid, "DERIVED_FROM");
+        }
+        return episode_qid;
+    }
+
+    fn writeToolCalls(self: *Runtime, allocator: std.mem.Allocator, params: *const ObjectMap, scope: Scope, turn_qid: []const u8) !usize {
+        const calls = arrayValue(params.get("toolCalls")) orelse return 0;
+        var written: usize = 0;
+        for (calls.items) |call_value| {
+            const call = objectValue(call_value) orelse return error.InvalidRequest;
+            const tool_name = stringField(&call, "toolName") orelse stringField(&call, "name") orelse return error.InvalidRequest;
+            const call_qid = try self.nextQid(allocator, "tool");
+            defer allocator.free(call_qid);
+            const props = try stringifyAlloc(allocator, .{
+                .kind = "tool_call",
+                .qtype = "tool_call",
+                .toolName = tool_name,
+                .inputJson = stringField(&call, "inputJson") orelse "{}",
+                .outputJson = stringField(&call, "outputJson") orelse "{}",
+                .status = stringField(&call, "status") orelse "success",
+                .errorText = stringField(&call, "errorText"),
+                .tenantId = scope.tenant_id,
+                .userId = scope.user_id,
+                .agentId = scope.agent_id,
+                .projectId = scope.project_id,
+                .deleted = false,
+            });
+            defer allocator.free(props);
+            try self.store.putNode(.{ .qid = call_qid, .label = "ToolCall", .properties_json = props });
+            try self.putEdge(allocator, turn_qid, call_qid, "HAS_TOOL_CALL");
+            written += 1;
+        }
+        return written;
+    }
+
+    fn writeObservations(self: *Runtime, allocator: std.mem.Allocator, params: *const ObjectMap, scope: Scope, turn_qid: []const u8) !usize {
+        const observations = arrayValue(params.get("observations")) orelse return 0;
+        var written: usize = 0;
+        for (observations.items) |observation_value| {
+            const observation = objectValue(observation_value) orelse return error.InvalidRequest;
+            const content = stringField(&observation, "content") orelse stringField(&observation, "text") orelse return error.InvalidRequest;
+            const observation_qid = try self.nextQid(allocator, "obs");
+            defer allocator.free(observation_qid);
+            const props = try stringifyAlloc(allocator, .{
+                .kind = "observation",
+                .qtype = "observation",
+                .observationType = stringField(&observation, "type") orelse "generic",
+                .content = content,
+                .text = content,
+                .createdAt = stringField(&observation, "createdAt"),
+                .tenantId = scope.tenant_id,
+                .userId = scope.user_id,
+                .agentId = scope.agent_id,
+                .projectId = scope.project_id,
+                .deleted = false,
+            });
+            defer allocator.free(props);
+            try self.store.putNode(.{ .qid = observation_qid, .label = "Observation", .properties_json = props });
+            try self.putEdge(allocator, turn_qid, observation_qid, "HAS_OBSERVATION");
+            written += 1;
+        }
+        return written;
     }
 
     fn supersedeCurrentSlot(self: *Runtime, allocator: std.mem.Allocator, scope: Scope, slot_key: []const u8, valid_to: ?[]const u8) !void {
@@ -877,7 +1048,7 @@ pub const Runtime = struct {
         for (hits) |hit| {
             const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
-            if (!isDerivedLabel(node.label)) continue;
+            if (!isSlotMemoryLabel(node.label)) continue;
             if (!try scope.matchesNode(allocator, node)) continue;
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
             if (!try propertyEquals(allocator, node.properties_json, "slotKey", slot_key)) continue;
@@ -938,7 +1109,7 @@ pub const Runtime = struct {
         var refs = OwnedNodeRefs{ .allocator = allocator };
         errdefer refs.deinit();
 
-        if (!isDerivedLabel(node.label)) return refs;
+        if (!isEvidenceLinkedLabel(node.label)) return refs;
         const evidence_qid = try readOptionalPropertyString(allocator, node.properties_json, "evidenceQid");
         defer if (evidence_qid) |qid| allocator.free(qid);
         if (evidence_qid) |qid| {
@@ -958,7 +1129,7 @@ pub const Runtime = struct {
         for (hits) |hit| {
             const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
-            if (!isDerivedLabel(node.label)) continue;
+            if (!isEvidenceLinkedLabel(node.label)) continue;
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
             if (!try propertyEquals(allocator, node.properties_json, "evidenceQid", evidence_qid)) continue;
             try refs.append(allocator, node.qid, labelType(node.label), "derived_from");
@@ -973,7 +1144,7 @@ pub const Runtime = struct {
         for (hits) |hit| {
             const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
-            if (!isDerivedLabel(node.label)) continue;
+            if (!isEvidenceLinkedLabel(node.label)) continue;
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
             if (!try propertyEquals(allocator, node.properties_json, "evidenceQid", evidence_qid)) continue;
             try self.tombstoneNode(allocator, node.qid, node.label, reason, mode);
@@ -1163,7 +1334,7 @@ const OwnedItems = struct {
         self.items.deinit(self.allocator);
     }
 
-    fn suppressRawIfDerived(self: *OwnedItems) void {
+    fn suppressRawIfDerived(self: *OwnedItems, needs_value: ?Value) void {
         var has_derived = false;
         for (self.items.items) |item| {
             if (std.mem.eql(u8, item.type, "fact") or std.mem.eql(u8, item.type, "preference") or std.mem.eql(u8, item.type, "procedure") or std.mem.eql(u8, item.type, "core")) {
@@ -1175,7 +1346,8 @@ const OwnedItems = struct {
 
         var write_index: usize = 0;
         for (self.items.items) |item| {
-            if (std.mem.eql(u8, item.type, "message") or std.mem.eql(u8, item.type, "raw")) {
+            const suppress_episode_like = !needsIncludes(needs_value, "recent_episodes") and (std.mem.eql(u8, item.type, "episode") or std.mem.eql(u8, item.type, "memory_card"));
+            if (std.mem.eql(u8, item.type, "message") or std.mem.eql(u8, item.type, "raw") or suppress_episode_like) {
                 self.freeItem(item);
                 continue;
             }
@@ -1561,10 +1733,22 @@ fn textForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
     if (std.mem.eql(u8, node.label, "Core")) {
         return readPropertyString(allocator, node.properties_json, "text");
     }
+    if (std.mem.eql(u8, node.label, "Episode")) {
+        return readPropertyString(allocator, node.properties_json, "summary");
+    }
+    if (std.mem.eql(u8, node.label, "MemoryCard")) {
+        return readPropertyString(allocator, node.properties_json, "text");
+    }
     if (isDerivedLabel(node.label)) {
         return readPropertyString(allocator, node.properties_json, "text");
     }
     if (std.mem.eql(u8, node.label, "Message")) {
+        return readPropertyString(allocator, node.properties_json, "content");
+    }
+    if (std.mem.eql(u8, node.label, "ToolCall")) {
+        return readPropertyString(allocator, node.properties_json, "toolName");
+    }
+    if (std.mem.eql(u8, node.label, "Observation")) {
         return readPropertyString(allocator, node.properties_json, "content");
     }
     if (std.mem.eql(u8, node.label, "Feedback")) {
@@ -1586,8 +1770,12 @@ fn labelType(label: []const u8) []const u8 {
     if (std.mem.eql(u8, label, "Fact")) return "fact";
     if (std.mem.eql(u8, label, "Preference")) return "preference";
     if (std.mem.eql(u8, label, "Procedure")) return "procedure";
+    if (std.mem.eql(u8, label, "Episode")) return "episode";
+    if (std.mem.eql(u8, label, "MemoryCard")) return "memory_card";
     if (std.mem.eql(u8, label, "Session")) return "raw";
     if (std.mem.eql(u8, label, "Turn")) return "raw";
+    if (std.mem.eql(u8, label, "ToolCall")) return "raw";
+    if (std.mem.eql(u8, label, "Observation")) return "raw";
     if (std.mem.eql(u8, label, "Core")) return "core";
     if (std.mem.eql(u8, label, "Feedback")) return "raw";
     return "raw";
@@ -1595,6 +1783,18 @@ fn labelType(label: []const u8) []const u8 {
 
 fn isDerivedLabel(label: []const u8) bool {
     return std.mem.eql(u8, label, "Fact") or std.mem.eql(u8, label, "Preference") or std.mem.eql(u8, label, "Procedure");
+}
+
+fn isSlotMemoryLabel(label: []const u8) bool {
+    return isDerivedLabel(label) or std.mem.eql(u8, label, "MemoryCard");
+}
+
+fn isEvidenceLinkedLabel(label: []const u8) bool {
+    return isDerivedLabel(label) or std.mem.eql(u8, label, "MemoryCard") or std.mem.eql(u8, label, "Episode");
+}
+
+fn isFactLikeType(node_type: []const u8) bool {
+    return std.mem.eql(u8, node_type, "fact") or std.mem.eql(u8, node_type, "preference") or std.mem.eql(u8, node_type, "procedure");
 }
 
 fn isInternalLabel(label: []const u8) bool {
@@ -1625,6 +1825,9 @@ fn itemAllowedByNeeds(item: MessageResult, needs_value: ?Value) bool {
     if (std.mem.eql(u8, item.type, "fact")) return needsIncludes(needs_value, "current_facts");
     if (std.mem.eql(u8, item.type, "preference")) return needsIncludes(needs_value, "preferences");
     if (std.mem.eql(u8, item.type, "procedure")) return needsIncludes(needs_value, "procedural");
+    if (std.mem.eql(u8, item.type, "memory_card")) {
+        return needsIncludes(needs_value, "recent_episodes") or needsIncludes(needs_value, "raw");
+    }
     if (std.mem.eql(u8, item.type, "message") or std.mem.eql(u8, item.type, "episode")) {
         return needsIncludes(needs_value, "recent_episodes") or needsIncludes(needs_value, "raw");
     }
@@ -1758,6 +1961,19 @@ fn idempotencyQid(allocator: std.mem.Allocator, key: []const u8) ![]u8 {
     return out;
 }
 
+fn hashQid(allocator: std.mem.Allocator, prefix: []const u8, key: []const u8) ![]u8 {
+    const hash = std.hash.Wyhash.hash(2, key);
+    return std.fmt.allocPrint(allocator, "q_{s}_{x}", .{ prefix, hash });
+}
+
+fn memoryCardKind(label: extractor.Label) []const u8 {
+    return switch (label) {
+        .fact => "semantic",
+        .preference => "preference",
+        .procedure => "procedural",
+    };
+}
+
 fn freeHits(allocator: std.mem.Allocator, hits: []storage.SearchHit) void {
     for (hits) |hit| allocator.free(hit.qid);
     allocator.free(hits);
@@ -1873,6 +2089,42 @@ test "runtime publishes audit stream entries for mutations" {
     try std.testing.expectEqual(@as(usize, 2), entries.len);
     try std.testing.expect(std.mem.indexOf(u8, entries[0].payload_json, "\"method\":\"memory.remember\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, entries[1].payload_json, "\"method\":\"memory.feedback\"") != null);
+}
+
+test "runtime stores tool calls observations episodes and memory cards" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+
+    const remember = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"This repo uses pnpm.\",\"createdAt\":\"2026-04-01T10:00:00Z\"}],\"toolCalls\":[{\"toolName\":\"shell\",\"inputJson\":\"{\\\"cmd\\\":\\\"pnpm test\\\"}\",\"outputJson\":\"{\\\"status\\\":\\\"ok\\\"}\",\"status\":\"success\"}],\"observations\":[{\"type\":\"tool_result\",\"content\":\"pnpm test passed\",\"createdAt\":\"2026-04-01T10:01:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(remember);
+
+    const cards = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"s1\",\"method\":\"memory.search\",\"params\":{\"query\":\"package manager\",\"scope\":{\"projectId\":\"repo:test\"},\"labels\":[\"MemoryCard\"],\"limit\":5}}",
+    );
+    defer std.testing.allocator.free(cards);
+    try std.testing.expect(std.mem.indexOf(u8, cards, "\"type\":\"memory_card\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cards, "The repo uses pnpm as its package manager.") != null);
+
+    const episodes = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"s2\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"repo uses pnpm\",\"scope\":{\"projectId\":\"repo:test\"},\"needs\":[\"recent_episodes\"]}}",
+    );
+    defer std.testing.allocator.free(episodes);
+    try std.testing.expect(std.mem.indexOf(u8, episodes, "\"type\":\"episode\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, episodes, "This repo uses pnpm.") != null);
+
+    const observations = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"s3\",\"method\":\"memory.search\",\"params\":{\"query\":\"pnpm test passed\",\"scope\":{\"projectId\":\"repo:test\"},\"labels\":[\"Observation\"],\"limit\":5}}",
+    );
+    defer std.testing.allocator.free(observations);
+    try std.testing.expect(std.mem.indexOf(u8, observations, "pnpm test passed") != null);
 }
 
 test "runtime queues extract jobs from durable stream events" {
