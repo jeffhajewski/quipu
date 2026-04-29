@@ -84,11 +84,12 @@ The current benchmark surface has two honest result classes:
   evidence, preferences, and forgetting.
 - `external_smoke`: tiny normalized fixtures shaped like external benchmarks.
 
-`publishable` external results are not available yet. Do not advertise numbers
-for LoCoMo, LongMemEval, or MemoryAgentBench until a full LoCoMo run passes with
-the full external dataset, LatticeDB storage, retrieval traces, answer and
-judge configuration, baselines, ablations, verification, and reproducible
-manifests.
+One local `publishable` LoCoMo run has passed the readiness gate with the full
+external dataset, LatticeDB storage, retrieval traces, deterministic answer and
+grading, baselines, ablations, verification, and reproducible manifests. Treat
+it as a Quipu reproducibility result, not an apples-to-apples leaderboard claim
+against published systems that use different answer models, judges, retrieval
+cutoffs, category subsets, or dataset slices.
 
 Latest local synthetic run:
 
@@ -99,15 +100,21 @@ Latest local synthetic run:
 See [docs/benchmark-results.md](./docs/benchmark-results.md) for the generated
 report and caveats.
 
-Current external smoke:
+Current external benchmark status:
 
 - LoCoMo mini fixture: covers single-hop, multi-hop, temporal, adversarial,
   event-summary, and forgetting paths. This validates the harness, not LoCoMo
   performance.
 - Real LoCoMo adapter: normalizes the upstream SNAP `locomo10.json` shape into
   Quipu scenarios and can run local deterministic baseline, ablation, and core
-  benchmark passes with artifacts. These runs are development outputs until the
-  publishable gate passes.
+  benchmark passes with artifacts.
+- Full LoCoMo local run: readiness `ready`, 1,986 questions, LatticeDB `0.6.0`
+  verification passed on all 10 conversations, core Lattice deterministic exact
+  match 13.7%, evidence recall 19.6%, with reports under
+  `artifacts/benchmarks/locomo-full/`.
+- External benchmark reports include published reference points from other
+  memory systems where available. They are orientation only: answer models,
+  judges, retrieval cutoffs, dataset slices, and methodologies differ.
 
 ## Try It
 

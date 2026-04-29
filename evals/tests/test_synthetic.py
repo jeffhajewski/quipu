@@ -17,6 +17,7 @@ from quipu_evals.core_client import CoreStdioClient  # noqa: E402
 from quipu_evals.core_runner import run_core_suite  # noqa: E402
 from quipu_evals.artifacts import build_manifest  # noqa: E402
 from quipu_evals.benchmarks import collect_benchmarks, render_markdown  # noqa: E402
+from quipu_evals.comparisons import published_results  # noqa: E402
 from quipu_evals.external import load_external_suite  # noqa: E402
 from quipu_evals.locomo import load_locomo_suite, write_suite  # noqa: E402
 from quipu_evals.readiness import evaluate_readiness  # noqa: E402
@@ -180,8 +181,18 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertEqual(report["resultClass"], "external_smoke")
         self.assertEqual(report["dataset"]["benchmark"], "locomo")
         self.assertEqual(report["benchmarkReadiness"]["status"], "not_ready")
+        self.assertGreater(len(report["publishedComparisons"]), 0)
         self.assertIn("External Smoke Benchmark Results", markdown)
+        self.assertIn("Published External Reference Points", markdown)
         self.assertIn("not publishable", markdown)
+
+    def test_published_comparisons_include_memory_system_references(self):
+        systems = {row["system"] for row in published_results("locomo")}
+
+        self.assertIn("Mem0 Platform v3 top-200", systems)
+        self.assertIn("Memobase v0.0.37", systems)
+        self.assertIn("Letta Filesystem", systems)
+        self.assertIn("Memvid", systems)
 
     def test_report_can_execute_required_baselines_and_ablations(self):
         report = collect_benchmarks(
@@ -201,6 +212,30 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertTrue(readiness["baselines"])
         self.assertTrue(readiness["ablations"])
         self.assertFalse(readiness["full_dataset"])
+
+    def test_benchmark_collector_can_reuse_existing_run_artifacts(self):
+        with tempfile.TemporaryDirectory(prefix="quipu-reuse-existing-") as directory:
+            report = collect_benchmarks(
+                LOCOMO_MINI_PATH,
+                output_dir=directory,
+                include_core=False,
+                include_baselines=True,
+                result_class="external_smoke",
+                external_benchmark="locomo",
+            )
+            reused = collect_benchmarks(
+                LOCOMO_MINI_PATH,
+                output_dir=directory,
+                include_core=False,
+                include_baselines=True,
+                result_class="external_smoke",
+                external_benchmark="locomo",
+                reuse_existing=True,
+            )
+
+        self.assertEqual(len(report["runs"]), len(reused["runs"]))
+        self.assertTrue(all(run.get("reused") for run in reused["runs"]))
+        self.assertEqual(report["runs"][0]["metrics"], reused["runs"][0]["metrics"])
 
     def test_readiness_counts_lattice_storage_runs_separately_from_accuracy(self):
         readiness = evaluate_readiness(

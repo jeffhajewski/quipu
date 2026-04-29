@@ -113,6 +113,8 @@ def run_core_suite(
     db_dir: Path | None = None,
     lattice_include: str | None = None,
     lattice_lib: str | None = None,
+    scenario_artifact_dir: Path | None = None,
+    reuse_existing: bool = False,
 ) -> CoreSuiteRun:
     ensure_core_binary(storage=storage, lattice_include=lattice_include, lattice_lib=lattice_lib)
     suite = load_suite(path)
@@ -120,6 +122,16 @@ def run_core_suite(
     forget_runs: list[CoreForgetRun] = []
     verification_runs: list[Mapping[str, Any]] = []
     for scenario in suite.scenarios:
+        scenario_artifact = scenario_artifact_path(scenario_artifact_dir, scenario.scenario_id) if scenario_artifact_dir is not None else None
+        if reuse_existing and scenario_artifact is not None and scenario_artifact.exists():
+            scenario_payload = json.loads(scenario_artifact.read_text())
+            scenario_query_runs, scenario_forget_runs, scenario_verification = scenario_run_from_json(scenario_payload)
+            query_runs.extend(scenario_query_runs)
+            forget_runs.extend(scenario_forget_runs)
+            if scenario_verification is not None:
+                verification_runs.append(scenario_verification)
+            continue
+
         db_path = None
         if storage == "lattice":
             if db_dir is None:
@@ -135,6 +147,12 @@ def run_core_suite(
         forget_runs.extend(scenario_forget_runs)
         if scenario_verification is not None:
             verification_runs.append(scenario_verification)
+        if scenario_artifact is not None:
+            scenario_artifact.parent.mkdir(parents=True, exist_ok=True)
+            write_json(
+                scenario_artifact,
+                scenario_run_to_json(scenario.scenario_id, scenario_query_runs, scenario_forget_runs, scenario_verification),
+            )
     baseline = "core_lattice" if storage == "lattice" else "core_in_memory"
     return CoreSuiteRun(suite.name, suite.version, baseline, query_runs, forget_runs, verification_runs)
 
@@ -213,6 +231,65 @@ def verify_db(db_path: Path, scenario_id: str) -> Mapping[str, Any]:
         "exitCode": completed.returncode,
         **payload,
     }
+
+
+def scenario_artifact_path(directory: Path, scenario_id: str) -> Path:
+    safe_id = "".join(char if char.isalnum() or char in "-_" else "_" for char in scenario_id)
+    return directory / f"{safe_id}.json"
+
+
+def scenario_run_to_json(
+    scenario_id: str,
+    query_runs: list[CoreQueryRun],
+    forget_runs: list[CoreForgetRun],
+    verification: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "scenarioId": scenario_id,
+        "queries": [query_run_to_json(run) for run in query_runs],
+        "forgetOps": [forget_run_to_json(run) for run in forget_runs],
+        "verification": dict(verification) if verification is not None else None,
+    }
+
+
+def scenario_run_from_json(payload: Mapping[str, Any]) -> tuple[list[CoreQueryRun], list[CoreForgetRun], Mapping[str, Any] | None]:
+    query_runs = [core_query_run_from_json(item) for item in payload.get("queries", []) if isinstance(item, Mapping)]
+    forget_runs = [core_forget_run_from_json(item) for item in payload.get("forgetOps", []) if isinstance(item, Mapping)]
+    verification = payload.get("verification")
+    return query_runs, forget_runs, verification if isinstance(verification, Mapping) else None
+
+
+def core_query_run_from_json(payload: Mapping[str, Any]) -> CoreQueryRun:
+    return CoreQueryRun(
+        scenario_id=str(payload.get("scenarioId") or ""),
+        query_id=str(payload.get("queryId") or ""),
+        category=str(payload.get("category") or ""),
+        prompt="",
+        actual_answer=str(payload.get("actualAnswer") or ""),
+        evidence_event_ids=[str(item) for item in payload.get("evidenceEventIds", []) if isinstance(item, str)],
+        grades=[grade_from_json(item) for item in payload.get("grades", []) if isinstance(item, Mapping)],
+        trace=payload.get("trace") if isinstance(payload.get("trace"), Mapping) else None,
+    )
+
+
+def core_forget_run_from_json(payload: Mapping[str, Any]) -> CoreForgetRun:
+    grade_payload = payload.get("grade")
+    return CoreForgetRun(
+        scenario_id=str(payload.get("scenarioId") or ""),
+        forget_id=str(payload.get("forgetId") or ""),
+        deleted_roots=int(payload.get("deletedRoots") or 0),
+        invalidated_facts=int(payload.get("invalidatedFacts") or 0),
+        grade=grade_from_json(grade_payload if isinstance(grade_payload, Mapping) else {}),
+    )
+
+
+def grade_from_json(payload: Mapping[str, Any]) -> GradeResult:
+    details = payload.get("details")
+    return GradeResult(
+        name=str(payload.get("name") or "unknown"),
+        passed=bool(payload.get("passed")),
+        details=dict(details) if isinstance(details, Mapping) else {},
+    )
 
 
 def remember_event(client: CoreStdioClient, event: Event) -> Mapping[str, object]:

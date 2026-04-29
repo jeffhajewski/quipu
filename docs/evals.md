@@ -86,6 +86,12 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
 
 Use the generated report as a synthetic smoke benchmark only.
 
+External benchmark reports also include a `publishedComparisons` table with
+published reference points from other memory systems when known. These rows are
+not used by the readiness gate and are not direct head-to-head claims because
+answer models, judges, retrieval cutoffs, dataset slices, and methodologies
+often differ.
+
 ## External Smoke
 
 The external benchmark path starts with a normalized scenario format:
@@ -118,6 +124,11 @@ LatticeDB enabled, deterministic baselines/ablations, provider configuration,
 verification status, and generated trace artifacts. LongMemEval and
 MemoryAgentBench remain next adapters.
 
+For full runs, `--skip-core` omits the redundant in-memory core pass while
+still allowing the LatticeDB core pass when `--include-lattice` is set.
+`--reuse-existing` resumes from completed per-run result/manifest artifacts in
+the output directory, which is useful after an interrupted full benchmark.
+
 ## Real LoCoMo Dataset
 
 Quipu can normalize the upstream SNAP LoCoMo `data/locomo10.json` file directly:
@@ -131,6 +142,8 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --include-ablations \
   --include-lattice \
   --require-lattice \
+  --skip-core \
+  --reuse-existing \
   --allow-failures \
   --markdown artifacts/benchmarks/locomo-full/report.md
 ```

@@ -13,6 +13,7 @@ from typing import Any, Callable, Mapping
 
 from .artifacts import build_manifest, write_json
 from .baselines import DETERMINISTIC_ABLATIONS, DETERMINISTIC_REQUIRED_BASELINES, registry_json
+from .comparisons import published_results
 from .core_runner import CORE_BINARY, lattice_lib_from_env, run_core_suite
 from .external import DEFAULT_EXTERNAL_SUITES, external_suite_metadata, is_normalized_external_suite, load_external_suite
 from .locomo import download_locomo, load_locomo_suite, write_suite
@@ -42,6 +43,7 @@ def collect_benchmarks(
     require_lattice: bool = False,
     include_baselines: bool = False,
     include_ablations: bool = False,
+    reuse_existing: bool = False,
 ) -> dict[str, Any]:
     suite_path = Path(suite_path)
     suite_path, suite = prepare_suite(suite_path, output_dir, external_benchmark, locomo_options or {})
@@ -85,6 +87,7 @@ def collect_benchmarks(
             },
             seed=seed,
             verification_status=verification_status,
+            reuse_existing=reuse_existing,
         )
     )
     if include_baselines:
@@ -107,6 +110,7 @@ def collect_benchmarks(
                     },
                     seed=seed,
                     verification_status=verification_status,
+                    reuse_existing=reuse_existing,
                 )
             )
     if include_ablations:
@@ -129,6 +133,7 @@ def collect_benchmarks(
                     },
                     seed=seed,
                     verification_status=verification_status,
+                    reuse_existing=reuse_existing,
                 )
             )
     core_available = shutil.which("zig") is not None
@@ -146,6 +151,7 @@ def collect_benchmarks(
                 config={"suite": str(suite_path), "resultClass": result_class, "externalBenchmark": external_benchmark},
                 seed=seed,
                 verification_status=verification_status,
+                reuse_existing=reuse_existing,
             )
         )
     elif include_core:
@@ -162,6 +168,8 @@ def collect_benchmarks(
                         db_dir=Path(db_dir),
                         lattice_include=lattice_include,
                         lattice_lib=lattice_lib,
+                        scenario_artifact_dir=output_dir / "core_lattice-scenarios",
+                        reuse_existing=reuse_existing,
                     ),
                     suite_path=suite_path,
                     output_dir=output_dir,
@@ -179,6 +187,8 @@ def collect_benchmarks(
                     lattice_version=lattice_version(lattice_include, lattice_lib),
                     seed=seed,
                     verification_status=verification_status,
+                    reuse_existing=reuse_existing,
+                    core_reuse_existing=reuse_existing,
                 )
             )
     elif include_lattice and not core_available:
@@ -199,6 +209,7 @@ def collect_benchmarks(
         "verification": report_verification,
         "baselineRegistry": registry_json(),
         "ablations": ablation_summaries(runs),
+        "publishedComparisons": published_results(external_benchmark),
         "traceArtifacts": [
             run.get("artifacts", {}).get("traces")
             for run in runs
@@ -286,14 +297,23 @@ def run_case(
     lattice_version: str | None = None,
     seed: int = 0,
     verification_status: str = "not_run",
+    reuse_existing: bool = False,
+    core_reuse_existing: bool = False,
 ) -> dict[str, Any]:
+    results_path = output_dir / f"{slug}-results.json"
+    manifest_path = output_dir / f"{slug}-manifest.json"
+    if reuse_existing and not core_reuse_existing and results_path.exists() and manifest_path.exists():
+        return load_existing_case(
+            slug,
+            results_path=results_path,
+            manifest_path=manifest_path,
+            storage=storage,
+        )
     started = time.perf_counter()
     run = fn()
     duration_ms = (time.perf_counter() - started) * 1000
     run_json = run.to_json()
     case_verification_status = _verification_status(run_json, verification_status)
-    results_path = output_dir / f"{slug}-results.json"
-    manifest_path = output_dir / f"{slug}-manifest.json"
     extra_artifacts: dict[str, str] = {}
     traces = trace_payload(run_json)
     if traces:
@@ -331,6 +351,37 @@ def run_case(
             "manifest": str(manifest_path),
             **extra_artifacts,
         },
+    }
+
+
+def load_existing_case(
+    slug: str,
+    *,
+    results_path: Path,
+    manifest_path: Path,
+    storage: str,
+) -> dict[str, Any]:
+    run_json = json.loads(results_path.read_text())
+    manifest = json.loads(manifest_path.read_text())
+    artifacts = manifest.get("artifacts", {})
+    if not isinstance(artifacts, Mapping):
+        artifacts = {}
+    artifact_payload = {
+        "results": str(results_path),
+        "manifest": str(manifest_path),
+        **{key: value for key, value in artifacts.items() if isinstance(key, str) and isinstance(value, str)},
+    }
+    return {
+        "name": slug,
+        "baseline": run_json.get("baseline"),
+        "storage": str(manifest.get("storage") or storage),
+        "passed": run_json.get("passed"),
+        "metrics": run_json.get("metrics", {}),
+        "durationMs": float(manifest.get("durationMs") or 0.0),
+        "latticeVersion": manifest.get("latticeVersion"),
+        "verification": run_json.get("verification", {"status": manifest.get("verification", {}).get("status", "not_run")}),
+        "artifacts": artifact_payload,
+        "reused": True,
     }
 
 
@@ -433,6 +484,9 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     for requirement in report.get("benchmarkReadiness", {}).get("requirements", []):
         passed = "yes" if requirement.get("passed") else "no"
         lines.append(f"| {requirement.get('name')} | {passed} |")
+    comparison_lines = _render_published_comparisons(report.get("publishedComparisons", []))
+    if comparison_lines:
+        lines.extend(["", *comparison_lines])
     lines.extend(
         [
             "",
@@ -446,14 +500,74 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             "",
             "## What This Does Not Cover Yet",
             "",
-            "- Publishable LoCoMo, LongMemEval, or MemoryAgentBench results.",
-            "- Real provider embeddings, reranking, or LLM extraction quality.",
-            "- Long-running daemon transport latency.",
-            "- Large-store retrieval latency or storage growth.",
+            *_not_covered_lines(report),
             "",
         ]
     )
     return "\n".join(lines)
+
+
+def _render_published_comparisons(comparisons: object) -> list[str]:
+    if not isinstance(comparisons, list) or not comparisons:
+        return []
+    rows = [item for item in comparisons if isinstance(item, Mapping)]
+    rows.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    lines = [
+        "## Published External Reference Points",
+        "",
+        "These are published external results from other systems. They use different answer models, judges, retrieval cutoffs, dataset slices, and sometimes disputed methodologies; use them as orientation, not an apples-to-apples ranking unless the full methodology is aligned.",
+        "",
+        "| System | Benchmark | Score | Metric | Dataset | Source |",
+        "| --- | --- | ---: | --- | --- | --- |",
+    ]
+    for item in rows:
+        source = _markdown_link(str(item.get("source") or "source"), str(item.get("source_url") or ""))
+        lines.append(
+            "| "
+            f"{_table_cell(item.get('system'))} | "
+            f"{_table_cell(item.get('benchmark'))} | "
+            f"{_format_score(item.get('score'))} | "
+            f"{_table_cell(item.get('metric'))} | "
+            f"{_table_cell(item.get('dataset'))} | "
+            f"{source} |"
+        )
+    return lines
+
+
+def _not_covered_lines(report: Mapping[str, Any]) -> list[str]:
+    external_benchmark = report.get("externalBenchmark")
+    ready = report.get("benchmarkReadiness", {}).get("status") == "ready"
+    if external_benchmark == "locomo" and ready:
+        return [
+            "- Apples-to-apples LoCoMo leaderboard ranking against external systems using the same answer model, judge, retrieval cutoff, and category subset.",
+            "- LongMemEval or MemoryAgentBench results.",
+            "- Provider-backed embeddings, reranking, LLM extraction quality, semantic scoring, or LLM judge scoring parity with published vendor runs.",
+            "- Optimized long-running daemon latency or persistent large-store storage growth.",
+        ]
+    return [
+        "- Publishable LoCoMo, LongMemEval, or MemoryAgentBench results.",
+        "- Real provider embeddings, reranking, or LLM extraction quality.",
+        "- Long-running daemon transport latency.",
+        "- Large-store retrieval latency or storage growth.",
+    ]
+
+
+def _markdown_link(label: str, url: str) -> str:
+    if not url:
+        return _table_cell(label)
+    return f"[{_table_cell(label)}]({url})"
+
+
+def _format_score(value: object) -> str:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    return f"{score:g}"
+
+
+def _table_cell(value: object) -> str:
+    return str(value or "-").replace("|", "\\|")
 
 
 def _mapping_get(value: object, key: str, default: str) -> str:
@@ -549,6 +663,7 @@ def main() -> int:
     parser.add_argument("--require-lattice", action="store_true")
     parser.add_argument("--include-baselines", action="store_true")
     parser.add_argument("--include-ablations", action="store_true")
+    parser.add_argument("--reuse-existing", action="store_true", help="Reuse existing per-run artifacts in the output directory")
     parser.add_argument("--download-locomo", action="store_true")
     parser.add_argument("--dataset-cache", type=Path, default=Path(os.environ.get("QUIPU_DATASET_CACHE", ".quipu-datasets")))
     parser.add_argument("--locomo-max-conversations", type=int)
@@ -590,6 +705,7 @@ def main() -> int:
         require_lattice=args.require_lattice or result_class == "publishable",
         include_baselines=args.include_baselines or result_class == "publishable",
         include_ablations=args.include_ablations or result_class == "publishable",
+        reuse_existing=args.reuse_existing,
         locomo_options={
             "max_conversations": args.locomo_max_conversations,
             "max_questions_per_conversation": args.locomo_max_questions,
