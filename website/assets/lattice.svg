@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="540" viewBox="0 0 760 540" role="img" aria-labelledby="title desc">
+  <title id="title">Quipu memory lattice architecture map</title>
+  <desc id="desc">A dark tactical system diagram showing agent runtime, SDKs, JSON-RPC, Zig core, storage adapters, evidence edges, retrieval, and forgetting propagation.</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#2b2b2b" stroke-width="1"/>
+    </pattern>
+    <pattern id="scan" width="4" height="4" patternUnits="userSpaceOnUse">
+      <path d="M0 0H4V1H0z" fill="#ffffff" opacity=".05"/>
+    </pattern>
+    <style>
+      .box { fill: #101010; stroke: #eaeaea; stroke-width: 1.2; }
+      .box-dim { fill: #151515; stroke: #555555; stroke-width: 1; }
+      .red { stroke: #e61919; fill: none; stroke-width: 2.4; }
+      .thin { stroke: #6f6f6f; fill: none; stroke-width: 1.1; }
+      .node { fill: #0a0a0a; stroke: #e61919; stroke-width: 2; }
+      .txt { fill: #eaeaea; font: 700 17px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0; }
+      .micro { fill: #9b9b9b; font: 600 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0; }
+      .green { fill: #4af626; font: 700 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0; }
+    </style>
+  </defs>
+
+  <rect width="760" height="540" fill="#0a0a0a"/>
+  <rect width="760" height="540" fill="url(#grid)" opacity=".9"/>
+  <rect width="760" height="540" fill="url(#scan)"/>
+
+  <path class="thin" d="M40 40H720V500H40z"/>
+  <path class="red" d="M40 118H720M40 422H720"/>
+  <path class="thin" d="M230 40V500M530 40V500"/>
+
+  <text class="micro" x="56" y="72">OUTPUT 144 / MEMORY LATTICE</text>
+  <text class="green" x="586" y="72">BACKEND: LOCAL</text>
+
+  <rect class="box" x="78" y="138" width="150" height="70"/>
+  <text class="txt" x="96" y="169">AGENT</text>
+  <text class="micro" x="96" y="190">RUNTIME / APP</text>
+
+  <rect class="box-dim" x="78" y="244" width="150" height="54"/>
+  <text class="micro" x="96" y="277">TS SDK / PY SDK</text>
+
+  <rect class="box-dim" x="78" y="326" width="150" height="54"/>
+  <text class="micro" x="96" y="359">CLI / MCP HOST</text>
+
+  <rect class="box" x="306" y="166" width="148" height="82"/>
+  <text class="txt" x="324" y="200">JSON-RPC</text>
+  <text class="micro" x="324" y="221">2.0 ENVELOPE</text>
+
+  <rect class="box" x="286" y="300" width="188" height="90"/>
+  <text class="txt" x="304" y="335">ZIG CORE</text>
+  <text class="micro" x="304" y="357">CANONICAL WRITER</text>
+  <text class="micro" x="304" y="375">VERIFY / AUDIT</text>
+
+  <rect class="box" x="570" y="142" width="112" height="58"/>
+  <text class="micro" x="588" y="166">RAW</text>
+  <text class="micro" x="588" y="184">EVIDENCE</text>
+
+  <rect class="box" x="570" y="230" width="112" height="58"/>
+  <text class="micro" x="588" y="255">TEMPORAL</text>
+  <text class="micro" x="588" y="273">FACTS</text>
+
+  <rect class="box" x="570" y="318" width="112" height="58"/>
+  <text class="micro" x="588" y="343">CONTEXT</text>
+  <text class="micro" x="588" y="361">PACKET</text>
+
+  <path class="thin" d="M228 172H306"/>
+  <path class="thin" d="M228 271H270V207H306"/>
+  <path class="thin" d="M228 353H270V345H286"/>
+  <path class="red" d="M380 248V300"/>
+  <path class="thin" d="M474 329H570"/>
+  <path class="thin" d="M474 345H520V259H570"/>
+  <path class="thin" d="M474 361H510V171H570"/>
+
+  <circle class="node" cx="230" cy="172" r="7"/>
+  <circle class="node" cx="306" cy="207" r="7"/>
+  <circle class="node" cx="380" cy="300" r="7"/>
+  <circle class="node" cx="474" cy="345" r="7"/>
+  <circle class="node" cx="570" cy="259" r="7"/>
+  <circle class="node" cx="570" cy="171" r="7"/>
+  <circle class="node" cx="570" cy="347" r="7"/>
+
+  <text class="micro" x="56" y="454">EVIDENCE EDGES: REQUIRED</text>
+  <text class="micro" x="56" y="474">FORGETTING: PROPAGATES</text>
+  <text class="micro" x="56" y="494">CONTRADICTIONS: REPRESENTED</text>
+
+  <text class="micro" x="306" y="454">OBSERVE &gt; EXTRACT &gt; RESOLVE &gt; RETRIEVE</text>
+  <text class="micro" x="306" y="474">SCOPE FILTERS / VALID-AT / TOKEN BUDGET</text>
+  <text class="micro" x="306" y="494">TRACE OUTPUT AVAILABLE</text>
+
+  <path class="red" d="M690 114h18v18M690 426h18v-18M70 114H52v18M70 426H52v-18"/>
+</svg>
