@@ -1,7 +1,9 @@
 const std = @import("std");
 const extractor = @import("extractor.zig");
+const jobs = @import("jobs.zig");
 const protocol = @import("protocol.zig");
 const storage = @import("storage.zig");
+const streams = @import("streams.zig");
 
 const ObjectMap = std.json.ObjectMap;
 const Value = std.json.Value;
@@ -99,12 +101,6 @@ const SearchMode = enum {
     hybrid,
     graph,
 };
-
-const stream_raw_event = "quipu.raw_event";
-const stream_forget_completed = "quipu.forget.completed";
-const stream_feedback_received = "quipu.feedback.received";
-const stream_retrieval_logged = "quipu.retrieval.logged";
-const stream_audit = "quipu.audit";
 
 const CoreBlockResult = struct {
     qid: []const u8,
@@ -322,25 +318,6 @@ pub const Runtime = struct {
             }
         }
 
-        var queued_jobs = std.ArrayList([]const u8).empty;
-        defer {
-            for (queued_jobs.items) |qid| allocator.free(qid);
-            queued_jobs.deinit(allocator);
-        }
-        if (extract_enabled and derived_count == 0) {
-            const job_qid = try self.nextQid(allocator, "job");
-            try queued_jobs.append(allocator, job_qid);
-            const job_props = try stringifyAlloc(allocator, .{
-                .kind = "job",
-                .jobType = "extract",
-                .turnQid = turn_qid,
-                .status = "noop",
-                .deleted = false,
-            });
-            defer allocator.free(job_props);
-            try self.store.putNode(.{ .qid = job_qid, .label = "Job", .properties_json = job_props });
-        }
-
         if (stringField(params, "idempotencyKey")) |key| {
             const idem_qid = try idempotencyQid(allocator, key);
             defer allocator.free(idem_qid);
@@ -357,6 +334,37 @@ pub const Runtime = struct {
             try self.store.putNode(.{ .qid = idem_qid, .label = "Idempotency", .properties_json = idem_props });
         }
 
+        var queued_jobs = std.ArrayList([]const u8).empty;
+        defer {
+            for (queued_jobs.items) |qid| allocator.free(qid);
+            queued_jobs.deinit(allocator);
+        }
+        if (extract_enabled) {
+            const extract_payload = try stringifyAlloc(allocator, .{
+                .method = "memory.extract.requested",
+                .sourceMethod = "memory.remember",
+                .sessionQid = session_qid,
+                .turnQid = turn_qid,
+                .messageQids = message_qids.items,
+                .scope = scope.json(),
+                .inlineDerivedCount = derived_count,
+            });
+            defer allocator.free(extract_payload);
+            const extract_event = try self.publishEvent(streams.extract_requested, extract_payload);
+            const extract_job_qid = try jobs.jobQid(
+                allocator,
+                streams.extract_requested,
+                extract_event.sequence,
+                streams.workerKindForStream(streams.extract_requested),
+            );
+            errdefer allocator.free(extract_job_qid);
+            _ = try jobs.materializeStream(allocator, self.store, streams.extract_requested, streams.workerKindForStream(streams.extract_requested), .{
+                .after_sequence = if (extract_event.sequence > 0) extract_event.sequence - 1 else 0,
+                .limit = 1,
+            });
+            try queued_jobs.append(allocator, extract_job_qid);
+        }
+
         const event_payload = try stringifyAlloc(allocator, .{
             .method = "memory.remember",
             .status = "stored",
@@ -367,8 +375,8 @@ pub const Runtime = struct {
             .derivedCount = derived_count,
         });
         defer allocator.free(event_payload);
-        try self.publishEvent(stream_raw_event, event_payload);
-        try self.publishEvent(stream_audit, event_payload);
+        _ = try self.publishEvent(streams.raw_event, event_payload);
+        _ = try self.publishEvent(streams.audit, event_payload);
 
         const response = .{
             .jsonrpc = "2.0",
@@ -481,8 +489,8 @@ pub const Runtime = struct {
             .trace = trace,
         });
         defer allocator.free(event_payload);
-        try self.publishEvent(stream_retrieval_logged, event_payload);
-        try self.publishEvent(stream_audit, event_payload);
+        _ = try self.publishEvent(streams.retrieval_logged, event_payload);
+        _ = try self.publishEvent(streams.audit, event_payload);
 
         const response = .{
             .jsonrpc = "2.0",
@@ -606,8 +614,8 @@ pub const Runtime = struct {
             .report = report.items.items,
         });
         defer allocator.free(event_payload);
-        try self.publishEvent(stream_forget_completed, event_payload);
-        try self.publishEvent(stream_audit, event_payload);
+        _ = try self.publishEvent(streams.forget_completed, event_payload);
+        _ = try self.publishEvent(streams.audit, event_payload);
 
         const response = .{
             .jsonrpc = "2.0",
@@ -654,8 +662,8 @@ pub const Runtime = struct {
             .rating = rating,
         });
         defer allocator.free(event_payload);
-        try self.publishEvent(stream_feedback_received, event_payload);
-        try self.publishEvent(stream_audit, event_payload);
+        _ = try self.publishEvent(streams.feedback_received, event_payload);
+        _ = try self.publishEvent(streams.audit, event_payload);
 
         const response = .{
             .jsonrpc = "2.0",
@@ -710,7 +718,7 @@ pub const Runtime = struct {
             .managedBy = managed_by,
         });
         defer allocator.free(event_payload);
-        try self.publishEvent(stream_audit, event_payload);
+        _ = try self.publishEvent(streams.audit, event_payload);
 
         const response = .{
             .jsonrpc = "2.0",
@@ -787,12 +795,12 @@ pub const Runtime = struct {
         });
     }
 
-    fn publishEvent(self: *Runtime, stream: []const u8, payload_json: []const u8) !void {
-        _ = try self.store.appendStream(stream, payload_json);
+    fn publishEvent(self: *Runtime, stream: []const u8, payload_json: []const u8) !storage.StreamEntry {
+        return self.store.appendStream(stream, payload_json);
     }
 
     fn auditEventsForQid(self: *Runtime, allocator: std.mem.Allocator, qid: []const u8) !OwnedAuditEvents {
-        const entries = try self.store.readStream(allocator, stream_audit, 0, 1000);
+        const entries = try self.store.readStream(allocator, streams.audit, 0, 1000);
         defer freeStreamEntries(allocator, entries);
 
         var audit = OwnedAuditEvents{ .allocator = allocator };
@@ -1016,6 +1024,7 @@ pub const Runtime = struct {
             defer self.store.freeNode(allocator, node);
             if (!include_deleted and try propertyBool(allocator, node.properties_json, "deleted")) continue;
             if (!try scope.matchesNode(allocator, node)) continue;
+            if (isInternalLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) continue;
             if (!labelAllowed(node.label, labels_value)) continue;
             if (!try nodeWithinEventWindow(allocator, node, event_window)) continue;
             if (!include_deleted and isDerivedLabel(node.label)) {
@@ -1588,6 +1597,19 @@ fn isDerivedLabel(label: []const u8) bool {
     return std.mem.eql(u8, label, "Fact") or std.mem.eql(u8, label, "Preference") or std.mem.eql(u8, label, "Procedure");
 }
 
+fn isInternalLabel(label: []const u8) bool {
+    return std.mem.eql(u8, label, "Job") or std.mem.eql(u8, label, "Idempotency");
+}
+
+fn labelRequestedExplicitly(label: []const u8, labels_value: ?Value) bool {
+    const labels = arrayValue(labels_value) orelse return false;
+    for (labels.items) |label_value| {
+        const wanted = stringValue(label_value) orelse continue;
+        if (std.mem.eql(u8, wanted, label)) return true;
+    }
+    return false;
+}
+
 fn labelAllowed(label: []const u8, labels_value: ?Value) bool {
     const labels = arrayValue(labels_value) orelse return true;
     for (labels.items) |label_value| {
@@ -1845,12 +1867,40 @@ test "runtime publishes audit stream entries for mutations" {
     );
     defer std.testing.allocator.free(feedback);
 
-    const entries = try adapter.readStream(std.testing.allocator, stream_audit, 0, 10);
+    const entries = try adapter.readStream(std.testing.allocator, streams.audit, 0, 10);
     defer freeStreamEntries(std.testing.allocator, entries);
 
     try std.testing.expectEqual(@as(usize, 2), entries.len);
     try std.testing.expect(std.mem.indexOf(u8, entries[0].payload_json, "\"method\":\"memory.remember\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, entries[1].payload_json, "\"method\":\"memory.feedback\"") != null);
+}
+
+test "runtime queues extract jobs from durable stream events" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    const adapter = adapter_state.adapter();
+    var runtime = Runtime.init(adapter, protocol.Health.default());
+
+    const remember = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"This repo uses pnpm.\"}]}}",
+    );
+    defer std.testing.allocator.free(remember);
+
+    try std.testing.expect(std.mem.indexOf(u8, remember, "\"queuedJobs\":[\"q_job_") != null);
+
+    const entries = try adapter.readStream(std.testing.allocator, streams.extract_requested, 0, 10);
+    defer freeStreamEntries(std.testing.allocator, entries);
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+
+    const job_qid = try jobs.jobQid(std.testing.allocator, streams.extract_requested, entries[0].sequence, streams.workerKindForStream(streams.extract_requested));
+    defer std.testing.allocator.free(job_qid);
+    const job = (try adapter.getNode(std.testing.allocator, job_qid)) orelse return error.TestUnexpectedResult;
+    defer adapter.freeNode(std.testing.allocator, job);
+    try std.testing.expectEqualStrings("Job", job.label);
+    try std.testing.expect(std.mem.indexOf(u8, job.properties_json, "\"status\":\"pending\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, job.properties_json, "\"streamName\":\"quipu.extract.requested\"") != null);
 }
 
 test "runtime logs retrievals and returns inspect audit events" {

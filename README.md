@@ -60,6 +60,8 @@ Quipu currently supports:
   core memory blocks.
 - Native LatticeDB-backed persistence with graph nodes/edges, FTS, hash-vector
   search, and durable streams.
+- Durable stream events can be materialized into idempotent `Job` nodes for
+  extraction, consolidation, forgetting, retrieval logging, and feedback work.
 - Python and TypeScript SDKs that validate JSON-RPC shape and talk to a local
   `quipu serve-stdio` process.
 - A dependency-free MCP stdio adapter for tool-calling hosts.

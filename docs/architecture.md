@@ -26,3 +26,24 @@ natural-language retrieval semantics match the in-memory adapter.
 `system.health` reports the active storage backend and capability flags so SDKs,
 evals, and operators can tell whether durable storage and vector search are
 available without probing backend-specific APIs.
+
+## Streams and Jobs
+
+Quipu uses named durable streams as the event backbone and materializes work into
+idempotent `Job` nodes. The stream names live in `core/src/streams.zig`; the
+materializer in `core/src/jobs.zig` reads stream records and creates one job per
+`{stream, sequence, worker_kind}` key.
+
+`memory.remember` now publishes `quipu.extract.requested` when extraction is
+enabled and immediately materializes that stream record into a pending extract
+job. The same materializer can be replayed from the CLI:
+
+```bash
+quipu --db /tmp/quipu.lattice jobs materialize
+quipu --db /tmp/quipu.lattice jobs materialize quipu.retrieval.logged
+quipu --db /tmp/quipu.lattice jobs materialize --after 100 --limit 500 quipu.audit
+```
+
+This gives the current single-process prototype the same durable stream-to-job
+boundary that later extractor, consolidation, forgetting, and feedback workers
+will use.

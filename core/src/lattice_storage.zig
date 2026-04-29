@@ -36,7 +36,8 @@ pub const LatticeAdapter = struct {
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !LatticeAdapter {
         const owned_path = try allocator.dupe(u8, path);
-        errdefer allocator.free(owned_path);
+        var owned_path_transferred = false;
+        errdefer if (!owned_path_transferred) allocator.free(owned_path);
 
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
@@ -58,6 +59,7 @@ pub const LatticeAdapter = struct {
             .path = owned_path,
             .qid_to_node = std.StringHashMap(NodeIndex).init(allocator),
         };
+        owned_path_transferred = true;
         errdefer self.deinit();
         try self.loadIndexes();
         return self;
@@ -160,7 +162,8 @@ pub const LatticeAdapter = struct {
         try self.setStringProperty(tx, node_id, "propertiesJson", node.properties_json);
         try self.setStringProperty(tx, node_id, "recordKind", "node");
 
-        const index_text = try self.indexText(self.allocator, node_marker, node.qid, node.label, node.properties_json);
+        const searchable_properties = if (isInternalLabel(node.label)) "" else node.properties_json;
+        const index_text = try self.indexText(self.allocator, node_marker, node.qid, node.label, searchable_properties);
         defer self.allocator.free(index_text);
         try check(c.lattice_fts_index(tx, @intCast(node_id), index_text.ptr, index_text.len));
         try self.setNodeVector(tx, node_id, index_text);
@@ -817,6 +820,10 @@ fn freeStreamEntries(allocator: std.mem.Allocator, entries: []const storage.Stre
 
 fn isDerivedLabel(label: []const u8) bool {
     return std.mem.eql(u8, label, "Fact") or std.mem.eql(u8, label, "Preference") or std.mem.eql(u8, label, "Procedure");
+}
+
+fn isInternalLabel(label: []const u8) bool {
+    return std.mem.eql(u8, label, "Job") or std.mem.eql(u8, label, "Idempotency");
 }
 
 fn slotAllowedForLabel(label: []const u8, slot_key: []const u8) bool {

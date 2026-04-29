@@ -1,6 +1,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const in_memory_storage = @import("in_memory_storage.zig");
+const jobs = @import("jobs.zig");
 const lattice_storage = if (build_options.enable_lattice) @import("lattice_storage.zig") else struct {};
 const protocol = @import("protocol.zig");
 const runtime_mod = @import("runtime.zig");
@@ -9,6 +10,15 @@ const storage = @import("storage.zig");
 const RuntimeConfig = struct {
     command_index: usize = 1,
     db_path: ?[]const u8 = null,
+};
+
+const MaterializeCliArgs = struct {
+    options: jobs.MaterializeOptions,
+    streams: std.ArrayList([]const u8),
+
+    fn deinit(self: *MaterializeCliArgs, allocator: std.mem.Allocator) void {
+        self.streams.deinit(allocator);
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -94,6 +104,54 @@ fn runCommand(
         return;
     }
 
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "jobs")) {
+        if (args.len <= command_index + 1 or !std.mem.eql(u8, args[command_index + 1], "materialize")) {
+            const response = try stringifyAlloc(allocator, .{
+                .status = "error",
+                .message = "usage: quipu [--db PATH] jobs materialize [--after SEQ] [--limit N] [--max-attempts N] [STREAM...]",
+            });
+            defer allocator.free(response);
+            try stdout.print("{s}\n", .{response});
+            return;
+        }
+        var parsed = parseMaterializeArgs(allocator, args[command_index + 2 ..]) catch {
+            const response = try stringifyAlloc(allocator, .{
+                .status = "error",
+                .message = "invalid jobs materialize arguments",
+            });
+            defer allocator.free(response);
+            try stdout.print("{s}\n", .{response});
+            return;
+        };
+        defer parsed.deinit(allocator);
+
+        const summaries = if (parsed.streams.items.len == 0)
+            try jobs.materializeDefaultStreams(allocator, store, parsed.options)
+        else
+            try jobs.materializeNamedStreams(allocator, store, parsed.streams.items, parsed.options);
+        defer allocator.free(summaries);
+
+        var read_count: usize = 0;
+        var created_count: usize = 0;
+        var existing_count: usize = 0;
+        for (summaries) |summary| {
+            read_count += summary.readCount;
+            created_count += summary.createdCount;
+            existing_count += summary.existingCount;
+        }
+        const response = try stringifyAlloc(allocator, .{
+            .status = "ok",
+            .streamCount = summaries.len,
+            .readCount = read_count,
+            .createdCount = created_count,
+            .existingCount = existing_count,
+            .summaries = summaries,
+        });
+        defer allocator.free(response);
+        try stdout.print("{s}\n", .{response});
+        return;
+    }
+
     if (args.len > command_index and std.mem.eql(u8, args[command_index], "rpc-stdin")) {
         var stdin_buffer: [4096]u8 = undefined;
         var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
@@ -133,7 +191,38 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] health | quipu [--db PATH] verify [schema|provenance|temporal|forgetting]... | quipu [--db PATH] rpc-stdin | quipu [--db PATH] serve-stdio\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] health | quipu [--db PATH] verify [schema|provenance|temporal|forgetting]... | quipu [--db PATH] jobs materialize [--after SEQ] [--limit N] [--max-attempts N] [STREAM...] | quipu [--db PATH] rpc-stdin | quipu [--db PATH] serve-stdio\n", .{});
+}
+
+fn parseMaterializeArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !MaterializeCliArgs {
+    var parsed = MaterializeCliArgs{
+        .options = .{},
+        .streams = std.ArrayList([]const u8).empty,
+    };
+    errdefer parsed.deinit(allocator);
+
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--after")) {
+            index += 1;
+            if (index >= args.len) return error.InvalidArgs;
+            parsed.options.after_sequence = try std.fmt.parseInt(u64, args[index], 10);
+        } else if (std.mem.eql(u8, arg, "--limit")) {
+            index += 1;
+            if (index >= args.len) return error.InvalidArgs;
+            parsed.options.limit = try std.fmt.parseInt(usize, args[index], 10);
+        } else if (std.mem.eql(u8, arg, "--max-attempts")) {
+            index += 1;
+            if (index >= args.len) return error.InvalidArgs;
+            parsed.options.max_attempts = try std.fmt.parseInt(u32, args[index], 10);
+        } else if (std.mem.startsWith(u8, arg, "--")) {
+            return error.InvalidArgs;
+        } else {
+            try parsed.streams.append(allocator, arg);
+        }
+    }
+    return parsed;
 }
 
 fn freeVerificationIssues(allocator: std.mem.Allocator, issues: []const @import("storage.zig").VerificationIssue) void {
