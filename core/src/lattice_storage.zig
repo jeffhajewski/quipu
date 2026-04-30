@@ -44,6 +44,14 @@ const LatticeHit = struct {
     score: f32,
 };
 
+fn freeEdge(allocator: std.mem.Allocator, edge: storage.Edge) void {
+    allocator.free(edge.qid);
+    allocator.free(edge.from_qid);
+    allocator.free(edge.to_qid);
+    allocator.free(edge.edge_type);
+    allocator.free(edge.properties_json);
+}
+
 pub const LatticeAdapter = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -217,8 +225,10 @@ pub const LatticeAdapter = struct {
         const index_text = try self.indexText(self.allocator, node_marker, node.qid, node.label, searchable_properties);
         defer self.allocator.free(index_text);
         try check(c.lattice_fts_index(tx, @intCast(node_id), index_text.ptr, index_text.len));
-        if (!isInternalLabel(node.label)) {
-            try self.setNodeVector(tx, node_id, index_text);
+        if (isVectorIndexedLabel(node.label)) {
+            const vector_text = try embeddingText(self.allocator, node.label, node.properties_json);
+            defer self.allocator.free(vector_text);
+            try self.setNodeVector(tx, node_id, vector_text);
         }
         try check(c.lattice_commit(tx));
 
@@ -265,6 +275,75 @@ pub const LatticeAdapter = struct {
         try self.createEdgeRecord(tx, edge);
         try check(c.lattice_commit(tx));
         self.trackRuntimeId(edge.qid);
+    }
+
+    fn findEdges(context: *anyopaque, allocator: std.mem.Allocator, query: storage.EdgeQuery) ![]storage.Edge {
+        const self = ctx(context);
+        if (query.limit == 0) return allocator.alloc(storage.Edge, 0);
+        const edge_hits = try self.searchNodeIds(allocator, edge_marker, 1_000_000);
+        defer allocator.free(edge_hits);
+
+        const tx = try self.beginRead();
+        defer self.rollbackQuiet(tx);
+        var edges = std.ArrayList(storage.Edge).empty;
+        errdefer {
+            for (edges.items) |edge| freeEdge(allocator, edge);
+            edges.deinit(allocator);
+        }
+
+        for (edge_hits) |hit| {
+            const qid = (try self.readStringPropertyInTxn(allocator, tx, hit.node_id, "qid")) orelse continue;
+            errdefer allocator.free(qid);
+            const from_qid = (try self.readStringPropertyInTxn(allocator, tx, hit.node_id, "fromQid")) orelse {
+                allocator.free(qid);
+                continue;
+            };
+            errdefer allocator.free(from_qid);
+            const to_qid = (try self.readStringPropertyInTxn(allocator, tx, hit.node_id, "toQid")) orelse {
+                allocator.free(qid);
+                allocator.free(from_qid);
+                continue;
+            };
+            errdefer allocator.free(to_qid);
+            const edge_type = (try self.readStringPropertyInTxn(allocator, tx, hit.node_id, "edgeType")) orelse {
+                allocator.free(qid);
+                allocator.free(from_qid);
+                allocator.free(to_qid);
+                continue;
+            };
+            errdefer allocator.free(edge_type);
+            const properties_json = (try self.readStringPropertyInTxn(allocator, tx, hit.node_id, "propertiesJson")) orelse try allocator.dupe(u8, "{}");
+            errdefer allocator.free(properties_json);
+
+            if (query.from_qid) |expected| {
+                if (!std.mem.eql(u8, from_qid, expected)) {
+                    freeEdge(allocator, .{ .qid = qid, .from_qid = from_qid, .to_qid = to_qid, .edge_type = edge_type, .properties_json = properties_json });
+                    continue;
+                }
+            }
+            if (query.to_qid) |expected| {
+                if (!std.mem.eql(u8, to_qid, expected)) {
+                    freeEdge(allocator, .{ .qid = qid, .from_qid = from_qid, .to_qid = to_qid, .edge_type = edge_type, .properties_json = properties_json });
+                    continue;
+                }
+            }
+            if (query.edge_type) |expected| {
+                if (!std.mem.eql(u8, edge_type, expected)) {
+                    freeEdge(allocator, .{ .qid = qid, .from_qid = from_qid, .to_qid = to_qid, .edge_type = edge_type, .properties_json = properties_json });
+                    continue;
+                }
+            }
+
+            try edges.append(allocator, .{
+                .qid = qid,
+                .from_qid = from_qid,
+                .to_qid = to_qid,
+                .edge_type = edge_type,
+                .properties_json = properties_json,
+            });
+            if (edges.items.len >= query.limit) break;
+        }
+        return edges.toOwnedSlice(allocator);
     }
 
     fn fullTextSearch(context: *anyopaque, allocator: std.mem.Allocator, query: storage.FullTextQuery) ![]storage.SearchHit {
@@ -716,6 +795,60 @@ pub const LatticeAdapter = struct {
         return std.fmt.allocPrint(allocator, "{s} {s} {s} {s}", .{ marker, first, second, third });
     }
 
+    fn embeddingText(allocator: std.mem.Allocator, label: []const u8, properties_json: []const u8) ![]u8 {
+        var writer: std.Io.Writer.Allocating = .init(allocator);
+        errdefer writer.deinit();
+        try writer.writer.print("type: {s}", .{label});
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, properties_json, .{}) catch {
+            try writer.writer.print("\ntext: {s}", .{properties_json});
+            return writer.toOwnedSlice();
+        };
+        defer parsed.deinit();
+        const object = switch (parsed.value) {
+            .object => |object| object,
+            else => {
+                try writer.writer.print("\ntext: {s}", .{properties_json});
+                return writer.toOwnedSlice();
+            },
+        };
+
+        const preferred_fields = [_][]const u8{
+            "content",
+            "text",
+            "summary",
+            "value",
+            "canonicalName",
+            "canonical_name",
+            "entityType",
+            "entity_type",
+            "slotKey",
+            "contextDescription",
+            "quote",
+            "toolName",
+            "rating",
+            "blockKey",
+            "eventTime",
+            "createdAt",
+            "validFrom",
+            "validTo",
+            "projectId",
+            "userId",
+            "agentId",
+            "tenantId",
+        };
+        for (preferred_fields) |field| {
+            if (jsonString(object.get(field))) |value| {
+                if (value.len > 0) try writer.writer.print("\n{s}: {s}", .{ field, value });
+            }
+        }
+        try appendStringArrayField(&writer.writer, object.get("aliasesJson"), "aliases");
+        try appendStringArrayField(&writer.writer, object.get("aliases"), "aliases");
+        try appendStringArrayField(&writer.writer, object.get("keywordsJson"), "keywords");
+        try appendStringArrayField(&writer.writer, object.get("tagsJson"), "tags");
+        return writer.toOwnedSlice();
+    }
+
     fn verifyDerivedNode(
         self: *LatticeAdapter,
         allocator: std.mem.Allocator,
@@ -803,6 +936,7 @@ pub const LatticeAdapter = struct {
         .put_node = putNode,
         .get_node = getNode,
         .put_edge = putEdge,
+        .find_edges = findEdges,
         .full_text_search = fullTextSearch,
         .embed_text = embedText,
         .vector_search = vectorSearch,
@@ -979,6 +1113,54 @@ fn isDerivedLabel(label: []const u8) bool {
 
 fn isInternalLabel(label: []const u8) bool {
     return std.mem.eql(u8, label, "Job") or std.mem.eql(u8, label, "Idempotency") or std.mem.eql(u8, label, "Schema") or std.mem.eql(u8, label, "Migration");
+}
+
+fn isVectorIndexedLabel(label: []const u8) bool {
+    return std.mem.eql(u8, label, "Message") or
+        std.mem.eql(u8, label, "Episode") or
+        std.mem.eql(u8, label, "MemoryCard") or
+        std.mem.eql(u8, label, "Fact") or
+        std.mem.eql(u8, label, "Preference") or
+        std.mem.eql(u8, label, "Procedure") or
+        std.mem.eql(u8, label, "Entity") or
+        std.mem.eql(u8, label, "Core");
+}
+
+fn jsonString(value: ?std.json.Value) ?[]const u8 {
+    const present = value orelse return null;
+    return switch (present) {
+        .string => |string| string,
+        else => null,
+    };
+}
+
+fn jsonStringValue(value: std.json.Value) ?[]const u8 {
+    return switch (value) {
+        .string => |string| string,
+        else => null,
+    };
+}
+
+fn appendStringArrayField(writer: *std.Io.Writer, value: ?std.json.Value, label: []const u8) !void {
+    const present = value orelse return;
+    switch (present) {
+        .array => |array| {
+            var wrote_label = false;
+            for (array.items) |item| {
+                const string = jsonStringValue(item) orelse continue;
+                if (string.len == 0) continue;
+                if (!wrote_label) {
+                    try writer.print("\n{s}: ", .{label});
+                    wrote_label = true;
+                } else {
+                    try writer.writeAll(", ");
+                }
+                try writer.writeAll(string);
+            }
+        },
+        .string => |string| if (string.len > 0) try writer.print("\n{s}: {s}", .{ label, string }),
+        else => {},
+    }
 }
 
 fn slotAllowedForLabel(label: []const u8, slot_key: []const u8) bool {

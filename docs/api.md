@@ -17,13 +17,19 @@ See [../SPEC.md](../SPEC.md) for the full design. This file tracks implemented p
 
 The prompt is assembled from the structured context sections, so callers that need typed memory should use `result.context` and callers that need direct model input can use `result.prompt`.
 
+`memory.answer` accepts the same retrieval fields, runs the same scoped context
+assembly, and returns `answer`, `provider`, optional `model`, `items`, `context`,
+warnings, and optional trace output. It uses a deterministic local fallback when
+no answer provider is configured, or an OpenRouter-compatible chat model when
+the process is started with `--answer-provider openrouter`.
+
 ## Search V0
 
 `memory.search` supports `mode: "fts"`, `"vector"`, `"hybrid"`, and `"graph"`.
-`fts` and `graph` currently use lexical adapter search. `vector` uses the active
-storage adapter's text embedding and vector search when the backend advertises
-that capability. `hybrid` merges lexical and vector hits by qid before applying
-the normal runtime filters.
+`vector` uses the active storage adapter's text embedding and vector search when
+the backend advertises that capability. `hybrid` uses reciprocal-rank fusion
+over lexical and vector hits. `graph` expands lexical/hybrid seeds through
+resolved entity edges before applying the normal runtime filters.
 
 `system.health.result.storage` reports backend capability flags, including
 `backend`, `durable`, `fullText`, `vector`, `vectorDimensions`, and
@@ -35,6 +41,14 @@ command: `--vector-dimensions`, `--page-size`, `--embedding-provider`,
 are `QUIPU_VECTOR_DIMENSIONS`, `QUIPU_LATTICE_PAGE_SIZE`,
 `QUIPU_EMBEDDING_PROVIDER`, `QUIPU_EMBEDDING_URL`,
 `QUIPU_EMBEDDING_MODEL`, and `QUIPU_EMBEDDING_API_KEY`.
+
+Answer and entity-resolution providers are configured with
+`--answer-provider`, `--answer-url`, `--answer-model`, `--entity-provider`,
+`--entity-url`, and `--entity-model`. Matching environment variables are
+`QUIPU_ANSWER_PROVIDER`, `QUIPU_ANSWER_URL`, `QUIPU_ANSWER_MODEL`,
+`QUIPU_ENTITY_PROVIDER`, `QUIPU_ENTITY_URL`, and `QUIPU_ENTITY_MODEL`; all
+OpenRouter-compatible chat calls use `OPENROUTER_API_KEY` unless
+`QUIPU_MODEL_API_KEY` is set.
 
 ## Inspection V0
 

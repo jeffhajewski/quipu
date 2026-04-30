@@ -151,6 +151,13 @@ const AuditEventResult = struct {
     rawJson: []const u8,
 };
 
+pub const EntityJobRunResult = struct {
+    materializedCount: usize,
+    leasedCount: usize,
+    succeededCount: usize,
+    failedCount: usize,
+};
+
 const CachedRawMessage = struct {
     qid: []const u8,
     properties_json: []const u8,
@@ -218,9 +225,16 @@ const RawMessageCache = struct {
     }
 };
 
+pub const RuntimeOptions = struct {
+    io: ?std.Io = null,
+    answer_provider: providers.ProviderEndpoint = .{},
+    entity_provider: providers.ProviderEndpoint = .{},
+};
+
 pub const Runtime = struct {
     store: storage.Adapter,
     health: protocol.Health,
+    options: RuntimeOptions = .{},
     next_id: u64 = 1,
     raw_messages: RawMessageCache = .{},
     raw_cache_complete_from_remember: bool = true,
@@ -229,10 +243,24 @@ pub const Runtime = struct {
         return .{ .store = store, .health = health };
     }
 
+    pub fn initWithOptions(store: storage.Adapter, health: protocol.Health, options: RuntimeOptions) Runtime {
+        return .{ .store = store, .health = health, .options = options };
+    }
+
     pub fn initWithNextId(store: storage.Adapter, health: protocol.Health, next_id: u64) Runtime {
         return .{
             .store = store,
             .health = health,
+            .next_id = @max(next_id, 1),
+            .raw_cache_complete_from_remember = next_id <= 1,
+        };
+    }
+
+    pub fn initWithNextIdAndOptions(store: storage.Adapter, health: protocol.Health, next_id: u64, options: RuntimeOptions) Runtime {
+        return .{
+            .store = store,
+            .health = health,
+            .options = options,
             .next_id = @max(next_id, 1),
             .raw_cache_complete_from_remember = next_id <= 1,
         };
@@ -271,6 +299,7 @@ pub const Runtime = struct {
         if (std.mem.eql(u8, method, "memory.remember")) return self.memoryRemember(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.search")) return self.memorySearch(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.retrieve")) return self.memoryRetrieve(allocator, id, &params);
+        if (std.mem.eql(u8, method, "memory.answer")) return self.memoryAnswer(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.inspect")) return self.memoryInspect(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.forget")) return self.memoryForget(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.feedback")) return self.memoryFeedback(allocator, id, &params);
@@ -296,6 +325,8 @@ pub const Runtime = struct {
                 .workers = .{
                     .extractor = "unavailable",
                     .consolidator = "unavailable",
+                    .entityResolver = if (self.options.entity_provider.kind == .none) "unavailable" else "running",
+                    .answerer = if (self.options.answer_provider.kind == .none) "unavailable" else "running",
                 },
             },
         };
@@ -484,6 +515,31 @@ pub const Runtime = struct {
             });
             try queued_jobs.append(allocator, extract_job_qid);
         }
+        if (self.options.entity_provider.kind != .none and message_qids.items.len > 0) {
+            const entity_payload = try stringifyAlloc(allocator, .{
+                .method = "memory.entity.resolve.requested",
+                .sourceMethod = "memory.remember",
+                .sessionQid = session_qid,
+                .turnQid = turn_qid,
+                .messageQids = message_qids.items,
+                .scope = scope.json(),
+                .provider = self.options.entity_provider.name,
+            });
+            defer allocator.free(entity_payload);
+            const entity_event = try self.publishEvent(streams.entity_resolve_requested, entity_payload);
+            const entity_job_qid = try jobs.jobQid(
+                allocator,
+                streams.entity_resolve_requested,
+                entity_event.sequence,
+                streams.workerKindForStream(streams.entity_resolve_requested),
+            );
+            errdefer allocator.free(entity_job_qid);
+            _ = try jobs.materializeStream(allocator, self.store, streams.entity_resolve_requested, streams.workerKindForStream(streams.entity_resolve_requested), .{
+                .after_sequence = if (entity_event.sequence > 0) entity_event.sequence - 1 else 0,
+                .limit = 1,
+            });
+            try queued_jobs.append(allocator, entity_job_qid);
+        }
 
         const event_payload = try stringifyAlloc(allocator, .{
             .method = "memory.remember",
@@ -653,6 +709,130 @@ pub const Runtime = struct {
             .result = .{
                 .retrievalId = retrieval_id,
                 .prompt = prompt,
+                .context = context.view(),
+                .items = results.items.items,
+                .tokenEstimate = token_estimate,
+                .confidence = if (results.items.items.len > 0) @as(f32, 0.72) else @as(f32, 0.0),
+                .warnings = warnings.items,
+                .trace = if (include_trace) trace else null,
+            },
+        };
+        return stringifyAlloc(allocator, response);
+    }
+
+    fn memoryAnswer(self: *Runtime, allocator: std.mem.Allocator, id: ?[]const u8, params: *const ObjectMap) ![]u8 {
+        const query = stringField(params, "query") orelse {
+            return errorResponse(allocator, id, "invalid_request", "query must be a non-empty string");
+        };
+        if (query.len == 0) {
+            return errorResponse(allocator, id, "invalid_request", "query must be a non-empty string");
+        }
+        const budget = integerField(params, "budgetTokens") orelse 1200;
+        if (budget < 1) {
+            return errorResponse(allocator, id, "invalid_request", "budgetTokens must be positive");
+        }
+
+        const scope = parseScope(params);
+        const valid_at = parseValidAt(params);
+        const event_window = parseEventWindow(params);
+        const needs_value = params.get("needs");
+        const options = objectField(params, "options");
+        const include_evidence = if (options) |opts| boolField(&opts, "includeEvidence") orelse true else true;
+        const include_trace = if (options) |opts| (boolField(&opts, "includeDebug") orelse false) or (boolField(&opts, "logTrace") orelse false) else false;
+        const log_retrieval = if (options) |opts| boolField(&opts, "logRetrieval") orelse (boolField(&opts, "logTrace") orelse true) else true;
+        const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
+            return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
+        };
+
+        const raw_only = needsCount(needs_value) == 1 and needsIncludes(needs_value, "raw");
+        var results = if (raw_only and retrieve_mode == .fts)
+            try self.collectRawLexicalItems(allocator, query, 40, scope, event_window, include_evidence)
+        else
+            try self.collectItems(allocator, query, retrieve_mode, 40, scope, false, null, valid_at, event_window, include_evidence);
+        defer results.deinit();
+        if (needsIncludes(needs_value, "core")) {
+            try self.appendCoreItems(allocator, &results, scope, include_evidence);
+        }
+        const candidate_count = results.items.items.len;
+        const dropped_for_needs = results.filterByNeeds(needs_value);
+        if (!needsIncludes(needs_value, "raw")) {
+            results.suppressRawIfDerived(needs_value);
+        }
+        const dropped_for_budget = results.applyTokenBudget(@intCast(budget));
+
+        var warnings = std.ArrayList([]const u8).empty;
+        defer warnings.deinit(allocator);
+        if (dropped_for_budget > 0) try warnings.append(allocator, "token_budget_truncated");
+        if (results.items.items.len == 0) try warnings.append(allocator, "no_memory_items");
+        try appendRetrievalWarnings(allocator, &warnings, results.items.items, include_evidence);
+
+        var context = try OwnedContextPacket.fromItems(allocator, results.items.items, warnings.items);
+        defer context.deinit();
+
+        const retrieval_id = try self.nextQid(allocator, "retr");
+        defer allocator.free(retrieval_id);
+        const prompt = try promptFromContext(allocator, context.view());
+        defer allocator.free(prompt);
+        const token_estimate = @max(@as(usize, 1), prompt.len / 4);
+        const score_breakdowns = try buildScoreBreakdowns(allocator, results.items.items);
+        defer allocator.free(score_breakdowns);
+        const trace = RetrievalTrace{
+            .query = query,
+            .requestedNeedsCount = needsCount(needs_value),
+            .budgetTokens = budget,
+            .candidateSources = retrievalCandidateSources(retrieve_mode, candidate_count, context.core.items.len),
+            .candidateCount = candidate_count,
+            .keptCount = results.items.items.len,
+            .droppedForNeeds = dropped_for_needs,
+            .droppedForBudget = dropped_for_budget,
+            .tokenEstimate = token_estimate,
+            .validAt = valid_at,
+            .scoreBreakdowns = score_breakdowns,
+        };
+
+        const endpoint = if (self.options.answer_provider.kind == .none)
+            providers.ProviderEndpoint{ .kind = .deterministic, .name = "deterministic_prompt" }
+        else
+            self.options.answer_provider;
+        const answer = providers.generateAnswer(allocator, self.options.io, endpoint, query, prompt) catch |err| {
+            const message = try std.fmt.allocPrint(allocator, "answer provider failed: {s}", .{@errorName(err)});
+            defer allocator.free(message);
+            return errorResponse(allocator, id, "provider_error", message);
+        };
+        defer allocator.free(answer);
+
+        const item_qids = try allocator.alloc([]const u8, results.items.items.len);
+        defer allocator.free(item_qids);
+        for (results.items.items, 0..) |item, index| {
+            item_qids[index] = item.qid;
+        }
+        if (log_retrieval) {
+            const event_payload = try stringifyAlloc(allocator, .{
+                .method = "memory.answer",
+                .retrievalId = retrieval_id,
+                .query = query,
+                .itemCount = results.items.items.len,
+                .itemQids = item_qids,
+                .tokenEstimate = token_estimate,
+                .provider = endpoint.name,
+                .model = endpoint.model,
+            });
+            defer allocator.free(event_payload);
+            if (self.publishEvent(streams.retrieval_logged, event_payload)) |_| {} else |_| {
+                if (!containsWarning(warnings.items, "retrieval_stream_write_failed")) {
+                    try warnings.append(allocator, "retrieval_stream_write_failed");
+                }
+            }
+        }
+
+        const response = .{
+            .jsonrpc = "2.0",
+            .id = id,
+            .result = .{
+                .retrievalId = retrieval_id,
+                .answer = answer,
+                .provider = endpoint.name,
+                .model = endpoint.model,
                 .context = context.view(),
                 .items = results.items.items,
                 .tokenEstimate = token_estimate,
@@ -1509,6 +1689,7 @@ pub const Runtime = struct {
             if (!include_deleted and try propertyBool(allocator, node.properties_json, "deleted")) continue;
             if (!try scope.matchesNode(allocator, node)) continue;
             if (isInternalLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) continue;
+            if (isHiddenSearchLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) continue;
             if (!labelAllowed(node.label, labels_value)) continue;
             if (!try nodeWithinEventWindow(allocator, node, event_window)) continue;
             if (!include_deleted and isDerivedLabel(node.label)) {
@@ -1623,7 +1804,8 @@ pub const Runtime = struct {
 
     fn collectSearchHits(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, mode: SearchMode, limit: usize) ![]storage.SearchHit {
         return switch (mode) {
-            .fts, .graph => self.store.fullTextSearch(allocator, .{ .text = query, .limit = limit }),
+            .fts => self.store.fullTextSearch(allocator, .{ .text = query, .limit = limit }),
+            .graph => self.graphSearch(allocator, query, limit),
             .vector => self.vectorTextSearch(allocator, query, limit) catch |err| switch (err) {
                 error.Unsupported => allocator.alloc(storage.SearchHit, 0),
                 else => |e| return e,
@@ -1652,13 +1834,108 @@ pub const Runtime = struct {
             for (merged.items) |hit| allocator.free(hit.qid);
             merged.deinit(allocator);
         }
-        try appendMergedHits(allocator, &merged, fts_hits);
-        try appendMergedHits(allocator, &merged, vector_hits);
+        try appendRrfHits(allocator, &merged, fts_hits, 1.0);
+        try appendRrfHits(allocator, &merged, vector_hits, 1.0);
+        sortHitsByScore(merged.items);
         if (merged.items.len > limit) {
             for (merged.items[limit..]) |hit| allocator.free(hit.qid);
             merged.shrinkRetainingCapacity(limit);
         }
         return merged.toOwnedSlice(allocator);
+    }
+
+    fn graphSearch(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, limit: usize) ![]storage.SearchHit {
+        const base_hits = if (self.store.capabilities().vector)
+            try self.hybridSearch(allocator, query, @max(limit * 2, limit))
+        else
+            try self.store.fullTextSearch(allocator, .{ .text = query, .limit = @max(limit * 2, limit) });
+        defer freeHits(allocator, base_hits);
+
+        var merged = std.ArrayList(storage.SearchHit).empty;
+        errdefer {
+            for (merged.items) |hit| allocator.free(hit.qid);
+            merged.deinit(allocator);
+        }
+        try appendRrfHits(allocator, &merged, base_hits, 1.0);
+
+        for (base_hits, 0..) |hit, rank| {
+            try self.appendGraphNeighborsForHit(allocator, &merged, hit.qid, reciprocalRank(rank) * 0.75);
+        }
+
+        const entity_hits = try self.store.fullTextSearch(allocator, .{ .text = query, .limit = @max(limit * 2, limit) });
+        defer freeHits(allocator, entity_hits);
+        for (entity_hits, 0..) |hit, rank| {
+            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!std.mem.eql(u8, node.label, "Entity")) continue;
+            try self.appendMemoryHitsForEntity(allocator, &merged, node.qid, reciprocalRank(rank) * 0.9);
+        }
+
+        sortHitsByScore(merged.items);
+        if (merged.items.len > limit) {
+            for (merged.items[limit..]) |hit| allocator.free(hit.qid);
+            merged.shrinkRetainingCapacity(limit);
+        }
+        return merged.toOwnedSlice(allocator);
+    }
+
+    fn appendGraphNeighborsForHit(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        merged: *std.ArrayList(storage.SearchHit),
+        qid: []const u8,
+        score: f32,
+    ) !void {
+        const node = (try self.store.getNode(allocator, qid)) orelse return;
+        defer self.store.freeNode(allocator, node);
+        if (std.mem.eql(u8, node.label, "Entity")) {
+            try self.appendMemoryHitsForEntity(allocator, merged, qid, score);
+            return;
+        }
+
+        const mention_edges = try self.store.findEdges(allocator, .{
+            .from_qid = qid,
+            .edge_type = "MENTIONS",
+            .limit = 32,
+        });
+        defer self.store.freeEdges(allocator, mention_edges);
+        for (mention_edges) |edge| {
+            try self.appendMemoryHitsForEntity(allocator, merged, edge.to_qid, score * 0.7);
+        }
+    }
+
+    fn appendMemoryHitsForEntity(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        merged: *std.ArrayList(storage.SearchHit),
+        entity_qid: []const u8,
+        score: f32,
+    ) !void {
+        const incoming = try self.store.findEdges(allocator, .{
+            .to_qid = entity_qid,
+            .edge_type = "MENTIONS",
+            .limit = 128,
+        });
+        defer self.store.freeEdges(allocator, incoming);
+        for (incoming) |edge| {
+            const node = (try self.store.getNode(allocator, edge.from_qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (std.mem.eql(u8, node.label, "Entity")) continue;
+            try appendHitScore(allocator, merged, edge.from_qid, score);
+        }
+
+        const outgoing = try self.store.findEdges(allocator, .{
+            .from_qid = entity_qid,
+            .edge_type = "MENTIONED_IN",
+            .limit = 128,
+        });
+        defer self.store.freeEdges(allocator, outgoing);
+        for (outgoing) |edge| {
+            const node = (try self.store.getNode(allocator, edge.to_qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (std.mem.eql(u8, node.label, "Entity")) continue;
+            try appendHitScore(allocator, merged, edge.to_qid, score);
+        }
     }
 
     fn appendCoreItems(self: *Runtime, allocator: std.mem.Allocator, owned: *OwnedItems, scope: Scope, include_evidence: bool) !void {
@@ -1708,6 +1985,98 @@ pub const Runtime = struct {
             }
         }
         return null;
+    }
+
+    pub fn runEntityResolveJobs(self: *Runtime, allocator: std.mem.Allocator, owner: []const u8, limit: usize) !EntityJobRunResult {
+        const materialized = try jobs.materializeStream(
+            allocator,
+            self.store,
+            streams.entity_resolve_requested,
+            streams.workerKindForStream(streams.entity_resolve_requested),
+            .{ .limit = limit },
+        );
+        const leases = try jobs.leasePendingJobs(allocator, self.store, .{
+            .worker_kind = streams.workerKindForStream(streams.entity_resolve_requested),
+            .owner = owner,
+            .limit = limit,
+        });
+        defer jobs.freeLeaseResults(allocator, leases);
+
+        var succeeded: usize = 0;
+        var failed: usize = 0;
+        for (leases) |lease| {
+            self.processEntityResolveLease(allocator, lease) catch {
+                _ = jobs.failJob(allocator, self.store, lease.qid, "{\"error\":\"entity_resolve_failed\"}", 0) catch {};
+                failed += 1;
+                continue;
+            };
+            try jobs.completeJob(allocator, self.store, lease.qid, 0);
+            succeeded += 1;
+        }
+
+        return .{
+            .materializedCount = materialized.createdCount,
+            .leasedCount = leases.len,
+            .succeededCount = succeeded,
+            .failedCount = failed,
+        };
+    }
+
+    fn processEntityResolveLease(self: *Runtime, allocator: std.mem.Allocator, lease: jobs.LeaseResult) !void {
+        if (self.options.entity_provider.kind == .none) return error.ProviderUnavailable;
+        const entries = try self.store.readStream(
+            allocator,
+            lease.stream,
+            if (lease.sequence > 0) lease.sequence - 1 else 0,
+            1,
+        );
+        defer freeStreamEntries(allocator, entries);
+        if (entries.len == 0 or entries[0].sequence != lease.sequence) return error.NotFound;
+
+        var parsed = try std.json.parseFromSlice(Value, allocator, entries[0].payload_json, .{});
+        defer parsed.deinit();
+        const payload = switch (parsed.value) {
+            .object => |object| object,
+            else => return error.InvalidRequest,
+        };
+        const scope = parseScope(&payload);
+        const message_qids = arrayValue(payload.get("messageQids")) orelse return error.InvalidRequest;
+        for (message_qids.items) |qid_value| {
+            const message_qid = stringValue(qid_value) orelse continue;
+            const node = (try self.store.getNode(allocator, message_qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!std.mem.eql(u8, node.label, "Message")) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            const text = textForNode(allocator, node) catch continue;
+            defer allocator.free(text);
+            var entities = try providers.resolveEntities(allocator, self.options.io, self.options.entity_provider, text);
+            defer entities.deinit();
+            try self.writeEntityMentions(allocator, scope, message_qid, entities.items.items);
+        }
+    }
+
+    fn writeEntityMentions(self: *Runtime, allocator: std.mem.Allocator, scope: Scope, source_qid: []const u8, entities: []const providers.ResolvedEntity) !void {
+        for (entities) |entity| {
+            const entity_qid = try entityQid(allocator, scope, entity);
+            defer allocator.free(entity_qid);
+            const props = try stringifyAlloc(allocator, .{
+                .kind = "entity",
+                .qtype = "entity",
+                .canonicalName = entity.name,
+                .entityType = entity.entity_type,
+                .aliases = entity.aliases,
+                .state = "current",
+                .tenantId = scope.tenant_id,
+                .userId = scope.user_id,
+                .agentId = scope.agent_id,
+                .projectId = scope.project_id,
+                .deleted = false,
+            });
+            defer allocator.free(props);
+            try self.store.putNode(.{ .qid = entity_qid, .label = "Entity", .properties_json = props });
+            try self.putDeterministicEdge(allocator, source_qid, entity_qid, "MENTIONS");
+            try self.putDeterministicEdge(allocator, entity_qid, source_qid, "MENTIONED_IN");
+        }
     }
 };
 
@@ -2336,6 +2705,9 @@ fn textForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
     if (std.mem.eql(u8, node.label, "Observation")) {
         return readPropertyString(allocator, node.properties_json, "content");
     }
+    if (std.mem.eql(u8, node.label, "Entity")) {
+        return readPropertyString(allocator, node.properties_json, "canonicalName");
+    }
     if (std.mem.eql(u8, node.label, "Feedback")) {
         return readPropertyString(allocator, node.properties_json, "rating");
     }
@@ -2483,6 +2855,7 @@ fn labelType(label: []const u8) []const u8 {
     if (std.mem.eql(u8, label, "Turn")) return "raw";
     if (std.mem.eql(u8, label, "ToolCall")) return "raw";
     if (std.mem.eql(u8, label, "Observation")) return "raw";
+    if (std.mem.eql(u8, label, "Entity")) return "entity";
     if (std.mem.eql(u8, label, "Core")) return "core";
     if (std.mem.eql(u8, label, "Feedback")) return "raw";
     return "raw";
@@ -2510,6 +2883,10 @@ fn isFactLikeType(node_type: []const u8) bool {
 
 fn isInternalLabel(label: []const u8) bool {
     return std.mem.eql(u8, label, "Job") or std.mem.eql(u8, label, "Idempotency") or std.mem.eql(u8, label, "Schema") or std.mem.eql(u8, label, "Migration");
+}
+
+fn isHiddenSearchLabel(label: []const u8) bool {
+    return std.mem.eql(u8, label, "Entity");
 }
 
 fn labelRequestedExplicitly(label: []const u8, labels_value: ?Value) bool {
@@ -2747,6 +3124,47 @@ fn hashQid(allocator: std.mem.Allocator, prefix: []const u8, key: []const u8) ![
     return std.fmt.allocPrint(allocator, "q_{s}_{x}", .{ prefix, hash });
 }
 
+fn entityQid(allocator: std.mem.Allocator, scope: Scope, entity: providers.ResolvedEntity) ![]u8 {
+    const normalized_name = try normalizedEntityKey(allocator, entity.name);
+    defer allocator.free(normalized_name);
+    const normalized_type = try normalizedEntityKey(allocator, entity.entity_type);
+    defer allocator.free(normalized_type);
+    const key = try std.fmt.allocPrint(
+        allocator,
+        "tenant={s}|user={s}|agent={s}|project={s}|type={s}|name={s}",
+        .{
+            scope.tenant_id orelse "",
+            scope.user_id orelse "",
+            scope.agent_id orelse "",
+            scope.project_id orelse "",
+            normalized_type,
+            normalized_name,
+        },
+    );
+    defer allocator.free(key);
+    return hashQid(allocator, "ent", key);
+}
+
+fn normalizedEntityKey(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    errdefer writer.deinit();
+    var wrote_any = false;
+    var pending_separator = false;
+    for (raw) |byte| {
+        if (std.ascii.isAlphanumeric(byte)) {
+            if (pending_separator and wrote_any) {
+                try writer.writer.writeByte('_');
+            }
+            try writer.writer.writeByte(std.ascii.toLower(byte));
+            wrote_any = true;
+            pending_separator = false;
+        } else {
+            pending_separator = true;
+        }
+    }
+    return writer.toOwnedSlice();
+}
+
 fn memoryCardKind(label: extractor.Label) []const u8 {
     return switch (label) {
         .fact => "semantic",
@@ -2768,16 +3186,21 @@ fn freeStreamEntries(allocator: std.mem.Allocator, entries: []storage.StreamEntr
     allocator.free(entries);
 }
 
-fn appendMergedHits(allocator: std.mem.Allocator, merged: *std.ArrayList(storage.SearchHit), hits: []const storage.SearchHit) !void {
-    for (hits) |hit| {
-        if (indexOfHit(merged.items, hit.qid)) |index| {
-            merged.items[index].score += hit.score;
-            continue;
-        }
-        const qid = try allocator.dupe(u8, hit.qid);
-        errdefer allocator.free(qid);
-        try merged.append(allocator, .{ .qid = qid, .score = hit.score });
+fn appendRrfHits(allocator: std.mem.Allocator, merged: *std.ArrayList(storage.SearchHit), hits: []const storage.SearchHit, weight: f32) !void {
+    for (hits, 0..) |hit, rank| {
+        const fused_score = weight * reciprocalRank(rank);
+        try appendHitScore(allocator, merged, hit.qid, fused_score);
     }
+}
+
+fn appendHitScore(allocator: std.mem.Allocator, merged: *std.ArrayList(storage.SearchHit), qid_value: []const u8, score: f32) !void {
+    if (indexOfHit(merged.items, qid_value)) |index| {
+        merged.items[index].score += score;
+        return;
+    }
+    const qid = try allocator.dupe(u8, qid_value);
+    errdefer allocator.free(qid);
+    try merged.append(allocator, .{ .qid = qid, .score = score });
 }
 
 fn indexOfHit(hits: []const storage.SearchHit, qid: []const u8) ?usize {
@@ -2785,6 +3208,20 @@ fn indexOfHit(hits: []const storage.SearchHit, qid: []const u8) ?usize {
         if (std.mem.eql(u8, hit.qid, qid)) return index;
     }
     return null;
+}
+
+fn reciprocalRank(rank: usize) f32 {
+    return 1.0 / @as(f32, @floatFromInt(60 + rank + 1));
+}
+
+fn sortHitsByScore(hits: []storage.SearchHit) void {
+    var index: usize = 1;
+    while (index < hits.len) : (index += 1) {
+        var cursor = index;
+        while (cursor > 0 and hits[cursor].score > hits[cursor - 1].score) : (cursor -= 1) {
+            std.mem.swap(storage.SearchHit, &hits[cursor], &hits[cursor - 1]);
+        }
+    }
 }
 
 fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
@@ -3248,6 +3685,68 @@ test "runtime retrieve filters event windows and token budgets" {
     try std.testing.expect(std.mem.indexOf(u8, budgeted, "\"token_budget_truncated\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, budgeted, "\"no_memory_items\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, budgeted, "\"droppedForBudget\":2") != null);
+}
+
+test "runtime graph retrieve expands through resolved entities" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
+
+    const first = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"userId\":\"locomo-user\"},\"messages\":[{\"role\":\"user\",\"content\":\"Alice likes ramen.\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(first);
+    const second = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"userId\":\"locomo-user\"},\"messages\":[{\"role\":\"user\",\"content\":\"She moved to Lisbon.\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(second);
+
+    const aliases = [_][]const u8{"Alice"};
+    const entity = providers.ResolvedEntity{
+        .name = "Alice Smith",
+        .entity_type = "person",
+        .aliases = &aliases,
+    };
+    const entities = [_]providers.ResolvedEntity{entity};
+    try runtime.writeEntityMentions(std.testing.allocator, .{ .user_id = "locomo-user" }, "q_msg_4", &entities);
+    try runtime.writeEntityMentions(std.testing.allocator, .{ .user_id = "locomo-user" }, "q_msg_9", &entities);
+
+    const graph = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"Alice Smith\",\"mode\":\"graph\",\"scope\":{\"userId\":\"locomo-user\"},\"needs\":[\"raw\"]}}",
+    );
+    defer std.testing.allocator.free(graph);
+
+    try std.testing.expect(std.mem.indexOf(u8, graph, "Alice likes ramen.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, graph, "She moved to Lisbon.") != null);
+}
+
+test "runtime answer uses retrieved context with deterministic provider fallback" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
+
+    const remember = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"Run just test before committing.\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(remember);
+
+    const answer = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What should I run before committing?\",\"scope\":{\"projectId\":\"repo:test\"},\"needs\":[\"raw\"],\"options\":{\"includeDebug\":true,\"logRetrieval\":false}}}",
+    );
+    defer std.testing.allocator.free(answer);
+
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"answer\":\"Run just test before committing.\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"provider\":\"deterministic_prompt\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"trace\":{") != null);
 }
 
 test "runtime raw retrieve indexes message date annotations" {

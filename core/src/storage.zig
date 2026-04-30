@@ -21,6 +21,13 @@ pub const Edge = struct {
     properties_json: []const u8,
 };
 
+pub const EdgeQuery = struct {
+    from_qid: ?[]const u8 = null,
+    to_qid: ?[]const u8 = null,
+    edge_type: ?[]const u8 = null,
+    limit: usize = 100,
+};
+
 pub const FullTextQuery = struct {
     text: []const u8,
     limit: usize = 20,
@@ -73,6 +80,7 @@ pub const Adapter = struct {
         put_node: *const fn (*anyopaque, Node) anyerror!void,
         get_node: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!?Node,
         put_edge: *const fn (*anyopaque, Edge) anyerror!void,
+        find_edges: *const fn (*anyopaque, std.mem.Allocator, EdgeQuery) anyerror![]Edge,
         full_text_search: *const fn (*anyopaque, std.mem.Allocator, FullTextQuery) anyerror![]SearchHit,
         embed_text: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror![]f32,
         vector_search: *const fn (*anyopaque, std.mem.Allocator, VectorQuery) anyerror![]SearchHit,
@@ -104,6 +112,21 @@ pub const Adapter = struct {
 
     pub fn putEdge(self: Adapter, edge: Edge) !void {
         try self.vtable.put_edge(self.context, edge);
+    }
+
+    pub fn findEdges(self: Adapter, allocator: std.mem.Allocator, query: EdgeQuery) ![]Edge {
+        return self.vtable.find_edges(self.context, allocator, query);
+    }
+
+    pub fn freeEdges(_: Adapter, allocator: std.mem.Allocator, edges: []const Edge) void {
+        for (edges) |edge| {
+            allocator.free(edge.qid);
+            allocator.free(edge.from_qid);
+            allocator.free(edge.to_qid);
+            allocator.free(edge.edge_type);
+            allocator.free(edge.properties_json);
+        }
+        allocator.free(edges);
     }
 
     pub fn fullTextSearch(self: Adapter, allocator: std.mem.Allocator, query: FullTextQuery) ![]SearchHit {

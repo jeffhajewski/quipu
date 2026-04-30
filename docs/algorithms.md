@@ -10,9 +10,14 @@ no hits when the active backend does not advertise vector capability. The
 Lattice adapter indexes deterministic `lattice_hash_embed` vectors by default,
 or OpenAI-compatible provider embeddings when configured, as nodes are written.
 It embeds vector queries through the same provider and uses Lattice vector
-search for `vector` and `hybrid` modes. `hybrid` merges lexical and vector hits
-by qid before the runtime applies scope, deleted-state, label, and temporal
-filters.
+search for `vector` and `hybrid` modes. `hybrid` fuses lexical and vector ranks
+with reciprocal-rank fusion before the runtime applies scope, deleted-state,
+label, and temporal filters.
+
+`graph` mode starts from the same lexical or hybrid seed set, expands through
+stored `Entity` nodes connected by `MENTIONS` / `MENTIONED_IN` edges, then
+applies the normal runtime filters. Entity nodes are hidden from retrieval
+results unless callers explicitly request the `Entity` label.
 
 ## Retrieval V0
 
@@ -31,6 +36,23 @@ advertises a non-hash embedding model. Callers can override this with
 7. Split kept items into context sections and render the prompt from those sections.
 
 This gives later provider-embedding, BM25, and reranking work a stable behavioral surface: retrieval must return scoped, evidence-backed, budgeted context packets rather than arbitrary top-k chunks.
+
+`memory.answer` runs the same retrieval path and sends the rendered prompt to a
+configured answer provider. Without a configured provider, it uses the
+deterministic local fallback that returns the first retrieved context item.
+
+## Entity Resolution V0
+
+Entity resolution is async. `memory.remember` can publish
+`quipu.entity.resolve.requested` events when an entity provider is configured.
+`quipu jobs run entity-resolve` materializes those stream entries into durable
+jobs, leases them, calls either the deterministic fixture resolver or an
+OpenRouter-compatible chat model, validates the JSON entity shape, writes stable
+`Entity` nodes, and links source messages through graph edges.
+
+The remote resolver is deliberately outside the synchronous write path so NER/ER
+latency does not block ingestion. Graph retrieval improves as entity jobs catch
+up, while lexical/vector retrieval remains available immediately.
 
 ## Extraction V0
 

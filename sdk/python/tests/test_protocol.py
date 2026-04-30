@@ -51,6 +51,8 @@ class ProtocolFixtureTests(unittest.TestCase):
             "memoryRememberResult",
             "memoryRetrieveParams",
             "memoryRetrieveResult",
+            "memoryAnswerParams",
+            "memoryAnswerResult",
             "memorySearchParams",
             "memorySearchResult",
             "memoryInspectParams",

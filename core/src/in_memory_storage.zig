@@ -29,6 +29,14 @@ const EdgeRecord = struct {
     }
 };
 
+fn freeEdge(allocator: std.mem.Allocator, edge: storage.Edge) void {
+    allocator.free(edge.qid);
+    allocator.free(edge.from_qid);
+    allocator.free(edge.to_qid);
+    allocator.free(edge.edge_type);
+    allocator.free(edge.properties_json);
+}
+
 const StreamRecord = struct {
     stream: []u8,
     sequence: u64,
@@ -133,6 +141,35 @@ pub const InMemoryAdapter = struct {
             .edge_type = try self.allocator.dupe(u8, edge.edge_type),
             .properties_json = try self.allocator.dupe(u8, edge.properties_json),
         });
+    }
+
+    fn findEdges(context: *anyopaque, allocator: std.mem.Allocator, query: storage.EdgeQuery) ![]storage.Edge {
+        const self = ctx(context);
+        var edges = std.ArrayList(storage.Edge).empty;
+        errdefer {
+            for (edges.items) |edge| freeEdge(allocator, edge);
+            edges.deinit(allocator);
+        }
+        for (self.edges.items) |edge| {
+            if (query.from_qid) |from_qid| {
+                if (!std.mem.eql(u8, edge.from_qid, from_qid)) continue;
+            }
+            if (query.to_qid) |to_qid| {
+                if (!std.mem.eql(u8, edge.to_qid, to_qid)) continue;
+            }
+            if (query.edge_type) |edge_type| {
+                if (!std.mem.eql(u8, edge.edge_type, edge_type)) continue;
+            }
+            try edges.append(allocator, .{
+                .qid = try allocator.dupe(u8, edge.qid),
+                .from_qid = try allocator.dupe(u8, edge.from_qid),
+                .to_qid = try allocator.dupe(u8, edge.to_qid),
+                .edge_type = try allocator.dupe(u8, edge.edge_type),
+                .properties_json = try allocator.dupe(u8, edge.properties_json),
+            });
+            if (edges.items.len >= query.limit) break;
+        }
+        return edges.toOwnedSlice(allocator);
     }
 
     fn fullTextSearch(context: *anyopaque, allocator: std.mem.Allocator, query: storage.FullTextQuery) ![]storage.SearchHit {
@@ -406,6 +443,7 @@ pub const InMemoryAdapter = struct {
         .put_node = putNode,
         .get_node = getNode,
         .put_edge = putEdge,
+        .find_edges = findEdges,
         .full_text_search = fullTextSearch,
         .embed_text = embedText,
         .vector_search = vectorSearch,

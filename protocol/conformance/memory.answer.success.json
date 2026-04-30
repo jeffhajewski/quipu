@@ -1,0 +1,67 @@
+{
+  "name": "memory.answer success",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_answer_1",
+    "method": "memory.answer",
+    "params": {
+      "query": "What should I run before committing?",
+      "mode": "hybrid",
+      "scope": {
+        "projectId": "repo:quipu"
+      },
+      "needs": ["procedural"],
+      "options": {
+        "includeDebug": true,
+        "logRetrieval": false
+      }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_answer_1",
+    "result": {
+      "retrievalId": "q_retr_1",
+      "answer": "Run just test before committing.",
+      "provider": "deterministic_prompt",
+      "model": null,
+      "context": {
+        "core": [],
+        "currentFacts": [],
+        "preferences": [],
+        "procedural": [
+          {
+            "qid": "q_proc_1",
+            "type": "procedure",
+            "text": "Run just test before committing.",
+            "score": 1.0,
+            "confidence": 1.0,
+            "state": "current",
+            "validFrom": null,
+            "validTo": null,
+            "evidence": []
+          }
+        ],
+        "episodes": [],
+        "warnings": []
+      },
+      "items": [
+        {
+          "qid": "q_proc_1",
+          "type": "procedure",
+          "text": "Run just test before committing.",
+          "score": 1.0,
+          "confidence": 1.0,
+          "state": "current",
+          "validFrom": null,
+          "validTo": null,
+          "evidence": []
+        }
+      ],
+      "tokenEstimate": 12,
+      "confidence": 0.72,
+      "warnings": [],
+      "trace": null
+    }
+  }
+}

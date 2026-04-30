@@ -68,6 +68,12 @@ Core benchmark runs can force the runtime retrieval path with
 is set to `openrouter`, the core runtime defaults `memory.retrieve` to hybrid
 search; without a provider, it defaults to lexical search.
 
+Core graph runs can populate the entity graph before retrieval by starting the
+core with `--entity-provider deterministic` or `--entity-provider openrouter`
+and running `quipu jobs run entity-resolve` after replay. The worker writes
+stable `Entity` nodes and `MENTIONS` edges, so graph mode remains reproducible
+and inspectable.
+
 Optional LLM answer and judge hooks are also wired through OpenRouter:
 
 ```bash

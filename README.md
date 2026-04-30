@@ -51,7 +51,10 @@ Quipu currently supports:
 - `memory.retrieve`: return both a rendered prompt and structured context
   packet with scope filtering, needs filtering, token budgeting, event windows,
   `validAt`, warnings, and optional trace output.
-- `memory.search`: lexical, vector, and hybrid search modes.
+- `memory.answer`: retrieve scoped evidence and answer with either the
+  deterministic local fallback or a configured OpenRouter-compatible chat model.
+- `memory.search`: lexical, vector, reciprocal-rank hybrid, and graph search
+  modes.
 - `memory.inspect`: inspect a node, its provenance, dependents, and stream-backed
   audit records.
 - `memory.forget`: qid or query selectors, dry-run closure reports, tombstones,
@@ -62,7 +65,8 @@ Quipu currently supports:
 - Native LatticeDB-backed persistence with graph nodes/edges, FTS,
   configurable hash or OpenAI-compatible vector search, and durable streams.
 - Durable stream events can be materialized into idempotent `Job` nodes for
-  extraction, consolidation, forgetting, retrieval logging, and feedback work.
+  extraction, async entity resolution, consolidation, forgetting, retrieval
+  logging, and feedback work.
 - Python and TypeScript SDKs that validate JSON-RPC shape and talk to a local
   `quipu serve-stdio` process.
 - A dependency-free MCP stdio adapter with tools, docs/schema resources, and
@@ -139,6 +143,9 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"1","method":"memory.remember","params":{"s
 
 printf '%s\n' '{"jsonrpc":"2.0","id":"2","method":"memory.retrieve","params":{"query":"What should I run before committing?","scope":{"projectId":"repo:quipu"},"needs":["procedural"],"options":{"includeDebug":true}}}' \
   | quipu --db "$HOME/.quipu/memory.lattice" rpc-stdin
+
+printf '%s\n' '{"jsonrpc":"2.0","id":"3","method":"memory.answer","params":{"query":"What should I run before committing?","scope":{"projectId":"repo:quipu"},"needs":["procedural"],"options":{"includeDebug":true}}}' \
+  | quipu --db "$HOME/.quipu/memory.lattice" rpc-stdin
 ```
 
 Check the store:
@@ -165,6 +172,25 @@ local smoke tests show commits fail with `LatticeIo` at `1017` dimensions and
 above. Full 1536-dimensional OpenAI embeddings should be re-enabled after that
 LatticeDB persistence issue is fixed.
 
+Provider-backed answer generation and async entity resolution use the same
+OpenRouter-compatible chat surface:
+
+```bash
+export OPENROUTER_API_KEY=...
+quipu --db "$HOME/.quipu/memory.lattice" \
+  --answer-provider openrouter \
+  --entity-provider openrouter \
+  remember --project repo:quipu --text "Alice Smith owns the Lisbon rollout."
+quipu --db "$HOME/.quipu/memory.lattice" jobs run entity-resolve
+quipu --db "$HOME/.quipu/memory.lattice" \
+  --answer-provider openrouter \
+  answer --project repo:quipu --mode graph --query "Who owns the Lisbon rollout?"
+```
+
+For local smoke tests without model keys, use
+`--entity-provider deterministic` and omit `--answer-provider`; `memory.answer`
+falls back to deterministic prompt extraction.
+
 Use the CLI directly:
 
 ```bash
@@ -177,6 +203,10 @@ quipu --db "$HOME/.quipu/memory.lattice" retrieve \
   --query "test command" \
   --need procedural \
   --debug
+quipu --db "$HOME/.quipu/memory.lattice" answer \
+  --project repo:quipu \
+  --query "What should I run before committing?" \
+  --need procedural
 quipu --db "$HOME/.quipu/memory.lattice" consolidate --project repo:quipu
 quipu --db "$HOME/.quipu/memory.lattice" forget \
   --project repo:quipu \
@@ -202,8 +232,14 @@ with Quipu.local(db_path="/tmp/quipu.lattice") as q:
         needs=["current_facts"],
         options={"includeDebug": True},
     )
+    answered = q.answer(
+        query="What package manager does this repo use?",
+        scope={"projectId": "repo:quipu"},
+        needs=["current_facts"],
+    )
     print(remembered["messageQids"])
     print(retrieved["prompt"])
+    print(answered["answer"])
 ```
 
 TypeScript:
@@ -225,8 +261,14 @@ try {
     needs: ["procedural"],
     options: { includeDebug: true },
   });
+  const answered = await q.answer({
+    query: "What should I run before committing?",
+    scope: { projectId: "repo:quipu" },
+    needs: ["procedural"],
+  });
 
   console.log(retrieved.prompt);
+  console.log(answered.answer);
 } finally {
   q.close();
 }
@@ -266,6 +308,8 @@ Implemented:
 - Schema metadata, initial migration record, and schema-aware verification.
 - Retrieval, inspection, feedback, core memory blocks, forgetting, and audit
   stream logging.
+- Reciprocal-rank hybrid retrieval, graph expansion over resolved entities, and
+  provider-backed `memory.answer`.
 - Python/TypeScript SDK validators and stdio clients.
 - Python/TypeScript `local` helpers that auto-start the core over stdio.
 - MCP tools, resources, and prompts.
@@ -281,9 +325,9 @@ Still in progress:
 - Long-running socket or HTTP daemon.
 - Release artifacts for Quipu itself.
 - Full migration runner and compatibility checks.
-- Reranking and learned scoring.
+- Learned reranking and scoring beyond deterministic RRF/graph boosts.
 - LLM-backed extraction and consolidation workers.
-- Provider-backed answer/judge scoring for LoCoMo publication.
+- Judge scoring for LoCoMo publication.
 - LongMemEval and MemoryAgentBench adapters.
 - Richer host integrations.
 

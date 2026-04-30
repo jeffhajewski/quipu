@@ -30,6 +30,7 @@ SUPPORTED_METHODS = {
     "system.health",
     "memory.remember",
     "memory.retrieve",
+    "memory.answer",
     "memory.search",
     "memory.inspect",
     "memory.forget",
@@ -206,10 +207,12 @@ def _validate_remember(params: Mapping[str, Any]) -> None:
 
 
 def _validate_retrieve(params: Mapping[str, Any]) -> None:
-    allowed = {"query", "task", "scope", "budgetTokens", "needs", "time", "options"}
+    allowed = {"query", "task", "mode", "scope", "budgetTokens", "needs", "time", "options"}
     _reject_extra(params, allowed, "memory.retrieve params")
     _require_non_empty_string(params.get("query"), "query")
     _optional_string(params, "task", "memory.retrieve params")
+    if "mode" in params and params["mode"] not in {"fts", "vector", "hybrid", "graph"}:
+        raise QuipuProtocolError("mode is invalid")
     if "scope" in params:
         _validate_scope(params["scope"])
     if "budgetTokens" in params:
@@ -229,10 +232,45 @@ def _validate_retrieve(params: Mapping[str, Any]) -> None:
         options = _ensure_object(params["options"], "options")
         _reject_extra(
             options,
-            {"includeEvidence", "includeDebug", "logTrace", "abstainIfWeak", "format"},
+            {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format"},
             "options",
         )
-        for key in ("includeEvidence", "includeDebug", "logTrace", "abstainIfWeak"):
+        for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak"):
+            _optional_bool(options, key, "options")
+        if "format" in options and options["format"] not in {"prompt", "json"}:
+            raise QuipuProtocolError("options.format is invalid")
+
+
+def _validate_answer(params: Mapping[str, Any]) -> None:
+    allowed = {"query", "task", "mode", "scope", "budgetTokens", "needs", "time", "options"}
+    _reject_extra(params, allowed, "memory.answer params")
+    _require_non_empty_string(params.get("query"), "query")
+    _optional_string(params, "task", "memory.answer params")
+    if "mode" in params and params["mode"] not in {"fts", "vector", "hybrid", "graph"}:
+        raise QuipuProtocolError("mode is invalid")
+    if "scope" in params:
+        _validate_scope(params["scope"])
+    if "budgetTokens" in params:
+        budget = params["budgetTokens"]
+        if not isinstance(budget, int) or budget < 1:
+            raise QuipuProtocolError("budgetTokens must be a positive integer")
+    if "needs" in params:
+        needs = params["needs"]
+        if not isinstance(needs, list) or any(need not in NEEDS for need in needs):
+            raise QuipuProtocolError("needs contains an unsupported value")
+    if "time" in params:
+        time = _ensure_object(params["time"], "time")
+        _reject_extra(time, {"validAt", "eventWindowStart", "eventWindowEnd"}, "time")
+        for key in ("validAt", "eventWindowStart", "eventWindowEnd"):
+            _optional_string(time, key, "time")
+    if "options" in params:
+        options = _ensure_object(params["options"], "options")
+        _reject_extra(
+            options,
+            {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format"},
+            "options",
+        )
+        for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak"):
             _optional_bool(options, key, "options")
         if "format" in options and options["format"] not in {"prompt", "json"}:
             raise QuipuProtocolError("options.format is invalid")
@@ -339,6 +377,7 @@ VALIDATORS = {
     "system.health": _validate_system_health,
     "memory.remember": _validate_remember,
     "memory.retrieve": _validate_retrieve,
+    "memory.answer": _validate_answer,
     "memory.search": _validate_search,
     "memory.inspect": _validate_inspect,
     "memory.forget": _validate_forget,
@@ -454,6 +493,9 @@ class Quipu:
 
     def retrieve(self, **kwargs: Any) -> Mapping[str, Any]:
         return self.call("memory.retrieve", kwargs)
+
+    def answer(self, **kwargs: Any) -> Mapping[str, Any]:
+        return self.call("memory.answer", kwargs)
 
     def search(self, **kwargs: Any) -> Mapping[str, Any]:
         return self.call("memory.search", kwargs)

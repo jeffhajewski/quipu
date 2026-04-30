@@ -4,9 +4,11 @@ const in_memory_storage = @import("in_memory_storage.zig");
 const jobs = @import("jobs.zig");
 const lattice_storage = if (build_options.enable_lattice) @import("lattice_storage.zig") else struct {};
 const protocol = @import("protocol.zig");
+const providers = @import("providers.zig");
 const runtime_mod = @import("runtime.zig");
 const schema = @import("schema.zig");
 const storage = @import("storage.zig");
+const streams = @import("streams.zig");
 
 const LatticeOptions = if (build_options.enable_lattice) lattice_storage.Options else struct {};
 const LatticeEmbeddingProviderKind = if (build_options.enable_lattice) lattice_storage.EmbeddingProviderKind else enum {
@@ -23,6 +25,12 @@ const RuntimeConfig = struct {
     embedding_provider: ?[]const u8 = null,
     embedding_url: ?[]const u8 = null,
     embedding_model: ?[]const u8 = null,
+    answer_provider: ?[]const u8 = null,
+    answer_url: ?[]const u8 = null,
+    answer_model: ?[]const u8 = null,
+    entity_provider: ?[]const u8 = null,
+    entity_url: ?[]const u8 = null,
+    entity_model: ?[]const u8 = null,
 };
 
 const MaterializeCliArgs = struct {
@@ -86,6 +94,20 @@ const RetrieveCliArgs = struct {
     }
 };
 
+const AnswerCliArgs = struct {
+    query: ?[]const u8 = null,
+    mode: ?[]const u8 = null,
+    budget_tokens: i64 = 1200,
+    include_debug: bool = false,
+    include_evidence: bool = true,
+    needs: std.ArrayList([]const u8),
+    scope: ScopeCliArgs = .{},
+
+    fn deinit(self: *AnswerCliArgs, allocator: std.mem.Allocator) void {
+        self.needs.deinit(allocator);
+    }
+};
+
 const InspectCliArgs = struct {
     qid: ?[]const u8 = null,
 };
@@ -132,13 +154,14 @@ pub fn main(init: std.process.Init) !void {
 
     if (build_options.enable_lattice and config.db_path != null) {
         const lattice_options = try latticeOptionsFromConfig(init.io, init.environ_map, config);
+        const runtime_options = runtimeOptionsFromConfig(init.io, init.environ_map, config);
         var adapter_state = try lattice_storage.LatticeAdapter.open(allocator, config.db_path.?, lattice_options);
         defer adapter_state.deinit();
         try schema.ensure(allocator, adapter_state.adapter());
         var health = protocol.Health.default();
         health.db_path = config.db_path;
         health.lattice_version = lattice_storage.LatticeAdapter.latticeVersion();
-        var runtime = runtime_mod.Runtime.initWithNextId(adapter_state.adapter(), health, adapter_state.nextRuntimeId());
+        var runtime = runtime_mod.Runtime.initWithNextIdAndOptions(adapter_state.adapter(), health, adapter_state.nextRuntimeId(), runtime_options);
         defer runtime.deinit();
         try runCommand(init.io, allocator, args, config.command_index, &runtime, adapter_state.adapter());
         return;
@@ -146,7 +169,8 @@ pub fn main(init: std.process.Init) !void {
 
     var adapter_state = in_memory_storage.InMemoryAdapter.init(allocator);
     defer adapter_state.deinit();
-    var runtime = runtime_mod.Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    const runtime_options = runtimeOptionsFromConfig(init.io, init.environ_map, config);
+    var runtime = runtime_mod.Runtime.initWithOptions(adapter_state.adapter(), protocol.Health.default(), runtime_options);
     defer runtime.deinit();
     try runCommand(init.io, allocator, args, config.command_index, &runtime, adapter_state.adapter());
 }
@@ -209,6 +233,60 @@ fn parseRuntimeConfig(args: []const [:0]const u8) RuntimeConfig {
             config.command_index += 1;
             break;
         }
+        if (std.mem.eql(u8, arg, "--answer-provider")) {
+            if (config.command_index + 1 < args.len) {
+                config.answer_provider = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--answer-url")) {
+            if (config.command_index + 1 < args.len) {
+                config.answer_url = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--answer-model")) {
+            if (config.command_index + 1 < args.len) {
+                config.answer_model = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--entity-provider")) {
+            if (config.command_index + 1 < args.len) {
+                config.entity_provider = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--entity-url")) {
+            if (config.command_index + 1 < args.len) {
+                config.entity_url = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--entity-model")) {
+            if (config.command_index + 1 < args.len) {
+                config.entity_model = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
         break;
     }
     return config;
@@ -253,6 +331,72 @@ fn latticeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, c
         .embedding_api_key = embedding_api_key,
         .embedding_request_dimensions = provider == .openai_compatible and
             (isProviderName(provider_name, "openrouter") or isProviderName(provider_name, "openai")),
+    };
+}
+
+fn runtimeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, config: RuntimeConfig) runtime_mod.RuntimeOptions {
+    return .{
+        .io = io,
+        .answer_provider = providerEndpointFromConfig(
+            environ_map,
+            config.answer_provider,
+            config.answer_url,
+            config.answer_model,
+            "QUIPU_ANSWER_PROVIDER",
+            "QUIPU_ANSWER_URL",
+            "QUIPU_ANSWER_MODEL",
+            "OPENROUTER_ANSWER_MODEL",
+            "openai/gpt-4o",
+        ),
+        .entity_provider = providerEndpointFromConfig(
+            environ_map,
+            config.entity_provider,
+            config.entity_url,
+            config.entity_model,
+            "QUIPU_ENTITY_PROVIDER",
+            "QUIPU_ENTITY_URL",
+            "QUIPU_ENTITY_MODEL",
+            "OPENROUTER_ENTITY_MODEL",
+            "openai/gpt-4o-mini",
+        ),
+    };
+}
+
+fn providerEndpointFromConfig(
+    environ_map: *std.process.Environ.Map,
+    cli_provider: ?[]const u8,
+    cli_url: ?[]const u8,
+    cli_model: ?[]const u8,
+    provider_env: []const u8,
+    url_env: []const u8,
+    model_env: []const u8,
+    openrouter_model_env: []const u8,
+    default_model: []const u8,
+) providers.ProviderEndpoint {
+    const provider_name = cli_provider orelse environ_map.get(provider_env) orelse "none";
+    if (isProviderName(provider_name, "none") or isProviderName(provider_name, "off") or isProviderName(provider_name, "disabled")) {
+        return .{ .kind = .none, .name = "none" };
+    }
+    if (isProviderName(provider_name, "deterministic") or isProviderName(provider_name, "fixture")) {
+        return .{ .kind = .deterministic, .name = "deterministic" };
+    }
+    const url = cli_url orelse
+        environ_map.get(url_env) orelse
+        environ_map.get("OPENROUTER_CHAT_URL") orelse
+        "https://openrouter.ai/api/v1/chat/completions";
+    const model = cli_model orelse
+        environ_map.get(model_env) orelse
+        environ_map.get(openrouter_model_env) orelse
+        default_model;
+    const api_key = environ_map.get("QUIPU_MODEL_API_KEY") orelse
+        environ_map.get("QUIPU_OPENROUTER_API_KEY") orelse
+        environ_map.get("OPENROUTER_API_KEY");
+    return .{
+        .kind = .http,
+        .name = provider_name,
+        .url = url,
+        .model = model,
+        .api_key = api_key,
     };
 }
 
@@ -409,6 +553,26 @@ fn runCommand(
             try stdout.print("{s}\n", .{response});
             return;
         }
+        if (std.mem.eql(u8, args[command_index + 1], "run")) {
+            if (args.len <= command_index + 2 or !std.mem.eql(u8, args[command_index + 2], "entity-resolve")) {
+                return printCliError(stdout, allocator, "usage: quipu jobs run entity-resolve [--limit N] [--owner ID]");
+            }
+            const parsed = parseLeaseArgsWithDefault(args[command_index + 3 ..], streams.workerKindForStream(streams.entity_resolve_requested)) catch {
+                return printCliError(stdout, allocator, "invalid jobs run entity-resolve arguments");
+            };
+            const result = try runtime.runEntityResolveJobs(allocator, parsed.owner, parsed.limit);
+            const response = try stringifyAlloc(allocator, .{
+                .status = "ok",
+                .worker = "entity_resolve",
+                .materializedCount = result.materializedCount,
+                .leasedCount = result.leasedCount,
+                .succeededCount = result.succeededCount,
+                .failedCount = result.failedCount,
+            });
+            defer allocator.free(response);
+            try stdout.print("{s}\n", .{response});
+            return;
+        }
         if (!std.mem.eql(u8, args[command_index + 1], "materialize")) {
             return printCliError(stdout, allocator, "unsupported jobs subcommand");
         }
@@ -462,6 +626,15 @@ fn runCommand(
     if (args.len > command_index and std.mem.eql(u8, args[command_index], "retrieve")) {
         const request = buildRetrieveRequest(allocator, args[command_index + 1 ..]) catch {
             return printCliError(stdout, allocator, "invalid retrieve arguments");
+        };
+        defer allocator.free(request);
+        try dispatchAndPrint(stdout, allocator, runtime, request);
+        return;
+    }
+
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "answer")) {
+        const request = buildAnswerRequest(allocator, args[command_index + 1 ..]) catch {
+            return printCliError(stdout, allocator, "invalid answer arguments");
         };
         defer allocator.free(request);
         try dispatchAndPrint(stdout, allocator, runtime, request);
@@ -543,7 +716,7 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter] [--embedding-url URL] [--embedding-model MODEL] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter] [--answer-model MODEL] [--entity-provider deterministic|openrouter] [--entity-model MODEL] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
@@ -554,6 +727,7 @@ fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
         std.mem.eql(u8, command, "status") or
         std.mem.eql(u8, command, "remember") or
         std.mem.eql(u8, command, "retrieve") or
+        std.mem.eql(u8, command, "answer") or
         std.mem.eql(u8, command, "inspect") or
         std.mem.eql(u8, command, "forget") or
         std.mem.eql(u8, command, "feedback") or
@@ -658,6 +832,29 @@ fn parseLeaseArgs(args: []const [:0]const u8) !jobs.LeaseOptions {
     return parsed;
 }
 
+fn parseLeaseArgsWithDefault(args: []const [:0]const u8, worker_kind: []const u8) !jobs.LeaseOptions {
+    var parsed = jobs.LeaseOptions{
+        .worker_kind = worker_kind,
+        .owner = "cli",
+    };
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--worker")) {
+            parsed.worker_kind = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--owner")) {
+            parsed.owner = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--limit")) {
+            parsed.limit = try std.fmt.parseInt(usize, try nextArg(args, &index), 10);
+        } else if (std.mem.eql(u8, arg, "--ttl-ms")) {
+            parsed.ttl_ms = try std.fmt.parseInt(i64, try nextArg(args, &index), 10);
+        } else {
+            return error.InvalidArgs;
+        }
+    }
+    return parsed;
+}
+
 fn parseJobQid(args: []const [:0]const u8) ![]const u8 {
     if (args.len == 1 and !std.mem.startsWith(u8, args[0], "--")) return args[0];
     var index: usize = 0;
@@ -724,6 +921,29 @@ fn buildRetrieveRequest(allocator: std.mem.Allocator, args: []const [:0]const u8
                 .budgetTokens = parsed.budget_tokens,
                 .needs = parsed.needs.items,
                 .options = .{
+                .includeEvidence = parsed.include_evidence,
+                .includeDebug = parsed.include_debug,
+                .logTrace = parsed.include_debug,
+            },
+        },
+    });
+}
+
+fn buildAnswerRequest(allocator: std.mem.Allocator, args: []const [:0]const u8) ![]u8 {
+    var parsed = try parseAnswerArgs(allocator, args);
+    defer parsed.deinit(allocator);
+    const query = parsed.query orelse return error.InvalidArgs;
+    return stringifyAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = "cli_answer",
+        .method = "memory.answer",
+        .params = .{
+            .query = query,
+            .mode = parsed.mode,
+            .scope = parsed.scope.json(),
+            .budgetTokens = parsed.budget_tokens,
+            .needs = parsed.needs.items,
+            .options = .{
                 .includeEvidence = parsed.include_evidence,
                 .includeDebug = parsed.include_debug,
                 .logTrace = parsed.include_debug,
@@ -829,6 +1049,33 @@ fn parseRememberArgs(args: []const [:0]const u8) !RememberCliArgs {
 
 fn parseRetrieveArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !RetrieveCliArgs {
     var parsed = RetrieveCliArgs{ .needs = std.ArrayList([]const u8).empty };
+    errdefer parsed.deinit(allocator);
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--query")) {
+            parsed.query = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--mode")) {
+            parsed.mode = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--budget-tokens")) {
+            parsed.budget_tokens = try std.fmt.parseInt(i64, try nextArg(args, &index), 10);
+        } else if (std.mem.eql(u8, arg, "--need")) {
+            try parsed.needs.append(allocator, try nextArg(args, &index));
+        } else if (std.mem.eql(u8, arg, "--debug")) {
+            parsed.include_debug = true;
+        } else if (std.mem.eql(u8, arg, "--no-evidence")) {
+            parsed.include_evidence = false;
+        } else if (try parseScopeArg(arg, args, &index, &parsed.scope)) {
+            continue;
+        } else {
+            return error.InvalidArgs;
+        }
+    }
+    return parsed;
+}
+
+fn parseAnswerArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !AnswerCliArgs {
+    var parsed = AnswerCliArgs{ .needs = std.ArrayList([]const u8).empty };
     errdefer parsed.deinit(allocator);
     var index: usize = 0;
     while (index < args.len) : (index += 1) {

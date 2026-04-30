@@ -23,6 +23,7 @@ export type QuipuMethod =
   | "system.health"
   | "memory.remember"
   | "memory.retrieve"
+  | "memory.answer"
   | "memory.search"
   | "memory.inspect"
   | "memory.forget"
@@ -71,6 +72,7 @@ export type RememberRequest = {
 export type RetrieveRequest = {
   query: string;
   task?: string;
+  mode?: "fts" | "vector" | "hybrid" | "graph";
   scope?: QuipuScope;
   budgetTokens?: number;
   needs?: string[];
@@ -83,10 +85,13 @@ export type RetrieveRequest = {
     includeEvidence?: boolean;
     includeDebug?: boolean;
     logTrace?: boolean;
+    logRetrieval?: boolean;
     abstainIfWeak?: boolean;
     format?: "prompt" | "json";
   };
 };
+
+export type AnswerRequest = RetrieveRequest;
 
 const ERROR_CODES = new Set([
   "invalid_request",
@@ -110,6 +115,7 @@ export const SUPPORTED_METHODS: QuipuMethod[] = [
   "system.health",
   "memory.remember",
   "memory.retrieve",
+  "memory.answer",
   "memory.search",
   "memory.inspect",
   "memory.forget",
@@ -261,9 +267,12 @@ function validateRemember(params: Record<string, unknown>): void {
 }
 
 function validateRetrieve(params: Record<string, unknown>): void {
-  rejectExtra(params, new Set(["query", "task", "scope", "budgetTokens", "needs", "time", "options"]), "memory.retrieve params");
+  rejectExtra(params, new Set(["query", "task", "mode", "scope", "budgetTokens", "needs", "time", "options"]), "memory.retrieve params");
   requireNonEmptyString(params.query, "query");
   optionalString(params, "task", "memory.retrieve params");
+  if ("mode" in params && !["fts", "vector", "hybrid", "graph"].includes(String(params.mode))) {
+    throw new QuipuProtocolError("mode is invalid");
+  }
   if ("scope" in params) validateScope(params.scope);
   if ("budgetTokens" in params) {
     const budget = params.budgetTokens;
@@ -287,10 +296,52 @@ function validateRetrieve(params: Record<string, unknown>): void {
     assertObject(params.options, "options");
     rejectExtra(
       params.options,
-      new Set(["includeEvidence", "includeDebug", "logTrace", "abstainIfWeak", "format"]),
+      new Set(["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format"]),
       "options",
     );
-    for (const key of ["includeEvidence", "includeDebug", "logTrace", "abstainIfWeak"]) {
+    for (const key of ["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak"]) {
+      optionalBoolean(params.options, key, "options");
+    }
+    if ("format" in params.options && !["prompt", "json"].includes(String(params.options.format))) {
+      throw new QuipuProtocolError("options.format is invalid");
+    }
+  }
+}
+
+function validateAnswer(params: Record<string, unknown>): void {
+  rejectExtra(params, new Set(["query", "task", "mode", "scope", "budgetTokens", "needs", "time", "options"]), "memory.answer params");
+  requireNonEmptyString(params.query, "query");
+  optionalString(params, "task", "memory.answer params");
+  if ("mode" in params && !["fts", "vector", "hybrid", "graph"].includes(String(params.mode))) {
+    throw new QuipuProtocolError("mode is invalid");
+  }
+  if ("scope" in params) validateScope(params.scope);
+  if ("budgetTokens" in params) {
+    const budget = params.budgetTokens;
+    if (!Number.isInteger(budget) || Number(budget) < 1) {
+      throw new QuipuProtocolError("budgetTokens must be a positive integer");
+    }
+  }
+  if ("needs" in params) {
+    if (!Array.isArray(params.needs) || params.needs.some((need) => !NEEDS.has(String(need)))) {
+      throw new QuipuProtocolError("needs contains an unsupported value");
+    }
+  }
+  if ("time" in params) {
+    assertObject(params.time, "time");
+    rejectExtra(params.time, new Set(["validAt", "eventWindowStart", "eventWindowEnd"]), "time");
+    optionalString(params.time, "validAt", "time");
+    optionalString(params.time, "eventWindowStart", "time");
+    optionalString(params.time, "eventWindowEnd", "time");
+  }
+  if ("options" in params) {
+    assertObject(params.options, "options");
+    rejectExtra(
+      params.options,
+      new Set(["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format"]),
+      "options",
+    );
+    for (const key of ["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak"]) {
       optionalBoolean(params.options, key, "options");
     }
     if ("format" in params.options && !["prompt", "json"].includes(String(params.options.format))) {
@@ -396,6 +447,7 @@ const VALIDATORS: Record<QuipuMethod, (params: Record<string, unknown>) => void>
   "system.health": validateSystemHealth,
   "memory.remember": validateRemember,
   "memory.retrieve": validateRetrieve,
+  "memory.answer": validateAnswer,
   "memory.search": validateSearch,
   "memory.inspect": validateInspect,
   "memory.forget": validateForget,
@@ -594,6 +646,10 @@ export class Quipu {
 
   retrieve(request: RetrieveRequest): Promise<JsonObject> {
     return this.call("memory.retrieve", request as Record<string, unknown>);
+  }
+
+  answer(request: AnswerRequest): Promise<JsonObject> {
+    return this.call("memory.answer", request as Record<string, unknown>);
   }
 
   search(request: Record<string, unknown>): Promise<JsonObject> {
