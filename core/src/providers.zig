@@ -295,7 +295,7 @@ fn deterministicEntities(allocator: std.mem.Allocator, text: []const u8) !Entity
             try list.append(name, "other", &.{});
         }
         index = phrase_end;
-        if (list.items.items.len >= 24) break;
+        if (list.items.items.len >= 3) break;
     }
 
     return list;

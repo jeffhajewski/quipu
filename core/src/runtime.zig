@@ -156,6 +156,7 @@ pub const EntityJobRunResult = struct {
     leasedCount: usize,
     succeededCount: usize,
     failedCount: usize,
+    lastError: ?[]const u8 = null,
 };
 
 const CachedRawMessage = struct {
@@ -1447,18 +1448,19 @@ pub const Runtime = struct {
     ) ![]u8 {
         const episode_qid = try hashQid(allocator, "ep", turn_qid);
         errdefer allocator.free(episode_qid);
+        const episode_summary = if (summary.len > 1024) summary[0..1024] else summary;
         const props = try stringifyAlloc(allocator, .{
             .kind = "episode",
             .qtype = "episode",
             .episodeType = "conversation",
             .sessionQid = session_qid,
             .turnQid = turn_qid,
-            .summary = summary,
-            .text = summary,
+            .summary = episode_summary,
+            .text = episode_summary,
             .eventTime = created_at,
             .state = "current",
             .evidenceQid = if (message_qids.len > 0) message_qids[0] else null,
-            .quote = summary,
+            .quote = episode_summary,
             .tenantId = scope.tenant_id,
             .userId = scope.user_id,
             .agentId = scope.agent_id,
@@ -2004,9 +2006,13 @@ pub const Runtime = struct {
 
         var succeeded: usize = 0;
         var failed: usize = 0;
+        var last_error: ?[]const u8 = null;
         for (leases) |lease| {
-            self.processEntityResolveLease(allocator, lease) catch {
-                _ = jobs.failJob(allocator, self.store, lease.qid, "{\"error\":\"entity_resolve_failed\"}", 0) catch {};
+            self.processEntityResolveLease(allocator, lease) catch |err| {
+                last_error = @errorName(err);
+                const error_json = try std.fmt.allocPrint(allocator, "{{\"error\":\"{s}\"}}", .{@errorName(err)});
+                defer allocator.free(error_json);
+                _ = jobs.failJob(allocator, self.store, lease.qid, error_json, 0) catch {};
                 failed += 1;
                 continue;
             };
@@ -2019,21 +2025,16 @@ pub const Runtime = struct {
             .leasedCount = leases.len,
             .succeededCount = succeeded,
             .failedCount = failed,
+            .lastError = last_error,
         };
     }
 
     fn processEntityResolveLease(self: *Runtime, allocator: std.mem.Allocator, lease: jobs.LeaseResult) !void {
         if (self.options.entity_provider.kind == .none) return error.ProviderUnavailable;
-        const entries = try self.store.readStream(
-            allocator,
-            lease.stream,
-            if (lease.sequence > 0) lease.sequence - 1 else 0,
-            1,
-        );
-        defer freeStreamEntries(allocator, entries);
-        if (entries.len == 0 or entries[0].sequence != lease.sequence) return error.NotFound;
+        const payload_json = try self.payloadJsonForLease(allocator, lease);
+        defer allocator.free(payload_json);
 
-        var parsed = try std.json.parseFromSlice(Value, allocator, entries[0].payload_json, .{});
+        var parsed = try std.json.parseFromSlice(Value, allocator, payload_json, .{});
         defer parsed.deinit();
         const payload = switch (parsed.value) {
             .object => |object| object,
@@ -2055,6 +2056,24 @@ pub const Runtime = struct {
         }
     }
 
+    fn payloadJsonForLease(self: *Runtime, allocator: std.mem.Allocator, lease: jobs.LeaseResult) ![]u8 {
+        if (try self.store.getNode(allocator, lease.qid)) |job_node| {
+            defer self.store.freeNode(allocator, job_node);
+            if (try readOptionalPropertyString(allocator, job_node.properties_json, "payloadJson")) |payload_json| {
+                return payload_json;
+            }
+        }
+        const entries = try self.store.readStream(
+            allocator,
+            lease.stream,
+            if (lease.sequence > 0) lease.sequence - 1 else 0,
+            1,
+        );
+        defer freeStreamEntries(allocator, entries);
+        if (entries.len == 0 or entries[0].sequence != lease.sequence) return error.NotFound;
+        return allocator.dupe(u8, entries[0].payload_json);
+    }
+
     fn writeEntityMentions(self: *Runtime, allocator: std.mem.Allocator, scope: Scope, source_qid: []const u8, entities: []const providers.ResolvedEntity) !void {
         for (entities) |entity| {
             const entity_qid = try entityQid(allocator, scope, entity);
@@ -2073,9 +2092,12 @@ pub const Runtime = struct {
                 .deleted = false,
             });
             defer allocator.free(props);
-            try self.store.putNode(.{ .qid = entity_qid, .label = "Entity", .properties_json = props });
+            if (try self.store.getNode(allocator, entity_qid)) |existing| {
+                self.store.freeNode(allocator, existing);
+            } else {
+                try self.store.putNode(.{ .qid = entity_qid, .label = "Entity", .properties_json = props });
+            }
             try self.putDeterministicEdge(allocator, source_qid, entity_qid, "MENTIONS");
-            try self.putDeterministicEdge(allocator, entity_qid, source_qid, "MENTIONED_IN");
         }
     }
 };

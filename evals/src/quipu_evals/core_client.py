@@ -9,9 +9,10 @@ from typing import Any, Mapping, Optional, Sequence
 class CoreStdioClient:
     """Small NDJSON client for `quipu serve-stdio` integration tests."""
 
-    def __init__(self, binary: Path, extra_args: Sequence[str] = ()) -> None:
+    def __init__(self, binary: Path, extra_args: Sequence[str] = (), env: Mapping[str, str] | None = None) -> None:
         self.binary = binary
         self.extra_args = list(extra_args)
+        self.env = dict(env) if env is not None else None
         self.process: Optional[subprocess.Popen[str]] = None
         self.next_id = 1
 
@@ -21,6 +22,7 @@ class CoreStdioClient:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=self.env,
             text=True,
             bufsize=1,
         )

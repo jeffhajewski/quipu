@@ -47,6 +47,18 @@ def collect_benchmarks(
     include_provider_baselines: bool = False,
     provider_options: Mapping[str, Any] | None = None,
     core_retrieval_mode: str | None = None,
+    core_answer_method: str = "retrieve",
+    core_answer_provider: str | None = None,
+    core_answer_model: str | None = None,
+    core_answer_url: str | None = None,
+    core_entity_provider: str | None = None,
+    core_entity_model: str | None = None,
+    core_entity_url: str | None = None,
+    core_embedding_provider: str | None = None,
+    core_embedding_model: str | None = None,
+    core_embedding_url: str | None = None,
+    core_vector_dimensions: int | None = None,
+    core_page_size: int | None = None,
     reuse_existing: bool = False,
 ) -> dict[str, Any]:
     suite_path = Path(suite_path)
@@ -193,7 +205,20 @@ def collect_benchmarks(
         runs.append(
             run_case(
                 "core_in_memory",
-                lambda: run_core_suite(suite_path, storage="memory", retrieval_mode=core_retrieval_mode),
+                lambda: run_core_suite(
+                    suite_path,
+                    storage="memory",
+                    retrieval_mode=core_retrieval_mode,
+                    answer_method=core_answer_method,
+                    answer_provider=core_answer_provider,
+                    answer_model=core_answer_model,
+                    answer_url=core_answer_url,
+                    embedding_provider=core_embedding_provider,
+                    embedding_model=core_embedding_model,
+                    embedding_url=core_embedding_url,
+                    vector_dimensions=core_vector_dimensions,
+                    page_size=core_page_size,
+                ),
                 suite_path=suite_path,
                 output_dir=output_dir,
                 generated_at=generated_at,
@@ -205,7 +230,24 @@ def collect_benchmarks(
                     "resultClass": result_class,
                     "externalBenchmark": external_benchmark,
                     "retrievalMode": core_retrieval_mode,
+                    "answerMethod": core_answer_method,
+                    "answerProvider": core_answer_provider,
+                    "answerModel": core_answer_model,
+                    "entityProvider": None,
+                    "entityProviderNote": "async entity resolution requires persistent core storage",
+                    "embeddingProvider": core_embedding_provider,
+                    "embeddingModel": core_embedding_model,
+                    "vectorDimensions": core_vector_dimensions,
+                    "pageSize": core_page_size,
                 },
+                providers=core_provider_names(
+                    answer_provider=core_answer_provider,
+                    answer_model=core_answer_model,
+                    entity_provider=None,
+                    entity_model=None,
+                    embedding_provider=core_embedding_provider,
+                    embedding_model=core_embedding_model,
+                ),
                 seed=seed,
                 verification_status=verification_status,
                 reuse_existing=reuse_existing,
@@ -228,6 +270,18 @@ def collect_benchmarks(
                         scenario_artifact_dir=output_dir / "core_lattice-scenarios",
                         reuse_existing=reuse_existing,
                         retrieval_mode=core_retrieval_mode,
+                        answer_method=core_answer_method,
+                        answer_provider=core_answer_provider,
+                        answer_model=core_answer_model,
+                        answer_url=core_answer_url,
+                        entity_provider=core_entity_provider,
+                        entity_model=core_entity_model,
+                        entity_url=core_entity_url,
+                        embedding_provider=core_embedding_provider,
+                        embedding_model=core_embedding_model,
+                        embedding_url=core_embedding_url,
+                        vector_dimensions=core_vector_dimensions,
+                        page_size=core_page_size,
                     ),
                     suite_path=suite_path,
                     output_dir=output_dir,
@@ -242,12 +296,29 @@ def collect_benchmarks(
                         "latticeInclude": lattice_include,
                         "latticeLib": lattice_lib,
                         "retrievalMode": core_retrieval_mode,
+                        "answerMethod": core_answer_method,
+                        "answerProvider": core_answer_provider,
+                        "answerModel": core_answer_model,
+                        "entityProvider": core_entity_provider,
+                        "entityModel": core_entity_model,
+                        "embeddingProvider": core_embedding_provider,
+                        "embeddingModel": core_embedding_model,
+                        "vectorDimensions": core_vector_dimensions,
+                        "pageSize": core_page_size,
                     },
                     lattice_version=lattice_version(lattice_include, lattice_lib),
                     seed=seed,
                     verification_status=verification_status,
                     reuse_existing=reuse_existing,
                     core_reuse_existing=reuse_existing,
+                    providers=core_provider_names(
+                        answer_provider=core_answer_provider,
+                        answer_model=core_answer_model,
+                        entity_provider=core_entity_provider,
+                        entity_model=core_entity_model,
+                        embedding_provider=core_embedding_provider,
+                        embedding_model=core_embedding_model,
+                    ),
                 )
             )
     elif include_lattice and not core_available:
@@ -298,6 +369,33 @@ def ablation_summaries(runs: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return summaries
+
+
+def core_provider_names(
+    *,
+    answer_provider: str | None = None,
+    answer_model: str | None = None,
+    entity_provider: str | None = None,
+    entity_model: str | None = None,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
+) -> dict[str, str]:
+    return {
+        "extractor": "deterministic_fixture",
+        "embedder": provider_label(embedding_provider, embedding_model, default="deterministic_fixture"),
+        "reranker": "none",
+        "answer": provider_label(answer_provider, answer_model, default="deterministic_prompt_match"),
+        "judge": "rule_based",
+        "entityResolver": provider_label(entity_provider, entity_model, default="none"),
+    }
+
+
+def provider_label(provider: str | None, model: str | None, *, default: str) -> str:
+    if not provider:
+        return default
+    if model:
+        return f"{provider}:{model}"
+    return provider
 
 
 def prepare_suite(
@@ -726,6 +824,18 @@ def main() -> int:
     parser.add_argument("--include-ablations", action="store_true")
     parser.add_argument("--include-provider-baselines", action="store_true")
     parser.add_argument("--core-retrieval-mode", choices=["fts", "vector", "hybrid", "graph"], default=os.environ.get("QUIPU_CORE_RETRIEVAL_MODE"))
+    parser.add_argument("--core-answer-method", choices=["retrieve", "answer"], default=os.environ.get("QUIPU_CORE_ANSWER_METHOD", "retrieve"))
+    parser.add_argument("--core-answer-provider", choices=["deterministic", "openrouter"], default=os.environ.get("QUIPU_ANSWER_PROVIDER"))
+    parser.add_argument("--core-answer-model", default=os.environ.get("QUIPU_ANSWER_MODEL") or os.environ.get("OPENROUTER_ANSWER_MODEL"))
+    parser.add_argument("--core-answer-url", default=os.environ.get("QUIPU_ANSWER_URL") or os.environ.get("OPENROUTER_ANSWER_URL"))
+    parser.add_argument("--core-entity-provider", choices=["deterministic", "openrouter"], default=os.environ.get("QUIPU_ENTITY_PROVIDER"))
+    parser.add_argument("--core-entity-model", default=os.environ.get("QUIPU_ENTITY_MODEL") or os.environ.get("OPENROUTER_ENTITY_MODEL"))
+    parser.add_argument("--core-entity-url", default=os.environ.get("QUIPU_ENTITY_URL") or os.environ.get("OPENROUTER_ENTITY_URL"))
+    parser.add_argument("--core-embedding-provider", choices=["hash", "openrouter"], default=os.environ.get("QUIPU_EMBEDDING_PROVIDER"))
+    parser.add_argument("--core-embedding-model", default=os.environ.get("QUIPU_EMBEDDING_MODEL") or os.environ.get("OPENROUTER_EMBEDDING_MODEL"))
+    parser.add_argument("--core-embedding-url", default=os.environ.get("QUIPU_EMBEDDING_URL") or os.environ.get("OPENROUTER_EMBEDDING_URL"))
+    parser.add_argument("--core-vector-dimensions", type=int, default=int(os.environ["QUIPU_VECTOR_DIMENSIONS"]) if os.environ.get("QUIPU_VECTOR_DIMENSIONS") else None)
+    parser.add_argument("--core-page-size", type=int, default=int(os.environ["QUIPU_LATTICE_PAGE_SIZE"]) if os.environ.get("QUIPU_LATTICE_PAGE_SIZE") else None)
     parser.add_argument(
         "--provider-embedding-cache",
         type=Path,
@@ -776,6 +886,18 @@ def main() -> int:
         include_provider_baselines=args.include_provider_baselines,
         provider_options={"embedding_cache": args.provider_embedding_cache},
         core_retrieval_mode=args.core_retrieval_mode,
+        core_answer_method=args.core_answer_method,
+        core_answer_provider=args.core_answer_provider,
+        core_answer_model=args.core_answer_model,
+        core_answer_url=args.core_answer_url,
+        core_entity_provider=args.core_entity_provider,
+        core_entity_model=args.core_entity_model,
+        core_entity_url=args.core_entity_url,
+        core_embedding_provider=args.core_embedding_provider,
+        core_embedding_model=args.core_embedding_model,
+        core_embedding_url=args.core_embedding_url,
+        core_vector_dimensions=args.core_vector_dimensions,
+        core_page_size=args.core_page_size,
         reuse_existing=args.reuse_existing,
         locomo_options={
             "max_conversations": args.locomo_max_conversations,

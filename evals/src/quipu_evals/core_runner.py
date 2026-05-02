@@ -119,6 +119,18 @@ def run_core_suite(
     log_retrieval: bool = True,
     extract: bool = True,
     retrieval_mode: str | None = None,
+    answer_method: str = "retrieve",
+    answer_provider: str | None = None,
+    answer_model: str | None = None,
+    answer_url: str | None = None,
+    entity_provider: str | None = None,
+    entity_model: str | None = None,
+    entity_url: str | None = None,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
+    embedding_url: str | None = None,
+    vector_dimensions: int | None = None,
+    page_size: int | None = None,
 ) -> CoreSuiteRun:
     ensure_core_binary(storage=storage, lattice_include=lattice_include, lattice_lib=lattice_lib)
     suite = load_suite(path)
@@ -150,6 +162,18 @@ def run_core_suite(
             log_retrieval=log_retrieval,
             extract=extract,
             retrieval_mode=retrieval_mode,
+            answer_method=answer_method,
+            answer_provider=answer_provider,
+            answer_model=answer_model,
+            answer_url=answer_url,
+            entity_provider=entity_provider,
+            entity_model=entity_model,
+            entity_url=entity_url,
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
+            embedding_url=embedding_url,
+            vector_dimensions=vector_dimensions,
+            page_size=page_size,
         )
         query_runs.extend(scenario_query_runs)
         forget_runs.extend(scenario_forget_runs)
@@ -174,68 +198,190 @@ def run_core_scenario(
     log_retrieval: bool = True,
     extract: bool = True,
     retrieval_mode: str | None = None,
+    answer_method: str = "retrieve",
+    answer_provider: str | None = None,
+    answer_model: str | None = None,
+    answer_url: str | None = None,
+    entity_provider: str | None = None,
+    entity_model: str | None = None,
+    entity_url: str | None = None,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
+    embedding_url: str | None = None,
+    vector_dimensions: int | None = None,
+    page_size: int | None = None,
 ) -> tuple[list[CoreQueryRun], list[CoreForgetRun], Mapping[str, Any] | None]:
-    extra_args = ["--db", str(db_path)] if db_path is not None else []
+    if answer_method not in {"retrieve", "answer"}:
+        raise ValueError("answer_method must be 'retrieve' or 'answer'")
+    if entity_provider is not None and db_path is None:
+        raise ValueError("entity_provider requires persistent core storage")
+
+    extra_args = core_process_args(
+        db_path=db_path,
+        answer_provider=answer_provider,
+        answer_model=answer_model,
+        answer_url=answer_url,
+        entity_provider=entity_provider,
+        entity_model=entity_model,
+        entity_url=entity_url,
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
+        embedding_url=embedding_url,
+        vector_dimensions=vector_dimensions,
+        page_size=page_size,
+    )
+    event_to_message_qids: dict[str, list[str]] = {}
+    query_runs: list[CoreQueryRun] | None = None
+    forget_runs: list[CoreForgetRun] | None = None
     with CoreStdioClient(CORE_BINARY, extra_args=extra_args) as client:
-        event_to_message_qids: dict[str, list[str]] = {}
         for event in sorted(scenario.events, key=lambda item: item.time):
             remembered = remember_event(client, event, extract=extract)
             event_to_message_qids[event.event_id] = list(remembered["messageQids"])
 
-        query_runs = [
-            run_query(
+        if entity_provider is None:
+            query_runs, forget_runs = run_core_queries_and_forgets(
                 client,
-                scenario.scenario_id,
-                query,
+                scenario,
                 event_to_message_qids,
                 retrieval_needs=retrieval_needs,
                 log_retrieval=log_retrieval,
                 retrieval_mode=retrieval_mode,
-            )
-            for query in scenario.queries
-        ]
-
-        forget_runs = []
-        for op in scenario.forget_ops:
-            qids = []
-            for event_id in op.selector.get("eventIds", []):
-                qids.extend(event_to_message_qids.get(event_id, []))
-            result = client.call(
-                "memory.forget",
-                {
-                    "mode": op.mode,
-                    "selector": {"qids": qids},
-                    "dryRun": False,
-                    "reason": "eval",
-                },
-            )
-            visible_texts = []
-            for text in op.expected_not_retrievable_text:
-                params: dict[str, Any] = {"query": text, "scope": {}}
-                if retrieval_mode is not None:
-                    params["mode"] = retrieval_mode
-                retrieved = client.call("memory.retrieve", params)
-                visible_texts.append(str(retrieved["prompt"]))
-            grade = grade_deletion_leakage(visible_texts, op.expected_not_retrievable_text)
-            forget_runs.append(
-                CoreForgetRun(
-                    scenario_id=scenario.scenario_id,
-                    forget_id=op.forget_id,
-                    deleted_roots=int(result["nodesDeleted"]),
-                    invalidated_facts=int(result["factsInvalidated"]),
-                    grade=grade,
-                )
+                answer_method=answer_method,
             )
 
-    verification = verify_db(db_path, scenario.scenario_id) if db_path is not None and not skip_verification else None
+    if entity_provider is None:
+        verification = verify_db(db_path, scenario.scenario_id, extra_args=extra_args) if db_path is not None and not skip_verification else None
+        return query_runs or [], forget_runs or [], verification
+
+    if db_path is not None:
+        run_entity_resolve_jobs(
+            db_path,
+            answer_provider=answer_provider,
+            answer_model=answer_model,
+            answer_url=answer_url,
+            entity_provider=entity_provider,
+            entity_model=entity_model,
+            entity_url=entity_url,
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
+            embedding_url=embedding_url,
+            vector_dimensions=vector_dimensions,
+            page_size=page_size,
+        )
+
+    with CoreStdioClient(CORE_BINARY, extra_args=extra_args) as client:
+        query_runs, forget_runs = run_core_queries_and_forgets(
+            client,
+            scenario,
+            event_to_message_qids,
+            retrieval_needs=retrieval_needs,
+            log_retrieval=log_retrieval,
+            retrieval_mode=retrieval_mode,
+            answer_method=answer_method,
+        )
+
+    verification = verify_db(db_path, scenario.scenario_id, extra_args=extra_args) if db_path is not None and not skip_verification else None
     return query_runs, forget_runs, verification
 
 
-def verify_db(db_path: Path, scenario_id: str) -> Mapping[str, Any]:
+def core_process_args(
+    *,
+    db_path: Path | None = None,
+    answer_provider: str | None = None,
+    answer_model: str | None = None,
+    answer_url: str | None = None,
+    entity_provider: str | None = None,
+    entity_model: str | None = None,
+    entity_url: str | None = None,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
+    embedding_url: str | None = None,
+    vector_dimensions: int | None = None,
+    page_size: int | None = None,
+) -> list[str]:
+    args: list[str] = []
+    if db_path is not None:
+        args.extend(["--db", str(db_path)])
+    if vector_dimensions is not None:
+        args.extend(["--vector-dimensions", str(vector_dimensions)])
+    if page_size is not None:
+        args.extend(["--page-size", str(page_size)])
+    if embedding_provider is not None:
+        args.extend(["--embedding-provider", embedding_provider])
+    if embedding_url is not None:
+        args.extend(["--embedding-url", embedding_url])
+    if embedding_model is not None:
+        args.extend(["--embedding-model", embedding_model])
+    if answer_provider is not None:
+        args.extend(["--answer-provider", answer_provider])
+    if answer_url is not None:
+        args.extend(["--answer-url", answer_url])
+    if answer_model is not None:
+        args.extend(["--answer-model", answer_model])
+    if entity_provider is not None:
+        args.extend(["--entity-provider", entity_provider])
+    if entity_url is not None:
+        args.extend(["--entity-url", entity_url])
+    if entity_model is not None:
+        args.extend(["--entity-model", entity_model])
+    return args
+
+
+def run_entity_resolve_jobs(
+    db_path: Path,
+    *,
+    answer_provider: str | None = None,
+    answer_model: str | None = None,
+    answer_url: str | None = None,
+    entity_provider: str | None = None,
+    entity_model: str | None = None,
+    entity_url: str | None = None,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
+    embedding_url: str | None = None,
+    vector_dimensions: int | None = None,
+    page_size: int | None = None,
+    limit: int = 100_000,
+) -> Mapping[str, Any]:
+    extra_args = core_process_args(
+        db_path=db_path,
+        answer_provider=answer_provider,
+        answer_model=answer_model,
+        answer_url=answer_url,
+        entity_provider=entity_provider,
+        entity_model=entity_model,
+        entity_url=entity_url,
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
+        embedding_url=embedding_url,
+        vector_dimensions=vector_dimensions,
+        page_size=page_size,
+    )
     completed = subprocess.run(
-        [str(CORE_BINARY), "--db", str(db_path), "verify", "all"],
+        [str(CORE_BINARY), *extra_args, "jobs", "run", "entity-resolve", "--limit", str(limit)],
         cwd=str(ROOT),
         check=False,
+        env=core_command_env(skip_lattice_close=True),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"entity resolver job failed: {completed.stderr.strip()}") from exc
+    if completed.returncode != 0 or payload.get("status") != "ok" or int(payload.get("failedCount") or 0) > 0:
+        raise RuntimeError(f"entity resolver job failed: {json.dumps(payload, sort_keys=True)}")
+    return payload
+
+
+def verify_db(db_path: Path, scenario_id: str, *, extra_args: list[str] | None = None) -> Mapping[str, Any]:
+    verify_args = extra_args if extra_args is not None else ["--db", str(db_path)]
+    completed = subprocess.run(
+        [str(CORE_BINARY), *verify_args, "verify", "all"],
+        cwd=str(ROOT),
+        check=False,
+        env=core_command_env(skip_lattice_close=True),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -254,6 +400,13 @@ def verify_db(db_path: Path, scenario_id: str) -> Mapping[str, Any]:
         "exitCode": completed.returncode,
         **payload,
     }
+
+
+def core_command_env(*, skip_lattice_close: bool = False) -> dict[str, str]:
+    env = os.environ.copy()
+    if skip_lattice_close:
+        env["QUIPU_LATTICE_SKIP_CLOSE"] = "1"
+    return env
 
 
 def scenario_artifact_path(directory: Path, scenario_id: str) -> Path:
@@ -333,6 +486,64 @@ def remember_event(client: CoreStdioClient, event: Event, *, extract: bool = Tru
     )
 
 
+def run_core_queries_and_forgets(
+    client: CoreStdioClient,
+    scenario: Scenario,
+    event_to_message_qids: Mapping[str, list[str]],
+    *,
+    retrieval_needs: list[str] | None = None,
+    log_retrieval: bool = True,
+    retrieval_mode: str | None = None,
+    answer_method: str = "retrieve",
+) -> tuple[list[CoreQueryRun], list[CoreForgetRun]]:
+    query_runs = [
+        run_query(
+            client,
+            scenario.scenario_id,
+            query,
+            event_to_message_qids,
+            retrieval_needs=retrieval_needs,
+            log_retrieval=log_retrieval,
+            retrieval_mode=retrieval_mode,
+            answer_method=answer_method,
+        )
+        for query in scenario.queries
+    ]
+
+    forget_runs = []
+    for op in scenario.forget_ops:
+        qids = []
+        for event_id in op.selector.get("eventIds", []):
+            qids.extend(event_to_message_qids.get(event_id, []))
+        result = client.call(
+            "memory.forget",
+            {
+                "mode": op.mode,
+                "selector": {"qids": qids},
+                "dryRun": False,
+                "reason": "eval",
+            },
+        )
+        visible_texts = []
+        for text in op.expected_not_retrievable_text:
+            params: dict[str, Any] = {"query": text, "scope": {}}
+            if retrieval_mode is not None:
+                params["mode"] = retrieval_mode
+            retrieved = client.call("memory.retrieve", params)
+            visible_texts.append(str(retrieved["prompt"]))
+        grade = grade_deletion_leakage(visible_texts, op.expected_not_retrievable_text)
+        forget_runs.append(
+            CoreForgetRun(
+                scenario_id=scenario.scenario_id,
+                forget_id=op.forget_id,
+                deleted_roots=int(result["nodesDeleted"]),
+                invalidated_facts=int(result["factsInvalidated"]),
+                grade=grade,
+            )
+        )
+    return query_runs, forget_runs
+
+
 def run_query(
     client: CoreStdioClient,
     scenario_id: str,
@@ -342,6 +553,7 @@ def run_query(
     retrieval_needs: list[str] | None = None,
     log_retrieval: bool = True,
     retrieval_mode: str | None = None,
+    answer_method: str = "retrieve",
 ) -> CoreQueryRun:
     params = {
         "query": query.query,
@@ -353,12 +565,15 @@ def run_query(
         params["needs"] = retrieval_needs
     if retrieval_mode is not None:
         params["mode"] = retrieval_mode
-    retrieved = client.call(
-        "memory.retrieve",
-        params,
-    )
-    prompt = str(retrieved["prompt"])
-    actual_answer = answer_from_prompt(prompt, query.expected_answer)
+    if answer_method == "answer":
+        retrieved = client.call("memory.answer", params)
+        context = retrieved.get("context")
+        prompt = context_prompt(context)
+        actual_answer = str(retrieved.get("answer") or "")
+    else:
+        retrieved = client.call("memory.retrieve", params)
+        prompt = str(retrieved["prompt"])
+        actual_answer = answer_from_prompt(prompt, query.expected_answer)
     evidence_event_ids = event_ids_from_items(retrieved.get("items", []), event_to_message_qids)
     grades = [
         grade_exact_answer(actual_answer, query.expected_answer),
@@ -375,6 +590,25 @@ def run_query(
         grades=grades,
         trace=retrieved.get("trace") if isinstance(retrieved.get("trace"), Mapping) else None,
     )
+
+
+def context_prompt(context: object) -> str:
+    if not isinstance(context, Mapping):
+        return ""
+    core = context.get("core")
+    if not isinstance(core, Mapping):
+        return ""
+    items = core.get("items")
+    if not isinstance(items, list):
+        return ""
+    lines = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        text = item.get("text")
+        if isinstance(text, str):
+            lines.append(text)
+    return "\n".join(lines)
 
 
 def event_ids_from_items(items: object, event_to_message_qids: Mapping[str, list[str]]) -> list[str]:
@@ -470,7 +704,21 @@ def main() -> int:
     parser.add_argument("--no-retrieval-log", action="store_true", help="Do not write retrieval/audit stream entries during queries")
     parser.add_argument("--no-extract", action="store_true", help="Replay raw messages without synchronous extraction")
     parser.add_argument("--retrieval-mode", choices=["fts", "vector", "hybrid", "graph"], default=os.environ.get("QUIPU_CORE_RETRIEVAL_MODE"))
+    parser.add_argument("--answer-method", choices=["retrieve", "answer"], default=os.environ.get("QUIPU_CORE_ANSWER_METHOD", "retrieve"))
+    parser.add_argument("--answer-provider", choices=["deterministic", "openrouter"], default=os.environ.get("QUIPU_ANSWER_PROVIDER"))
+    parser.add_argument("--answer-model", default=os.environ.get("QUIPU_ANSWER_MODEL") or os.environ.get("OPENROUTER_ANSWER_MODEL"))
+    parser.add_argument("--answer-url", default=os.environ.get("QUIPU_ANSWER_URL") or os.environ.get("OPENROUTER_ANSWER_URL"))
+    parser.add_argument("--entity-provider", choices=["deterministic", "openrouter"], default=os.environ.get("QUIPU_ENTITY_PROVIDER"))
+    parser.add_argument("--entity-model", default=os.environ.get("QUIPU_ENTITY_MODEL") or os.environ.get("OPENROUTER_ENTITY_MODEL"))
+    parser.add_argument("--entity-url", default=os.environ.get("QUIPU_ENTITY_URL") or os.environ.get("OPENROUTER_ENTITY_URL"))
+    parser.add_argument("--embedding-provider", choices=["hash", "openrouter"], default=os.environ.get("QUIPU_EMBEDDING_PROVIDER"))
+    parser.add_argument("--embedding-model", default=os.environ.get("QUIPU_EMBEDDING_MODEL") or os.environ.get("OPENROUTER_EMBEDDING_MODEL"))
+    parser.add_argument("--embedding-url", default=os.environ.get("QUIPU_EMBEDDING_URL") or os.environ.get("OPENROUTER_EMBEDDING_URL"))
+    parser.add_argument("--vector-dimensions", type=int, default=int(os.environ["QUIPU_VECTOR_DIMENSIONS"]) if os.environ.get("QUIPU_VECTOR_DIMENSIONS") else None)
+    parser.add_argument("--page-size", type=int, default=int(os.environ["QUIPU_LATTICE_PAGE_SIZE"]) if os.environ.get("QUIPU_LATTICE_PAGE_SIZE") else None)
     args = parser.parse_args()
+    if args.storage != "lattice" and args.entity_provider:
+        parser.error("--entity-provider requires --storage lattice")
 
     if args.storage == "lattice":
         if args.db_dir is not None:
@@ -485,6 +733,18 @@ def main() -> int:
                 log_retrieval=not args.no_retrieval_log,
                 extract=not args.no_extract,
                 retrieval_mode=args.retrieval_mode,
+                answer_method=args.answer_method,
+                answer_provider=args.answer_provider,
+                answer_model=args.answer_model,
+                answer_url=args.answer_url,
+                entity_provider=args.entity_provider,
+                entity_model=args.entity_model,
+                entity_url=args.entity_url,
+                embedding_provider=args.embedding_provider,
+                embedding_model=args.embedding_model,
+                embedding_url=args.embedding_url,
+                vector_dimensions=args.vector_dimensions,
+                page_size=args.page_size,
             )
         else:
             with tempfile.TemporaryDirectory(prefix="quipu-lattice-eval-") as directory:
@@ -498,10 +758,57 @@ def main() -> int:
                     log_retrieval=not args.no_retrieval_log,
                     extract=not args.no_extract,
                     retrieval_mode=args.retrieval_mode,
+                    answer_method=args.answer_method,
+                    answer_provider=args.answer_provider,
+                    answer_model=args.answer_model,
+                    answer_url=args.answer_url,
+                    entity_provider=args.entity_provider,
+                    entity_model=args.entity_model,
+                    entity_url=args.entity_url,
+                    embedding_provider=args.embedding_provider,
+                    embedding_model=args.embedding_model,
+                    embedding_url=args.embedding_url,
+                    vector_dimensions=args.vector_dimensions,
+                    page_size=args.page_size,
                 )
     else:
-        run = run_core_suite(args.suite, retrieval_mode=args.retrieval_mode)
+        run = run_core_suite(
+            args.suite,
+            retrieval_mode=args.retrieval_mode,
+            answer_method=args.answer_method,
+            answer_provider=args.answer_provider,
+            answer_model=args.answer_model,
+            answer_url=args.answer_url,
+            entity_provider=args.entity_provider,
+            entity_model=args.entity_model,
+            entity_url=args.entity_url,
+            embedding_provider=args.embedding_provider,
+            embedding_model=args.embedding_model,
+            embedding_url=args.embedding_url,
+            vector_dimensions=args.vector_dimensions,
+            page_size=args.page_size,
+        )
     run_json = run.to_json()
+    run_config = {
+        "retrievalMode": args.retrieval_mode,
+        "answerMethod": args.answer_method,
+        "answerProvider": args.answer_provider,
+        "answerModel": args.answer_model,
+        "entityProvider": args.entity_provider,
+        "entityModel": args.entity_model,
+        "embeddingProvider": args.embedding_provider,
+        "embeddingModel": args.embedding_model,
+        "vectorDimensions": args.vector_dimensions,
+        "pageSize": args.page_size,
+    }
+    providers = {
+        "extractor": "deterministic_fixture",
+        "embedder": provider_label(args.embedding_provider, args.embedding_model, default="deterministic_fixture"),
+        "reranker": "none",
+        "answer": provider_label(args.answer_provider, args.answer_model, default="deterministic_prompt_match"),
+        "judge": "rule_based",
+        "entityResolver": provider_label(args.entity_provider, args.entity_model, default="none"),
+    }
     if args.output:
         write_json(args.output, run_json)
     if args.manifest:
@@ -513,10 +820,20 @@ def main() -> int:
                 runner="quipu_evals.core_runner",
                 storage=args.storage,
                 results_path=args.output,
+                config=run_config,
+                providers=providers,
             ),
         )
     print(json.dumps(run_json, indent=2, sort_keys=True))
     return 0 if run.passed or not args.strict else 1
+
+
+def provider_label(provider: str | None, model: str | None, *, default: str) -> str:
+    if not provider:
+        return default
+    if model:
+        return f"{provider}:{model}"
+    return provider
 
 
 if __name__ == "__main__":

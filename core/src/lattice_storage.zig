@@ -28,6 +28,7 @@ pub const Options = struct {
     embedding_model: []const u8 = default_embedding_model,
     embedding_api_key: ?[]const u8 = null,
     embedding_request_dimensions: bool = false,
+    skip_close: bool = false,
 };
 
 const NodeIndex = struct {
@@ -65,6 +66,7 @@ pub const LatticeAdapter = struct {
     embedding_model: [:0]u8,
     embedding_api_key: ?[:0]u8,
     embedding_request_dimensions: bool,
+    skip_close: bool,
     next_tx_id: u64 = 1,
     next_sequence: u64 = 1,
     next_runtime_id: u64 = 1,
@@ -110,6 +112,7 @@ pub const LatticeAdapter = struct {
             .embedding_model = owned_embedding_model,
             .embedding_api_key = owned_embedding_api_key,
             .embedding_request_dimensions = options.embedding_request_dimensions,
+            .skip_close = options.skip_close,
         };
         owned_path_transferred = true;
         owned_embedding_url_transferred = true;
@@ -128,8 +131,12 @@ pub const LatticeAdapter = struct {
         }
         self.qid_to_node.deinit();
         if (self.db) |db| {
-            _ = c.lattice_close(db);
-            self.db = null;
+            if (self.skip_close) {
+                self.db = null;
+            } else {
+                _ = c.lattice_close(db);
+                self.db = null;
+            }
         }
         self.allocator.free(self.path);
         self.allocator.free(self.embedding_url);
@@ -206,7 +213,8 @@ pub const LatticeAdapter = struct {
         const tx = try self.beginWrite();
         errdefer self.rollbackQuiet(tx);
 
-        const node_id = if (self.qid_to_node.get(node.qid)) |entry|
+        const existing = self.qid_to_node.get(node.qid);
+        const node_id = if (existing) |entry|
             entry.node_id
         else blk: {
             const label_z = try self.allocator.dupeZ(u8, node.label);
@@ -221,10 +229,13 @@ pub const LatticeAdapter = struct {
         try self.setStringProperty(tx, node_id, "propertiesJson", node.properties_json);
         try self.setStringProperty(tx, node_id, "recordKind", "node");
 
-        const searchable_properties = if (isInternalLabel(node.label)) "" else node.properties_json;
-        const index_text = try self.indexText(self.allocator, node_marker, node.qid, node.label, searchable_properties);
-        defer self.allocator.free(index_text);
-        try check(c.lattice_fts_index(tx, @intCast(node_id), index_text.ptr, index_text.len));
+        if (existing == null or !isInternalLabel(node.label)) {
+            const raw_searchable_properties = if (isInternalLabel(node.label) or std.mem.eql(u8, node.label, "Episode")) "" else node.properties_json;
+            const searchable_properties = if (raw_searchable_properties.len > 2048) raw_searchable_properties[0..2048] else raw_searchable_properties;
+            const index_text = try self.indexText(self.allocator, node_marker, node.qid, node.label, searchable_properties);
+            defer self.allocator.free(index_text);
+            try check(c.lattice_fts_index(tx, @intCast(node_id), index_text.ptr, index_text.len));
+        }
         if (isVectorIndexedLabel(node.label)) {
             const vector_text = try embeddingText(self.allocator, node.label, node.properties_json);
             defer self.allocator.free(vector_text);
@@ -260,17 +271,6 @@ pub const LatticeAdapter = struct {
         const self = ctx(context);
         const tx = try self.beginWrite();
         errdefer self.rollbackQuiet(tx);
-
-        const from = self.qid_to_node.get(edge.from_qid);
-        const to = self.qid_to_node.get(edge.to_qid);
-        if (from != null and to != null) {
-            const edge_type_z = try self.allocator.dupeZ(u8, edge.edge_type);
-            defer self.allocator.free(edge_type_z);
-            var edge_id: c.lattice_edge_id = 0;
-            try check(c.lattice_edge_create(tx, @intCast(from.?.node_id), @intCast(to.?.node_id), edge_type_z.ptr, &edge_id));
-            try self.setEdgeStringProperty(tx, @intCast(edge_id), "qid", edge.qid);
-            try self.setEdgeStringProperty(tx, @intCast(edge_id), "propertiesJson", edge.properties_json);
-        }
 
         try self.createEdgeRecord(tx, edge);
         try check(c.lattice_commit(tx));
@@ -1117,12 +1117,10 @@ fn isInternalLabel(label: []const u8) bool {
 
 fn isVectorIndexedLabel(label: []const u8) bool {
     return std.mem.eql(u8, label, "Message") or
-        std.mem.eql(u8, label, "Episode") or
         std.mem.eql(u8, label, "MemoryCard") or
         std.mem.eql(u8, label, "Fact") or
         std.mem.eql(u8, label, "Preference") or
         std.mem.eql(u8, label, "Procedure") or
-        std.mem.eql(u8, label, "Entity") or
         std.mem.eql(u8, label, "Core");
 }
 

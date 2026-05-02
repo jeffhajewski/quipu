@@ -120,6 +120,11 @@ Current external benchmark status:
   vector RAG exact 25.28%, evidence recall 57.90%; hybrid BM25/vector exact
   26.64%, evidence recall 58.07%, with reports under
   `artifacts/benchmarks/locomo-full-openrouter-semantic/`.
+- Lattice graph retrieval with deterministic entity resolution is wired through
+  the benchmark harness and passes the LoCoMo graph smoke with verification and
+  trace artifacts under `artifacts/benchmarks/locomo-graph-smoke/`. The full
+  LoCoMo graph+ER run is blocked on LatticeDB `0.6.0` `LatticeIo`/close issues
+  with large-message writes, stream rereads, and dense edge materialization.
 - Local BM25 on the same normalized suite: exact 24.12%, evidence recall
   50.42%. Full context remains the local upper bound at exact 42.80% and
   evidence recall 99.70%.
@@ -360,7 +365,9 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --include-ablations \
   --include-lattice \
   --require-lattice \
-  --core-retrieval-mode hybrid \
+  --skip-core \
+  --core-retrieval-mode graph \
+  --core-entity-provider deterministic \
   --allow-failures \
   --markdown artifacts/benchmarks/locomo-full/report.md
 PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
@@ -368,6 +375,7 @@ PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
   --output artifacts/evals/core-results.json \
   --manifest artifacts/evals/core-manifest.json
 just benchmark-locomo-smoke
+just benchmark-locomo-graph-smoke
 just benchmark-locomo-full /path/to/locomo10.json
 just benchmark-locomo-download
 ```

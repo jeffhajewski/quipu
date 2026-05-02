@@ -331,6 +331,7 @@ fn latticeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, c
         .embedding_api_key = embedding_api_key,
         .embedding_request_dimensions = provider == .openai_compatible and
             (isProviderName(provider_name, "openrouter") or isProviderName(provider_name, "openai")),
+        .skip_close = envBool(environ_map, "QUIPU_LATTICE_SKIP_CLOSE"),
     };
 }
 
@@ -424,6 +425,14 @@ fn envU16(environ_map: *std.process.Environ.Map, key: []const u8) ?u16 {
 fn envU32(environ_map: *std.process.Environ.Map, key: []const u8) ?u32 {
     const value = environ_map.get(key) orelse return null;
     return std.fmt.parseInt(u32, value, 10) catch null;
+}
+
+fn envBool(environ_map: *std.process.Environ.Map, key: []const u8) bool {
+    const value = environ_map.get(key) orelse return false;
+    return std.ascii.eqlIgnoreCase(value, "1") or
+        std.ascii.eqlIgnoreCase(value, "true") or
+        std.ascii.eqlIgnoreCase(value, "yes") or
+        std.ascii.eqlIgnoreCase(value, "on");
 }
 
 fn pageSizeForVectorDimensions(dimensions: u16) u32 {
@@ -568,6 +577,7 @@ fn runCommand(
                 .leasedCount = result.leasedCount,
                 .succeededCount = result.succeededCount,
                 .failedCount = result.failedCount,
+                .lastError = result.lastError,
             });
             defer allocator.free(response);
             try stdout.print("{s}\n", .{response});

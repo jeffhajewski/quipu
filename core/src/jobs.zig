@@ -42,6 +42,7 @@ const JobView = struct {
     max_attempts: u32,
     payload_hash: []const u8,
     payload_bytes: usize,
+    payload_json: ?[]const u8,
 };
 
 pub fn materializeDefaultStreams(
@@ -160,7 +161,7 @@ pub fn leasePendingJobs(allocator: std.mem.Allocator, store: storage.Adapter, op
 
     var leased = std.ArrayList(LeaseResult).empty;
     errdefer {
-        freeLeaseResults(allocator, leased.items);
+        freeLeaseResultItems(allocator, leased.items);
         leased.deinit(allocator);
     }
 
@@ -246,13 +247,17 @@ pub fn failJob(allocator: std.mem.Allocator, store: storage.Adapter, qid: []cons
 }
 
 pub fn freeLeaseResults(allocator: std.mem.Allocator, results: []const LeaseResult) void {
+    freeLeaseResultItems(allocator, results);
+    allocator.free(results);
+}
+
+fn freeLeaseResultItems(allocator: std.mem.Allocator, results: []const LeaseResult) void {
     for (results) |result| {
         allocator.free(result.qid);
         allocator.free(result.workerKind);
         allocator.free(result.stream);
         allocator.free(result.leaseOwner);
     }
-    allocator.free(results);
 }
 
 fn payloadHash(allocator: std.mem.Allocator, payload_json: []const u8) ![]u8 {
@@ -279,6 +284,7 @@ fn readJobView(allocator: std.mem.Allocator, properties_json: []const u8) !JobVi
         .max_attempts = @intCast(try readPropertyInt(allocator, properties_json, "maxAttempts")),
         .payload_hash = try readPropertyString(allocator, properties_json, "payloadHash"),
         .payload_bytes = @intCast(try readPropertyInt(allocator, properties_json, "payloadBytes")),
+        .payload_json = try readOptionalPropertyString(allocator, properties_json, "payloadJson"),
     };
 }
 
@@ -286,6 +292,7 @@ fn freeJobView(allocator: std.mem.Allocator, view: JobView) void {
     allocator.free(view.job_type);
     allocator.free(view.stream_name);
     allocator.free(view.payload_hash);
+    if (view.payload_json) |payload_json| allocator.free(payload_json);
 }
 
 fn writeJobState(allocator: std.mem.Allocator, store: storage.Adapter, qid: []const u8, view: JobView, update: JobStateUpdate) !void {
@@ -316,10 +323,10 @@ fn writeJobState(allocator: std.mem.Allocator, store: storage.Adapter, qid: []co
         .payload_hash = view.payload_hash,
         .payloadBytes = view.payload_bytes,
         .payload_bytes = view.payload_bytes,
-        .payloadInlined = false,
-        .payload_inlined = false,
-        .payloadJson = @as(?[]const u8, null),
-        .payload_json = @as(?[]const u8, null),
+        .payloadInlined = view.payload_json != null,
+        .payload_inlined = view.payload_json != null,
+        .payloadJson = view.payload_json,
+        .payload_json = view.payload_json,
         .deleted = false,
     });
     defer allocator.free(props);
@@ -337,6 +344,21 @@ fn readPropertyString(allocator: std.mem.Allocator, properties_json: []const u8,
     return switch (value) {
         .string => |string| try allocator.dupe(u8, string),
         else => error.InvalidJob,
+    };
+}
+
+fn readOptionalPropertyString(allocator: std.mem.Allocator, properties_json: []const u8, key: []const u8) !?[]const u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, properties_json, .{});
+    defer parsed.deinit();
+    const object = switch (parsed.value) {
+        .object => |object| object,
+        else => return null,
+    };
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .string => |string| try allocator.dupe(u8, string),
+        .null => null,
+        else => null,
     };
 }
 

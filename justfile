@@ -36,13 +36,16 @@ synthetic-smoke: eval-smoke eval-core-smoke
 benchmark-locomo-smoke:
     PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --include-baselines --include-ablations --allow-failures --output-dir artifacts/benchmarks/locomo-smoke --report artifacts/benchmarks/locomo-smoke/report.json --markdown artifacts/benchmarks/locomo-smoke/report.md
 
+benchmark-locomo-graph-smoke:
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --include-baselines --include-ablations --include-lattice --skip-core --core-retrieval-mode graph --core-entity-provider deterministic --allow-failures --output-dir artifacts/benchmarks/locomo-graph-smoke --report artifacts/benchmarks/locomo-graph-smoke/report.json --markdown artifacts/benchmarks/locomo-graph-smoke/report.md
+
 benchmark-locomo-full dataset:
-    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks {{dataset}} --result-class publishable --external-benchmark locomo --include-baselines --include-ablations --include-lattice --require-lattice --skip-core --reuse-existing --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks {{dataset}} --result-class publishable --external-benchmark locomo --include-baselines --include-ablations --include-lattice --require-lattice --skip-core --core-retrieval-mode graph --core-entity-provider deterministic --reuse-existing --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
 
 benchmark-locomo-download:
-    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --download-locomo --result-class publishable --include-baselines --include-ablations --include-lattice --require-lattice --skip-core --reuse-existing --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --download-locomo --result-class publishable --include-baselines --include-ablations --include-lattice --require-lattice --skip-core --core-retrieval-mode graph --core-entity-provider deterministic --reuse-existing --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
 
-benchmark-external-all: benchmark-locomo-smoke
+benchmark-external-all: benchmark-locomo-smoke benchmark-locomo-graph-smoke
 
 ci:
     python3 scripts/check_format.py --check

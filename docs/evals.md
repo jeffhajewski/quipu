@@ -68,11 +68,19 @@ Core benchmark runs can force the runtime retrieval path with
 is set to `openrouter`, the core runtime defaults `memory.retrieve` to hybrid
 search; without a provider, it defaults to lexical search.
 
-Core graph runs can populate the entity graph before retrieval by starting the
-core with `--entity-provider deterministic` or `--entity-provider openrouter`
-and running `quipu jobs run entity-resolve` after replay. The worker writes
-stable `Entity` nodes and `MENTIONS` edges, so graph mode remains reproducible
-and inspectable.
+Core graph runs can populate the entity graph before retrieval by passing
+`--core-entity-provider deterministic` or `--core-entity-provider openrouter`
+to the benchmark runner. The harness replays each scenario into a persistent
+core DB, runs `quipu jobs run entity-resolve`, then reopens the DB for graph
+retrieval. The worker writes stable `Entity` nodes and `MENTIONS` edges, so
+graph mode remains reproducible and inspectable.
+
+As of the current LatticeDB `0.6.0` integration, LoCoMo graph+ER is smoke-tested
+but the full LoCoMo graph+ER pass is blocked by LatticeDB failures observed on
+large-message writes, stream rereads during worker processing, and
+`lattice_close` deinit after write-heavy runs. Keep full publishable claims on
+the last generated full LoCoMo raw/hybrid reports until those LatticeDB issues
+are fixed and a new full graph+ER report is generated.
 
 Optional LLM answer and judge hooks are also wired through OpenRouter:
 
@@ -195,6 +203,8 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --include-lattice \
   --require-lattice \
   --skip-core \
+  --core-retrieval-mode graph \
+  --core-entity-provider deterministic \
   --reuse-existing \
   --allow-failures \
   --markdown artifacts/benchmarks/locomo-full/report.md
