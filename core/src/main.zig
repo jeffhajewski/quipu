@@ -473,6 +473,41 @@ fn runCommand(
         return;
     }
 
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "quickstart")) {
+        try schema.ensure(allocator, store);
+        const remember_request =
+            \\{"jsonrpc":"2.0","id":"quickstart_remember","method":"memory.remember","params":{"sessionId":"quickstart","scope":{"projectId":"repo:quipu-quickstart"},"messages":[{"role":"user","content":"For this repo, use pnpm and run just test before committing. Please be concise in responses."}],"extract":true}}
+        ;
+        const remember_response = try runtime.dispatch(allocator, remember_request);
+        defer allocator.free(remember_response);
+        const retrieve_request =
+            \\{"jsonrpc":"2.0","id":"quickstart_retrieve","method":"memory.retrieve","params":{"query":"What should I know before editing this repo?","scope":{"projectId":"repo:quipu-quickstart"},"needs":["current_facts","procedural","preferences"],"budgetTokens":800,"options":{"includeDebug":true}}}
+        ;
+        const retrieve_response = try runtime.dispatch(allocator, retrieve_request);
+        defer allocator.free(retrieve_response);
+        const response = try stringifyAlloc(allocator, .{
+            .status = "ok",
+            .dbPath = runtime.health.db_path,
+            .daemon = .{
+                .status = "ready",
+                .command = "quipu serve",
+                .transport = "stdio",
+            },
+            .sample = .{
+                .remember = .{ .rawJson = remember_response },
+                .retrieve = .{ .rawJson = retrieve_response },
+            },
+            .nextSteps = &[_][]const u8{
+                "Run `quipu serve` to keep a local stdio daemon process open.",
+                "Use `Quipu()` in Python or `await Quipu.local()` / `new Quipu()` in TypeScript.",
+                "Store memory with memory.remember and retrieve context with memory.retrieve.",
+            },
+        });
+        defer allocator.free(response);
+        try stdout.print("{s}\n", .{response});
+        return;
+    }
+
     if (args.len > command_index and std.mem.eql(u8, args[command_index], "health")) {
         const response = try runtime.dispatch(
             allocator,
@@ -726,13 +761,14 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter] [--answer-model MODEL] [--entity-provider deterministic|openrouter] [--entity-model MODEL] init | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter] [--answer-model MODEL] [--entity-provider deterministic|openrouter] [--entity-model MODEL] init | quickstart | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
     if (args.len <= command_index) return false;
     const command = args[command_index];
     return std.mem.eql(u8, command, "init") or
+        std.mem.eql(u8, command, "quickstart") or
         std.mem.eql(u8, command, "serve") or
         std.mem.eql(u8, command, "status") or
         std.mem.eql(u8, command, "remember") or
