@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 import subprocess
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
@@ -436,6 +437,10 @@ class Quipu:
     transport: Optional[JsonRpcTransport] = None
     _next_id: int = field(default=1, init=False, repr=False)
 
+    def __post_init__(self) -> None:
+        if self.transport is None:
+            self.transport = QuipuStdioTransport(_default_local_command())
+
     @classmethod
     def local(
         cls,
@@ -446,11 +451,7 @@ class Quipu:
     ) -> "Quipu":
         if command is not None:
             return cls.stdio(command)
-        resolved_command = [binary]
-        if db_path is not None:
-            resolved_command.extend(["--db", db_path])
-        resolved_command.append("serve-stdio")
-        return cls.stdio(resolved_command)
+        return cls.stdio(_default_local_command(binary=binary, db_path=db_path))
 
     @classmethod
     def stdio(cls, command: Sequence[str]) -> "Quipu":
@@ -469,8 +470,6 @@ class Quipu:
 
     def call(self, method: str, params: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
         validate_rpc_params(method, params or {})
-        if self.transport is None:
-            raise NotImplementedError("TODO: connect to Quipu daemon")
         request: Dict[str, Any] = {
             "jsonrpc": "2.0",
             "id": f"py_{self._next_id}",
@@ -514,6 +513,16 @@ class Quipu:
 
     def core_update(self, **kwargs: Any) -> Mapping[str, Any]:
         return self.call("memory.core.update", kwargs)
+
+
+def _default_local_command(*, binary: Optional[str] = None, db_path: Optional[str] = None) -> list[str]:
+    resolved_binary = binary or os.environ.get("QUIPU_CORE_BINARY") or "quipu"
+    command = [resolved_binary]
+    resolved_db_path = db_path or os.environ.get("QUIPU_DB_PATH")
+    if resolved_db_path:
+        command.extend(["--db", resolved_db_path])
+    command.append("serve-stdio")
+    return command
 
 
 __all__ = [

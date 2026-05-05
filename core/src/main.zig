@@ -770,6 +770,7 @@ fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
     return std.mem.eql(u8, command, "init") or
         std.mem.eql(u8, command, "quickstart") or
         std.mem.eql(u8, command, "serve") or
+        std.mem.eql(u8, command, "serve-stdio") or
         std.mem.eql(u8, command, "status") or
         std.mem.eql(u8, command, "remember") or
         std.mem.eql(u8, command, "retrieve") or

@@ -513,6 +513,15 @@ function jsonParams(params: Record<string, unknown>): JsonObject {
   return params as JsonObject;
 }
 
+function defaultLocalCommand(options: QuipuLocalOptions = {}): string[] {
+  const binary = options.binary ?? process.env.QUIPU_CORE_BINARY ?? "quipu";
+  const command = [binary];
+  const dbPath = options.dbPath ?? process.env.QUIPU_DB_PATH;
+  if (dbPath) command.push("--db", dbPath);
+  command.push("serve-stdio");
+  return command;
+}
+
 export class QuipuStdioTransport {
   private command: string[];
   private process?: ReturnType<typeof spawn>;
@@ -593,18 +602,20 @@ export class Quipu {
   private nextId = 1;
 
   constructor(transport?: QuipuTransport, closeTransport?: () => void) {
-    this.transport = transport;
-    this.closeTransport = closeTransport;
+    if (transport) {
+      this.transport = transport;
+      this.closeTransport = closeTransport;
+    } else {
+      const local = new QuipuStdioTransport(defaultLocalCommand());
+      this.transport = (request) => local.call(request);
+      this.closeTransport = () => local.close();
+    }
   }
 
   static async local(options?: string[] | QuipuLocalOptions): Promise<Quipu> {
     if (Array.isArray(options)) return Quipu.stdio(options);
     if (options?.command) return Quipu.stdio(options.command);
-    const binary = options?.binary ?? process.env.QUIPU_CORE_BINARY ?? "quipu";
-    const command = [binary];
-    if (options?.dbPath) command.push("--db", options.dbPath);
-    command.push("serve-stdio");
-    return Quipu.stdio(command);
+    return Quipu.stdio(defaultLocalCommand(options));
   }
 
   static stdio(command: string[]): Quipu {

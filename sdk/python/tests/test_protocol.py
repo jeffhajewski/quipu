@@ -124,6 +124,22 @@ class QuipuClientTests(unittest.TestCase):
         finally:
             client.close()
 
+    def test_default_client_uses_local_stdio_transport(self):
+        previous_binary = os.environ.pop("QUIPU_CORE_BINARY", None)
+        previous_db_path = os.environ.pop("QUIPU_DB_PATH", None)
+        try:
+            client = Quipu()
+            try:
+                self.assertTrue(hasattr(client.transport, "command"))
+                self.assertEqual(client.transport.command, ["quipu", "serve-stdio"])
+            finally:
+                client.close()
+        finally:
+            if previous_binary is not None:
+                os.environ["QUIPU_CORE_BINARY"] = previous_binary
+            if previous_db_path is not None:
+                os.environ["QUIPU_DB_PATH"] = previous_db_path
+
     @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
     def test_stdio_client_calls_core_process(self):
         env = os.environ.copy()
