@@ -9,6 +9,16 @@ const streams = @import("streams.zig");
 const ObjectMap = std.json.ObjectMap;
 const Value = std.json.Value;
 
+const card_keywords_package_manager = [_][]const u8{ "package-manager", "dependency-tool" };
+const card_keywords_test_command = [_][]const u8{ "test-command", "verification" };
+const card_keywords_repo_style = [_][]const u8{ "repo-style", "implementation-style" };
+const card_keywords_project_constraint = [_][]const u8{ "project-constraint", "invariant" };
+const card_keywords_response_style = [_][]const u8{ "response-style", "communication" };
+const card_keywords_generic = [_][]const u8{"memory-card"};
+const card_tags_fact = [_][]const u8{ "fact", "project" };
+const card_tags_preference = [_][]const u8{ "preference", "user" };
+const card_tags_procedure = [_][]const u8{ "procedure", "project" };
+
 const Scope = struct {
     tenant_id: ?[]const u8 = null,
     user_id: ?[]const u8 = null,
@@ -1420,12 +1430,23 @@ pub const Runtime = struct {
         defer allocator.free(key);
         const card_qid = try hashQid(allocator, "card", key);
         defer allocator.free(card_qid);
+        const related_card_qids = try self.relatedCardQidsForCandidate(allocator, scope, card_qid, candidate);
+        defer {
+            for (related_card_qids) |qid| allocator.free(qid);
+            allocator.free(related_card_qids);
+        }
         const props = try stringifyAlloc(allocator, .{
             .kind = "memory_card",
             .qtype = "memory_card",
             .cardKind = memoryCardKind(candidate.label),
             .text = candidate.text,
             .contextDescription = "Deterministic extraction from raw message.",
+            .contextualDescription = cardContextualDescription(candidate),
+            .keywords = cardKeywords(candidate),
+            .tags = cardTags(candidate),
+            .importance = cardImportance(candidate),
+            .utility = @as(f32, 0.5),
+            .relatedCardQids = related_card_qids,
             .slotKey = candidate.slot_key,
             .value = candidate.value,
             .state = "current",
@@ -1442,6 +1463,39 @@ pub const Runtime = struct {
         defer allocator.free(props);
         try self.store.putNode(.{ .qid = card_qid, .label = "MemoryCard", .properties_json = props });
         try self.putDeterministicEdge(allocator, card_qid, message_qid, "EVIDENCED_BY");
+        for (related_card_qids) |related_qid| {
+            try self.putDeterministicEdge(allocator, card_qid, related_qid, "RELATED_TO");
+        }
+    }
+
+    fn relatedCardQidsForCandidate(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        scope: Scope,
+        card_qid: []const u8,
+        candidate: extractor.Candidate,
+    ) ![]const []const u8 {
+        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
+        defer freeHits(allocator, hits);
+        var related = std.ArrayList([]const u8).empty;
+        errdefer {
+            for (related.items) |qid| allocator.free(qid);
+            related.deinit(allocator);
+        }
+        for (hits) |hit| {
+            if (related.items.len >= 8) break;
+            if (std.mem.eql(u8, hit.qid, card_qid)) continue;
+            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!std.mem.eql(u8, node.label, "MemoryCard")) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            if (!try scope.matchesNode(allocator, node)) continue;
+            const same_slot = try propertyEquals(allocator, node.properties_json, "slotKey", candidate.slot_key);
+            const same_kind = try propertyEquals(allocator, node.properties_json, "cardKind", memoryCardKind(candidate.label));
+            if (!same_slot and !same_kind) continue;
+            try related.append(allocator, try allocator.dupe(u8, node.qid));
+        }
+        return related.toOwnedSlice(allocator);
     }
 
     fn writeEpisodeForTurn(
@@ -3221,6 +3275,50 @@ fn memoryCardKind(label: extractor.Label) []const u8 {
         .preference => "preference",
         .procedure => "procedural",
     };
+}
+
+fn cardContextualDescription(candidate: extractor.Candidate) []const u8 {
+    if (std.mem.eql(u8, candidate.slot_key, "project.package_manager")) {
+        return "Repository package manager preference extracted from user-provided project evidence.";
+    }
+    if (std.mem.eql(u8, candidate.slot_key, "project.test_command")) {
+        return "Repository verification command extracted from user-provided project evidence.";
+    }
+    if (std.mem.eql(u8, candidate.slot_key, "project.repo_style")) {
+        return "Repository implementation style extracted from project guidance.";
+    }
+    if (std.mem.eql(u8, candidate.slot_key, "project.constraint")) {
+        return "Project invariant extracted from contributor or user guidance.";
+    }
+    if (std.mem.eql(u8, candidate.slot_key, "user.response_style")) {
+        return "User communication preference extracted from conversation evidence.";
+    }
+    return "Memory card generated from evidence-linked deterministic extraction.";
+}
+
+fn cardKeywords(candidate: extractor.Candidate) []const []const u8 {
+    if (std.mem.eql(u8, candidate.slot_key, "project.package_manager")) return &card_keywords_package_manager;
+    if (std.mem.eql(u8, candidate.slot_key, "project.test_command")) return &card_keywords_test_command;
+    if (std.mem.eql(u8, candidate.slot_key, "project.repo_style")) return &card_keywords_repo_style;
+    if (std.mem.eql(u8, candidate.slot_key, "project.constraint")) return &card_keywords_project_constraint;
+    if (std.mem.eql(u8, candidate.slot_key, "user.response_style")) return &card_keywords_response_style;
+    return &card_keywords_generic;
+}
+
+fn cardTags(candidate: extractor.Candidate) []const []const u8 {
+    return switch (candidate.label) {
+        .fact => &card_tags_fact,
+        .preference => &card_tags_preference,
+        .procedure => &card_tags_procedure,
+    };
+}
+
+fn cardImportance(candidate: extractor.Candidate) f32 {
+    if (std.mem.eql(u8, candidate.slot_key, "project.constraint")) return 0.9;
+    if (std.mem.eql(u8, candidate.slot_key, "project.test_command")) return 0.8;
+    if (std.mem.eql(u8, candidate.slot_key, "project.package_manager")) return 0.75;
+    if (std.mem.eql(u8, candidate.slot_key, "user.response_style")) return 0.65;
+    return 0.6;
 }
 
 fn freeHits(allocator: std.mem.Allocator, hits: []storage.SearchHit) void {
