@@ -1170,6 +1170,8 @@ pub const Runtime = struct {
                 allocator.free(block.blockKey);
                 allocator.free(block.text);
                 allocator.free(block.managedBy);
+                for (block.evidenceQids) |qid| allocator.free(qid);
+                allocator.free(block.evidenceQids);
             }
             blocks.deinit(allocator);
         }
@@ -1192,12 +1194,18 @@ pub const Runtime = struct {
             errdefer allocator.free(text);
             const managed_by = try readPropertyString(allocator, node.properties_json, "managedBy");
             errdefer allocator.free(managed_by);
+            const evidence_qids = try readStringArrayProperty(allocator, node.properties_json, "evidenceQids");
+            errdefer {
+                for (evidence_qids) |qid| allocator.free(qid);
+                allocator.free(evidence_qids);
+            }
             try blocks.append(allocator, .{
                 .qid = try allocator.dupe(u8, node.qid),
                 .blockKey = block_key,
                 .scope = scope.json(),
                 .text = text,
                 .managedBy = managed_by,
+                .evidenceQids = evidence_qids,
             });
         }
 
@@ -2660,6 +2668,26 @@ fn readOptionalPropertyString(allocator: std.mem.Allocator, properties_json: []c
         .string => |string| try allocator.dupe(u8, string),
         else => null,
     };
+}
+
+fn readStringArrayProperty(allocator: std.mem.Allocator, properties_json: []const u8, key: []const u8) ![][]const u8 {
+    var parsed = try std.json.parseFromSlice(Value, allocator, properties_json, .{});
+    defer parsed.deinit();
+    const object = switch (parsed.value) {
+        .object => |object| object,
+        else => return allocator.alloc([]const u8, 0),
+    };
+    const array = arrayValue(object.get(key)) orelse return allocator.alloc([]const u8, 0);
+    var values = std.ArrayList([]const u8).empty;
+    errdefer {
+        for (values.items) |value| allocator.free(value);
+        values.deinit(allocator);
+    }
+    for (array.items) |item| {
+        const value = stringValue(item) orelse continue;
+        try values.append(allocator, try allocator.dupe(u8, value));
+    }
+    return values.toOwnedSlice(allocator);
 }
 
 fn propertyEquals(allocator: std.mem.Allocator, properties_json: []const u8, key: []const u8, expected: []const u8) !bool {

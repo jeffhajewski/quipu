@@ -722,6 +722,47 @@ fn runCommand(
         return;
     }
 
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "compile-core")) {
+        const parsed = parseConsolidateArgs(args[command_index + 1 ..]) catch {
+            return printCliError(stdout, allocator, "invalid compile-core arguments");
+        };
+        if (parsed.scope.project_id == null and parsed.scope.user_id == null) {
+            return printCliError(stdout, allocator, "compile-core requires --project ID and/or --user ID");
+        }
+        const project_response = if (parsed.scope.project_id) |project_id|
+            try dispatchCoreConsolidate(
+                allocator,
+                runtime,
+                "project_context",
+                .{ .projectId = project_id },
+                parsed.limit,
+                "cli_compile_project_core",
+            )
+        else
+            null;
+        defer if (project_response) |response| allocator.free(response);
+        const user_response = if (parsed.scope.user_id) |user_id|
+            try dispatchCoreConsolidate(
+                allocator,
+                runtime,
+                "user_context",
+                .{ .userId = user_id },
+                parsed.limit,
+                "cli_compile_user_core",
+            )
+        else
+            null;
+        defer if (user_response) |response| allocator.free(response);
+        const response = try stringifyAlloc(allocator, .{
+            .status = "ok",
+            .projectRawJson = project_response,
+            .userRawJson = user_response,
+        });
+        defer allocator.free(response);
+        try stdout.print("{s}\n", .{response});
+        return;
+    }
+
     if (args.len > command_index and std.mem.eql(u8, args[command_index], "rpc-stdin")) {
         var stdin_buffer: [4096]u8 = undefined;
         var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
@@ -761,7 +802,7 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter] [--answer-model MODEL] [--entity-provider deterministic|openrouter] [--entity-model MODEL] init | quickstart | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter] [--answer-model MODEL] [--entity-provider deterministic|openrouter] [--entity-model MODEL] init | quickstart | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
@@ -779,6 +820,7 @@ fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
         std.mem.eql(u8, command, "forget") or
         std.mem.eql(u8, command, "feedback") or
         std.mem.eql(u8, command, "consolidate") or
+        std.mem.eql(u8, command, "compile-core") or
         std.mem.eql(u8, command, "verify") or
         std.mem.eql(u8, command, "jobs");
 }
@@ -813,6 +855,28 @@ fn dispatchAndPrint(stdout: *std.Io.Writer, allocator: std.mem.Allocator, runtim
     const response = try runtime.dispatch(allocator, request);
     defer allocator.free(response);
     try stdout.print("{s}\n", .{response});
+}
+
+fn dispatchCoreConsolidate(
+    allocator: std.mem.Allocator,
+    runtime: *runtime_mod.Runtime,
+    block_key: []const u8,
+    scope: anytype,
+    limit: i64,
+    request_id: []const u8,
+) ![]u8 {
+    const request = try stringifyAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = request_id,
+        .method = "memory.core.consolidate",
+        .params = .{
+            .blockKey = block_key,
+            .scope = scope,
+            .limit = limit,
+        },
+    });
+    defer allocator.free(request);
+    return runtime.dispatch(allocator, request);
 }
 
 fn printCliError(stdout: *std.Io.Writer, allocator: std.mem.Allocator, message: []const u8) !void {
