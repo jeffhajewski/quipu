@@ -763,6 +763,12 @@ fn runCommand(
         return;
     }
 
+    if (args.len > command_index and std.mem.eql(u8, args[command_index], "proxy")) {
+        try stdout.flush();
+        try runPythonTool(io, allocator, "scripts/quipu_proxy.py", args[command_index + 1 ..]);
+        return;
+    }
+
     if (args.len > command_index and std.mem.eql(u8, args[command_index], "rpc-stdin")) {
         var stdin_buffer: [4096]u8 = undefined;
         var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
@@ -802,7 +808,7 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter] [--answer-model MODEL] [--entity-provider deterministic|openrouter] [--entity-model MODEL] init | quickstart | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--db PATH] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter] [--answer-model MODEL] [--entity-provider deterministic|openrouter] [--entity-model MODEL] init | quickstart | status | health | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
@@ -821,6 +827,7 @@ fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
         std.mem.eql(u8, command, "feedback") or
         std.mem.eql(u8, command, "consolidate") or
         std.mem.eql(u8, command, "compile-core") or
+        std.mem.eql(u8, command, "proxy") or
         std.mem.eql(u8, command, "verify") or
         std.mem.eql(u8, command, "jobs");
 }
@@ -877,6 +884,30 @@ fn dispatchCoreConsolidate(
     });
     defer allocator.free(request);
     return runtime.dispatch(allocator, request);
+}
+
+fn runPythonTool(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    script: []const u8,
+    args: []const [:0]const u8,
+) !void {
+    var argv = std.ArrayList([]const u8).empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "python3");
+    try argv.append(allocator, script);
+    for (args) |arg| try argv.append(allocator, arg);
+    var child = try std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| if (code != 0) return error.ToolFailed,
+        else => return error.ToolFailed,
+    }
 }
 
 fn printCliError(stdout: *std.Io.Writer, allocator: std.mem.Allocator, message: []const u8) !void {
