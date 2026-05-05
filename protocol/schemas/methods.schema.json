@@ -113,6 +113,37 @@
               "recency": { "type": "number" }
             }
           }
+        },
+        "scoringDetails": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["qid", "type", "finalScore", "lexical", "temporal", "scope", "confidence", "recency", "formula"],
+            "additionalProperties": false,
+            "properties": {
+              "qid": { "$ref": "#/$defs/qid" },
+              "type": { "type": "string" },
+              "finalScore": { "type": "number" },
+              "lexical": { "type": "number" },
+              "temporal": { "type": "number" },
+              "scope": { "type": "number" },
+              "confidence": { "type": "number" },
+              "recency": { "type": "number" },
+              "formula": { "type": "string" }
+            }
+          }
+        },
+        "droppedItemReasons": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["reason", "count"],
+            "additionalProperties": false,
+            "properties": {
+              "reason": { "type": "string" },
+              "count": { "type": "integer", "minimum": 0 }
+            }
+          }
         }
       }
     },

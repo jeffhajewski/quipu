@@ -97,6 +97,8 @@ const RetrievalTrace = struct {
     tokenEstimate: usize,
     validAt: ?[]const u8 = null,
     scoreBreakdowns: []const ScoreBreakdown = &.{},
+    scoringDetails: []const ScoringDetail = &.{},
+    droppedItemReasons: []const DroppedItemReason = &.{},
 };
 
 const CandidateSources = struct {
@@ -116,6 +118,23 @@ const ScoreBreakdown = struct {
     scope: f32,
     confidence: f32,
     recency: f32,
+};
+
+const ScoringDetail = struct {
+    qid: []const u8,
+    type: []const u8,
+    finalScore: f32,
+    lexical: f32,
+    temporal: f32,
+    scope: f32,
+    confidence: f32,
+    recency: f32,
+    formula: []const u8 = "lexical + temporal + scope + confidence + recency",
+};
+
+const DroppedItemReason = struct {
+    reason: []const u8,
+    count: usize,
 };
 
 const EventWindow = struct {
@@ -668,6 +687,10 @@ pub const Runtime = struct {
         const token_estimate = @max(@as(usize, 1), prompt.len / 4);
         const score_breakdowns = try buildScoreBreakdowns(allocator, results.items.items);
         defer allocator.free(score_breakdowns);
+        const scoring_details = try buildScoringDetails(allocator, results.items.items);
+        defer allocator.free(scoring_details);
+        const dropped_item_reasons = try buildDroppedItemReasons(allocator, dropped_for_needs, dropped_for_budget);
+        defer allocator.free(dropped_item_reasons);
         const trace = RetrievalTrace{
             .query = query,
             .requestedNeedsCount = needsCount(needs_value),
@@ -680,6 +703,8 @@ pub const Runtime = struct {
             .tokenEstimate = token_estimate,
             .validAt = valid_at,
             .scoreBreakdowns = score_breakdowns,
+            .scoringDetails = scoring_details,
+            .droppedItemReasons = dropped_item_reasons,
         };
 
         const item_qids = try allocator.alloc([]const u8, results.items.items.len);
@@ -787,6 +812,10 @@ pub const Runtime = struct {
         const token_estimate = @max(@as(usize, 1), prompt.len / 4);
         const score_breakdowns = try buildScoreBreakdowns(allocator, results.items.items);
         defer allocator.free(score_breakdowns);
+        const scoring_details = try buildScoringDetails(allocator, results.items.items);
+        defer allocator.free(scoring_details);
+        const dropped_item_reasons = try buildDroppedItemReasons(allocator, dropped_for_needs, dropped_for_budget);
+        defer allocator.free(dropped_item_reasons);
         const trace = RetrievalTrace{
             .query = query,
             .requestedNeedsCount = needsCount(needs_value),
@@ -799,6 +828,8 @@ pub const Runtime = struct {
             .tokenEstimate = token_estimate,
             .validAt = valid_at,
             .scoreBreakdowns = score_breakdowns,
+            .scoringDetails = scoring_details,
+            .droppedItemReasons = dropped_item_reasons,
         };
 
         const endpoint = if (self.options.answer_provider.kind == .none)
@@ -3157,6 +3188,35 @@ fn buildScoreBreakdowns(allocator: std.mem.Allocator, items: []const MessageResu
         };
     }
     return breakdowns;
+}
+
+fn buildScoringDetails(allocator: std.mem.Allocator, items: []const MessageResult) ![]ScoringDetail {
+    const details = try allocator.alloc(ScoringDetail, items.len);
+    for (items, 0..) |item, index| {
+        details[index] = .{
+            .qid = item.qid,
+            .type = item.type,
+            .finalScore = item.score,
+            .lexical = normalizeScore(item.score),
+            .temporal = temporalScore(item),
+            .scope = 1.0,
+            .confidence = item.confidence,
+            .recency = recencyScore(item),
+        };
+    }
+    return details;
+}
+
+fn buildDroppedItemReasons(allocator: std.mem.Allocator, dropped_for_needs: usize, dropped_for_budget: usize) ![]DroppedItemReason {
+    var reasons = std.ArrayList(DroppedItemReason).empty;
+    errdefer reasons.deinit(allocator);
+    if (dropped_for_needs > 0) {
+        try reasons.append(allocator, .{ .reason = "filtered_by_requested_needs", .count = dropped_for_needs });
+    }
+    if (dropped_for_budget > 0) {
+        try reasons.append(allocator, .{ .reason = "dropped_for_token_budget", .count = dropped_for_budget });
+    }
+    return reasons.toOwnedSlice(allocator);
 }
 
 fn evidenceExpected(item_type: []const u8) bool {
