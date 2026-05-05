@@ -1,6 +1,8 @@
 # Roadmap
 
 See SPEC.md for milestone definitions.
+See `docs/sota-usability-work-plan.md` for the competitor-informed plan to make
+Quipu both plug-and-play and SOTA-quality.
 
 - M0: Repository and spec
 - M1: LatticeDB integration and schema
