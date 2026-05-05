@@ -58,6 +58,7 @@ def maybe_run_zig_build() -> None:
 
 
 def main() -> int:
+    maybe_run_python_tests(ROOT / "scripts" / "tests")
     maybe_run_python_tests(ROOT / "sdk" / "python" / "tests")
     maybe_run_python_tests(ROOT / "evals" / "tests")
     maybe_run_typescript_build()

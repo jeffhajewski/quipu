@@ -37,6 +37,7 @@ HTML = """<!doctype html>
     pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f2f3ef; border-radius: 6px; padding: 12px; min-height: 120px; }
     .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
     .muted { color: #596059; font-size: 13px; }
+    .wide { grid-column: 1 / -1; }
     @media (max-width: 820px) { main, .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -58,9 +59,13 @@ HTML = """<!doctype html>
     </section>
     <div class="grid">
       <section><h2>Health</h2><pre id="health"></pre></section>
-      <section><h2>Search</h2><pre id="search"></pre></section>
+      <section><h2>Memories</h2><pre id="memories"></pre></section>
+      <section><h2>Evidence</h2><pre id="evidence"></pre></section>
+      <section><h2>Entities</h2><pre id="entities"></pre></section>
+      <section><h2>Facts</h2><pre id="facts"></pre></section>
       <section><h2>Core Blocks</h2><pre id="core"></pre></section>
-      <section><h2>Retrieval Trace</h2><pre id="trace"></pre></section>
+      <section><h2>Retrieval Traces</h2><pre id="traces"></pre></section>
+      <section class="wide"><h2>Jobs</h2><pre id="jobs"></pre></section>
     </div>
   </main>
   <script>
@@ -75,9 +80,13 @@ HTML = """<!doctype html>
     }
     async function refresh() {
       await show('health', '/api/health');
-      await show('search', '/api/search?' + qs());
-      await show('core', '/api/core?' + qs());
-      await show('trace', '/api/retrieve?' + qs());
+      await show('memories', '/api/memories?' + qs());
+      await show('evidence', '/api/evidence?' + qs());
+      await show('entities', '/api/entities?' + qs());
+      await show('facts', '/api/facts?' + qs());
+      await show('core', '/api/core-blocks?' + qs());
+      await show('traces', '/api/retrieval-traces?' + qs());
+      await show('jobs', '/api/jobs?' + qs());
     }
     refresh();
   </script>
@@ -103,10 +112,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, self.state.memory.health())
             elif parsed.path == "/api/search":
                 self._json(200, self._search(parsed.query))
-            elif parsed.path == "/api/retrieve":
-                self._json(200, self._retrieve(parsed.query))
-            elif parsed.path == "/api/core":
+            elif parsed.path == "/api/memories":
+                self._json(200, self._label_search(parsed.query, ["MemoryCard", "Episode"], "MemoryCard Episode"))
+            elif parsed.path == "/api/evidence":
+                self._json(200, self._label_search(parsed.query, ["Message", "ToolCall", "Observation"], "Message ToolCall Observation"))
+            elif parsed.path == "/api/entities":
+                self._json(200, self._label_search(parsed.query, ["Entity"], "Entity"))
+            elif parsed.path == "/api/facts":
+                self._json(200, self._label_search(parsed.query, ["Fact", "Preference", "Procedure"], "Fact Preference Procedure"))
+            elif parsed.path in {"/api/retrieve", "/api/retrieval-traces"}:
+                self._json(200, self._retrieval_traces(parsed.query))
+            elif parsed.path in {"/api/core", "/api/core-blocks"}:
                 self._json(200, self._core(parsed.query))
+            elif parsed.path == "/api/jobs":
+                self._json(200, self._label_search(parsed.query, ["Job"], "Job"))
             else:
                 self._json(404, {"error": "not found"})
         except Exception as exc:  # pragma: no cover - defensive server boundary
@@ -119,9 +138,23 @@ class Handler(BaseHTTPRequestHandler):
     def _search(self, query_string: str) -> dict[str, Any]:
         params = parse_qs(query_string)
         query = first(params, "q") or ""
-        return dict(self.state.memory.search(query=query or " ", mode="fts", scope=scope(params), limit=20))
+        return dict(self.state.memory.search(query=query or "memory", mode="fts", scope=scope(params), limit=limit(params)))
 
-    def _retrieve(self, query_string: str) -> dict[str, Any]:
+    def _label_search(self, query_string: str, labels: list[str], default_query: str) -> dict[str, Any]:
+        params = parse_qs(query_string)
+        query = first(params, "q") or default_query
+        return dict(
+            self.state.memory.search(
+                query=query,
+                mode="fts",
+                labels=labels,
+                scope=scope(params),
+                limit=limit(params),
+                includeDeleted=bool_param(params, "includeDeleted"),
+            )
+        )
+
+    def _retrieval_traces(self, query_string: str) -> dict[str, Any]:
         params = parse_qs(query_string)
         query = first(params, "q") or "memory"
         retrieved = self.state.memory.retrieve(
@@ -160,6 +193,22 @@ class Handler(BaseHTTPRequestHandler):
 def first(params: dict[str, list[str]], key: str) -> str | None:
     values = params.get(key)
     return values[0] if values and values[0] else None
+
+
+def bool_param(params: dict[str, list[str]], key: str) -> bool:
+    value = (first(params, key) or "").lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def limit(params: dict[str, list[str]]) -> int:
+    raw = first(params, "limit")
+    if raw is None:
+        return 20
+    try:
+        value = int(raw)
+    except ValueError:
+        return 20
+    return min(100, max(1, value))
 
 
 def scope(params: dict[str, list[str]]) -> dict[str, str]:
