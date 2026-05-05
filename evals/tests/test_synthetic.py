@@ -20,6 +20,7 @@ from quipu_evals.benchmarks import collect_benchmarks, render_markdown  # noqa: 
 from quipu_evals.comparisons import published_results  # noqa: E402
 from quipu_evals.external import load_external_suite  # noqa: E402
 from quipu_evals.locomo import load_locomo_suite, write_suite  # noqa: E402
+from quipu_evals.longmemeval import load_longmemeval_suite  # noqa: E402
 from quipu_evals.provider_clients import CachedEmbeddingProvider, LlmJudgeResult  # noqa: E402
 from quipu_evals.readiness import evaluate_readiness  # noqa: E402
 from quipu_evals.baselines import DETERMINISTIC_ABLATIONS, DETERMINISTIC_REQUIRED_BASELINES  # noqa: E402
@@ -28,6 +29,7 @@ from quipu_evals import load_suite, run_suite  # noqa: E402
 
 SUITE_PATH = ROOT / "evals" / "suites" / "quipu_synthetic.yaml"
 LOCOMO_MINI_PATH = ROOT / "evals" / "suites" / "external" / "locomo_mini.yaml"
+LONGMEMEVAL_MINI_PATH = ROOT / "evals" / "suites" / "external" / "longmemeval_mini.yaml"
 CORE_DIR = ROOT / "core"
 CORE_BINARY = CORE_DIR / "zig-out" / "bin" / "quipu"
 LATTICE_INCLUDE = os.environ.get("LATTICE_INCLUDE")
@@ -232,6 +234,48 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertEqual(loaded.scenarios[0].queries[1].category, "event_summary")
         self.assertTrue(loaded.metadata["fullDataset"])
 
+    def test_converts_real_longmemeval_shape_to_external_suite(self):
+        with tempfile.TemporaryDirectory(prefix="quipu-longmemeval-shape-") as directory:
+            dataset = Path(directory) / "longmemeval_oracle.json"
+            dataset.write_text(
+                json.dumps(
+                    [
+                        {
+                            "question_id": "gpt4_fixture_001",
+                            "question_type": "single-session-user",
+                            "question": "What tea do I prefer for morning writing?",
+                            "answer": "jasmine",
+                            "question_date": "2026/02/10 (Tue) 10:00",
+                            "haystack_dates": ["2026/02/01 (Sun) 09:00"],
+                            "haystack_session_ids": ["answer_fixture_1"],
+                            "answer_session_ids": ["answer_fixture_1"],
+                            "haystack_sessions": [
+                                [
+                                    {
+                                        "role": "user",
+                                        "content": "Please remember that my morning writing tea is jasmine.",
+                                        "has_answer": True,
+                                    },
+                                    {"role": "assistant", "content": "I will remember jasmine tea.", "has_answer": False},
+                                ]
+                            ],
+                        }
+                    ]
+                )
+            )
+            suite = load_longmemeval_suite(dataset, max_conversations=1)
+            normalized = Path(directory) / "normalized.json"
+            write_suite(normalized, suite)
+            loaded = load_external_suite(normalized, benchmark="longmemeval")
+
+        self.assertEqual(loaded.name, "longmemeval")
+        self.assertEqual(len(loaded.scenarios), 1)
+        self.assertEqual(len(loaded.scenarios[0].events), 1)
+        self.assertEqual(loaded.scenarios[0].events[0].messages[0].role, "user")
+        self.assertEqual(loaded.scenarios[0].queries[0].expected_answer, "jasmine")
+        self.assertEqual(loaded.scenarios[0].queries[0].expected_evidence_event_ids, ["answer_fixture_1"])
+        self.assertEqual(loaded.scenarios[0].queries[0].category, "single-session-user")
+
     def test_external_smoke_report_marks_not_publishable(self):
         report = collect_benchmarks(
             LOCOMO_MINI_PATH,
@@ -248,6 +292,22 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertIn("External Smoke Benchmark Results", markdown)
         self.assertIn("Published External Reference Points", markdown)
         self.assertIn("not publishable", markdown)
+
+    def test_longmemeval_external_smoke_report_marks_not_publishable(self):
+        report = collect_benchmarks(
+            LONGMEMEVAL_MINI_PATH,
+            include_lattice=False,
+            result_class="external_smoke",
+            external_benchmark="longmemeval",
+        )
+        markdown = render_markdown(report)
+
+        self.assertEqual(report["resultClass"], "external_smoke")
+        self.assertEqual(report["dataset"]["benchmark"], "longmemeval")
+        self.assertEqual(report["benchmarkReadiness"]["status"], "not_ready")
+        self.assertGreater(len(report["publishedComparisons"]), 0)
+        self.assertIn("External Smoke Benchmark Results", markdown)
+        self.assertIn("LongMemEval", markdown)
 
     def test_published_comparisons_include_memory_system_references(self):
         systems = {row["system"] for row in published_results("locomo")}

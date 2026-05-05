@@ -112,6 +112,10 @@ Current external benchmark status:
 - Real LoCoMo adapter: normalizes the upstream SNAP `locomo10.json` shape into
   Quipu scenarios and can run local deterministic baseline, ablation, and core
   benchmark passes with artifacts.
+- LongMemEval mini fixture and real adapter: normalizes the official cleaned
+  LongMemEval oracle/S/M JSON files into timestamped session events and
+  session-level evidence queries. This is wired for reproducible runs, not a
+  published LongMemEval score.
 - Full LoCoMo local raw-retrieval run: 1,986 questions, LatticeDB `0.6.0`,
   core Lattice answer-containment exact match 28.55%, evidence recall 58.27%,
   with reports under `artifacts/benchmarks/locomo-core-lattice-raw-fast-full/`.
@@ -333,7 +337,7 @@ Still in progress:
 - Learned reranking and scoring beyond deterministic RRF/graph boosts.
 - LLM-backed extraction and consolidation workers.
 - Judge scoring for LoCoMo publication.
-- LongMemEval and MemoryAgentBench adapters.
+- MemoryAgentBench adapter.
 - Richer host integrations.
 
 ## Development

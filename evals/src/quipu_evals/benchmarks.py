@@ -17,6 +17,7 @@ from .comparisons import published_results
 from .core_runner import CORE_BINARY, lattice_lib_from_env, run_core_suite
 from .external import DEFAULT_EXTERNAL_SUITES, external_suite_metadata, is_normalized_external_suite, load_external_suite
 from .locomo import download_locomo, load_locomo_suite, write_suite
+from .longmemeval import download_longmemeval, load_longmemeval_suite
 from .provider_clients import ProviderError, openrouter_providers_from_env
 from .readiness import evaluate_readiness
 from .runner import run_suite
@@ -41,6 +42,7 @@ def collect_benchmarks(
     include_core: bool = True,
     require_core: bool = False,
     locomo_options: Mapping[str, Any] | None = None,
+    longmemeval_options: Mapping[str, Any] | None = None,
     require_lattice: bool = False,
     include_baselines: bool = False,
     include_ablations: bool = False,
@@ -62,7 +64,13 @@ def collect_benchmarks(
     reuse_existing: bool = False,
 ) -> dict[str, Any]:
     suite_path = Path(suite_path)
-    suite_path, suite = prepare_suite(suite_path, output_dir, external_benchmark, locomo_options or {})
+    suite_path, suite = prepare_suite(
+        suite_path,
+        output_dir,
+        external_benchmark,
+        locomo_options or {},
+        longmemeval_options or {},
+    )
     dataset = external_suite_metadata(suite) if external_benchmark else {
         "format": "quipu.synthetic.scenario.v1",
         "benchmark": "synthetic",
@@ -403,22 +411,39 @@ def prepare_suite(
     output_dir: str | Path,
     external_benchmark: str | None,
     locomo_options: Mapping[str, Any],
+    longmemeval_options: Mapping[str, Any],
 ) -> tuple[Path, Any]:
-    if external_benchmark != "locomo":
+    if external_benchmark is None:
         return suite_path, load_suite(suite_path)
-    if is_normalized_external_suite(suite_path):
-        return suite_path, load_external_suite(suite_path, benchmark="locomo")
+    if external_benchmark == "locomo":
+        if is_normalized_external_suite(suite_path):
+            return suite_path, load_external_suite(suite_path, benchmark="locomo")
 
-    suite = load_locomo_suite(
-        suite_path,
-        max_conversations=_optional_int(locomo_options.get("max_conversations")),
-        max_questions_per_conversation=_optional_int(locomo_options.get("max_questions_per_conversation")),
-        include_categories=locomo_options.get("include_categories"),
-        include_event_summaries=bool(locomo_options.get("include_event_summaries", False)),
-    )
-    normalized_path = Path(output_dir) / "normalized-locomo-suite.json"
-    write_suite(normalized_path, suite)
-    return normalized_path, suite
+        suite = load_locomo_suite(
+            suite_path,
+            max_conversations=_optional_int(locomo_options.get("max_conversations")),
+            max_questions_per_conversation=_optional_int(locomo_options.get("max_questions_per_conversation")),
+            include_categories=locomo_options.get("include_categories"),
+            include_event_summaries=bool(locomo_options.get("include_event_summaries", False)),
+        )
+        normalized_path = Path(output_dir) / "normalized-locomo-suite.json"
+        write_suite(normalized_path, suite)
+        return normalized_path, suite
+    if external_benchmark == "longmemeval":
+        if is_normalized_external_suite(suite_path):
+            return suite_path, load_external_suite(suite_path, benchmark="longmemeval")
+
+        suite = load_longmemeval_suite(
+            suite_path,
+            variant=str(longmemeval_options.get("variant") or "oracle"),
+            max_conversations=_optional_int(longmemeval_options.get("max_conversations")),
+            max_sessions_per_conversation=_optional_int(longmemeval_options.get("max_sessions_per_conversation")),
+            include_question_types=longmemeval_options.get("include_question_types"),
+        )
+        normalized_path = Path(output_dir) / "normalized-longmemeval-suite.json"
+        write_suite(normalized_path, suite)
+        return normalized_path, suite
+    return suite_path, load_external_suite(suite_path, benchmark=external_benchmark)
 
 
 def aggregate_verification(runs: list[Mapping[str, Any]], default: str) -> dict[str, Any]:
@@ -843,6 +868,7 @@ def main() -> int:
     )
     parser.add_argument("--reuse-existing", action="store_true", help="Reuse existing per-run artifacts in the output directory")
     parser.add_argument("--download-locomo", action="store_true")
+    parser.add_argument("--download-longmemeval", action="store_true")
     parser.add_argument("--dataset-cache", type=Path, default=Path(os.environ.get("QUIPU_DATASET_CACHE", ".quipu-datasets")))
     parser.add_argument("--locomo-max-conversations", type=int)
     parser.add_argument("--locomo-max-questions", type=int)
@@ -852,12 +878,25 @@ def main() -> int:
         help="Comma-separated LoCoMo category numbers to include",
     )
     parser.add_argument("--locomo-event-summaries", action="store_true")
+    parser.add_argument("--longmemeval-variant", choices=["oracle", "s", "m"], default="oracle")
+    parser.add_argument("--longmemeval-max-conversations", type=int)
+    parser.add_argument("--longmemeval-max-sessions", type=int)
+    parser.add_argument(
+        "--longmemeval-question-types",
+        help="Comma-separated LongMemEval question types to include, such as temporal-reasoning,knowledge-update,abstention",
+    )
     parser.add_argument("--allow-failures", action="store_true")
     args = parser.parse_args()
     if args.download_locomo and args.external_benchmark != "locomo":
         parser.error("--download-locomo requires --external-benchmark locomo")
+    if args.download_longmemeval and args.external_benchmark != "longmemeval":
+        parser.error("--download-longmemeval requires --external-benchmark longmemeval")
     result_class = args.result_class or ("external_smoke" if args.external_benchmark else "synthetic_smoke")
-    downloaded_suite = download_locomo(args.dataset_cache) if args.download_locomo else None
+    downloaded_suite = None
+    if args.download_locomo:
+        downloaded_suite = download_locomo(args.dataset_cache)
+    if args.download_longmemeval:
+        downloaded_suite = download_longmemeval(args.dataset_cache, variant=args.longmemeval_variant)
     suite_path = (
         Path(args.suite)
         if args.suite
@@ -905,6 +944,12 @@ def main() -> int:
             "include_categories": parse_category_list(args.locomo_categories),
             "include_event_summaries": args.locomo_event_summaries,
         },
+        longmemeval_options={
+            "variant": args.longmemeval_variant,
+            "max_conversations": args.longmemeval_max_conversations,
+            "max_sessions_per_conversation": args.longmemeval_max_sessions,
+            "include_question_types": parse_string_list(args.longmemeval_question_types),
+        },
     )
     write_json(args.report, report)
     if args.markdown:
@@ -924,6 +969,13 @@ def parse_category_list(value: str) -> list[int]:
             continue
         categories.append(int(item))
     return categories
+
+
+def parse_string_list(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    return items or None
 
 
 if __name__ == "__main__":

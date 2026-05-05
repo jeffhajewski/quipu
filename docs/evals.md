@@ -164,7 +164,7 @@ The external benchmark path starts with a normalized scenario format:
 - all files remain JSON-compatible YAML so the current dependency-free loader
   can parse them.
 
-LoCoMo has the first smoke fixture:
+LoCoMo and LongMemEval have smoke fixtures:
 
 ```bash
 PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
@@ -179,10 +179,13 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
 retrieval, grading, forgetting, manifests, and the real-benchmark readiness
 gate without requiring external model keys. It is not a LoCoMo score.
 
+`just benchmark-longmemeval-smoke` runs the same path against a small
+LongMemEval-shaped timestamped chat fixture. It is not a LongMemEval score.
+
 Full LoCoMo runs should use `--result-class publishable`, a real dataset path,
 LatticeDB enabled, deterministic baselines/ablations, provider configuration,
-verification status, and generated trace artifacts. LongMemEval and
-MemoryAgentBench remain next adapters.
+verification status, and generated trace artifacts. Full LongMemEval runs use
+the same readiness requirements. MemoryAgentBench remains a planned adapter.
 
 For full runs, `--skip-core` omits the redundant in-memory core pass while
 still allowing the LatticeDB core pass when `--include-lattice` is set.
@@ -224,3 +227,30 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
 The normalizer writes `normalized-locomo-suite.json` into the benchmark artifact
 directory. Dataset downloads and caches belong under `QUIPU_DATASET_CACHE`,
 `.quipu-datasets/`, or another ignored local path.
+
+## Real LongMemEval Dataset
+
+Quipu can normalize the official cleaned LongMemEval files released by
+`xiaowu0162/longmemeval-cleaned`:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
+  --external-benchmark longmemeval \
+  --download-longmemeval \
+  --longmemeval-variant oracle \
+  --result-class publishable \
+  --include-baselines \
+  --include-ablations \
+  --include-lattice \
+  --require-lattice \
+  --skip-core \
+  --core-retrieval-mode graph \
+  --core-entity-provider deterministic \
+  --reuse-existing \
+  --allow-failures \
+  --markdown artifacts/benchmarks/longmemeval-full/report.md
+```
+
+For a quick real-file normalization check, add
+`--longmemeval-max-conversations 5`. The normalizer writes
+`normalized-longmemeval-suite.json` into the benchmark artifact directory.

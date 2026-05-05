@@ -1,0 +1,107 @@
+{
+  "name": "longmemeval_mini",
+  "version": "0.1.0",
+  "metadata": {
+    "format": "quipu.external.scenario.v1",
+    "benchmark": "longmemeval",
+    "datasetName": "LongMemEval mini smoke fixture",
+    "datasetVersion": "mini-0.1.0",
+    "source": "handwritten fixture for Quipu harness validation",
+    "license": "MIT",
+    "downloadRequired": false,
+    "cacheEnv": "QUIPU_DATASET_CACHE",
+    "tasks": [
+      "single-session-user",
+      "temporal-reasoning",
+      "knowledge-update"
+    ]
+  },
+  "suites": [
+    "longmemeval",
+    "external_smoke"
+  ],
+  "scenarios": [
+    {
+      "scenarioId": "longmemeval_mini_assistant_memory",
+      "metadata": {
+        "source": "longmemeval_mini",
+        "license": "MIT",
+        "suite": "longmemeval",
+        "description": "Small LongMemEval-shaped timestamped chat history with session-level evidence"
+      },
+      "actors": [
+        { "id": "user", "type": "user", "name": "User" },
+        { "id": "assistant", "type": "agent", "name": "Assistant" }
+      ],
+      "events": [
+        {
+          "eventId": "lme_session_tea",
+          "time": "2026-01-02T09:00:00Z",
+          "type": "message",
+          "messages": [
+            { "role": "user", "content": "Please remember that my favorite tea for morning writing is jasmine." },
+            { "role": "assistant", "content": "Got it, jasmine tea for morning writing." }
+          ],
+          "scope": { "tenantId": "benchmark:longmemeval", "projectId": "longmemeval:mini" },
+          "groundTruthMemories": ["lme_memory_tea"]
+        },
+        {
+          "eventId": "lme_session_hotel_old",
+          "time": "2026-01-10T12:00:00Z",
+          "type": "message",
+          "messages": [
+            { "role": "user", "content": "For my conference trip, the hotel is Harbor Inn." }
+          ],
+          "scope": { "tenantId": "benchmark:longmemeval", "projectId": "longmemeval:mini" },
+          "groundTruthMemories": ["lme_memory_hotel_old"]
+        },
+        {
+          "eventId": "lme_session_hotel_new",
+          "time": "2026-02-01T12:00:00Z",
+          "type": "message",
+          "messages": [
+            { "role": "user", "content": "Update the conference trip hotel to Lakeside Suites instead of Harbor Inn." }
+          ],
+          "scope": { "tenantId": "benchmark:longmemeval", "projectId": "longmemeval:mini" },
+          "groundTruthMemories": ["lme_memory_hotel_new"]
+        }
+      ],
+      "queries": [
+        {
+          "queryId": "lme_q_tea",
+          "time": "2026-02-10T10:00:00Z",
+          "query": "What is my favorite tea for morning writing?",
+          "scope": { "tenantId": "benchmark:longmemeval", "projectId": "longmemeval:mini" },
+          "expectedAnswer": "jasmine",
+          "expectedEvidenceEventIds": ["lme_session_tea"],
+          "mustNotUseEventIds": [],
+          "category": "single-session-user",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "lme_q_temporal",
+          "time": "2026-01-20T10:00:00Z",
+          "query": "What was my conference trip hotel on January 20?",
+          "scope": { "tenantId": "benchmark:longmemeval", "projectId": "longmemeval:mini" },
+          "expectedAnswer": "Harbor Inn",
+          "expectedEvidenceEventIds": ["lme_session_hotel_old"],
+          "mustNotUseEventIds": [],
+          "category": "temporal-reasoning",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "lme_q_update",
+          "time": "2026-02-10T10:00:00Z",
+          "query": "What is my current conference trip hotel?",
+          "scope": { "tenantId": "benchmark:longmemeval", "projectId": "longmemeval:mini" },
+          "expectedAnswer": "Lakeside Suites",
+          "expectedEvidenceEventIds": ["lme_session_hotel_new"],
+          "mustNotUseEventIds": [],
+          "category": "knowledge-update",
+          "shouldAbstain": false
+        }
+      ],
+      "forgetOps": []
+    }
+  ]
+}

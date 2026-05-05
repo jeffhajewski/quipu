@@ -41,4 +41,5 @@ verification, and manifests. Its scores are not directly comparable to
 published vendor runs until the answer model, judge, retrieval cutoff, dataset
 slice, and category set are aligned.
 
-LongMemEval and MemoryAgentBench remain planned adapters.
+LongMemEval has the same normalized external-suite path and readiness gate as
+LoCoMo. MemoryAgentBench remains a planned adapter.

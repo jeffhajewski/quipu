@@ -90,6 +90,18 @@ Or let the harness download `data/locomo10.json` into the ignored dataset cache:
 just benchmark-locomo-download
 ```
 
+Run the LongMemEval smoke fixture:
+
+```bash
+just benchmark-longmemeval-smoke
+```
+
+Or download the official cleaned LongMemEval oracle split from Hugging Face:
+
+```bash
+just benchmark-longmemeval-download
+```
+
 Full runs require LatticeDB paths through `LATTICE_INCLUDE` and `LATTICE_LIB_DIR`
 or `LATTICE_LIB_PATH`. They return successfully after producing artifacts even
 when benchmark answers fail; failed answers are benchmark results, not harness
@@ -101,6 +113,4 @@ to force the core runtime benchmark through semantic+lexical retrieval. With
 
 ## Planned External Adapters
 
-- LoCoMo full dataset adapter and baselines
-- LongMemEval
 - MemoryAgentBench

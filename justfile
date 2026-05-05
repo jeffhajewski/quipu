@@ -45,7 +45,13 @@ benchmark-locomo-full dataset:
 benchmark-locomo-download:
     PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --download-locomo --result-class publishable --include-baselines --include-ablations --include-lattice --require-lattice --skip-core --core-retrieval-mode graph --core-entity-provider deterministic --reuse-existing --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
 
-benchmark-external-all: benchmark-locomo-smoke benchmark-locomo-graph-smoke
+benchmark-longmemeval-smoke:
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark longmemeval --include-baselines --include-ablations --allow-failures --output-dir artifacts/benchmarks/longmemeval-smoke --report artifacts/benchmarks/longmemeval-smoke/report.json --markdown artifacts/benchmarks/longmemeval-smoke/report.md
+
+benchmark-longmemeval-download:
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark longmemeval --download-longmemeval --longmemeval-variant oracle --result-class publishable --include-baselines --include-ablations --include-lattice --require-lattice --skip-core --core-retrieval-mode graph --core-entity-provider deterministic --reuse-existing --allow-failures --markdown artifacts/benchmarks/longmemeval-full/report.md
+
+benchmark-external-all: benchmark-locomo-smoke benchmark-locomo-graph-smoke benchmark-longmemeval-smoke
 
 ci:
     python3 scripts/check_format.py --check

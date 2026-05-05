@@ -10,6 +10,7 @@ from .scenarios import Suite, load_suite
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_EXTERNAL_SUITES = {
     "locomo": ROOT / "evals" / "suites" / "external" / "locomo_mini.yaml",
+    "longmemeval": ROOT / "evals" / "suites" / "external" / "longmemeval_mini.yaml",
 }
 EXTERNAL_SCENARIO_FORMAT = "quipu.external.scenario.v1"
 
