@@ -1,0 +1,58 @@
+{
+  "name": "coding-agent",
+  "version": "0.1.0",
+  "description": "Default memory slots and retrieval needs for local coding agents.",
+  "defaultScopes": ["project", "user"],
+  "extractionSlots": [
+    {
+      "slotKey": "project.package_manager",
+      "type": "Fact",
+      "description": "Preferred package manager for the repository.",
+      "examples": ["Use pnpm, not npm.", "This repo uses npm."]
+    },
+    {
+      "slotKey": "project.test_command",
+      "type": "Procedure",
+      "description": "Command the agent should run before committing or reporting completion.",
+      "examples": ["Run just test before committing.", "Use pnpm test."]
+    },
+    {
+      "slotKey": "project.repo_style",
+      "type": "Fact",
+      "description": "Repository implementation style or design idiom.",
+      "examples": ["Keep SDKs thin and daemon-backed.", "Prefer small public APIs."]
+    },
+    {
+      "slotKey": "project.constraint",
+      "type": "Fact",
+      "description": "Project invariants and constraints that should affect implementation choices.",
+      "examples": ["Derived memory must link to evidence.", "Forgetting must propagate."]
+    },
+    {
+      "slotKey": "user.response_style",
+      "type": "Preference",
+      "description": "How the user wants engineering responses written.",
+      "examples": ["Please be concise.", "Response style: detailed."]
+    }
+  ],
+  "coreBlocks": [
+    {
+      "blockKey": "project_context",
+      "scope": "project",
+      "needs": ["current_facts", "procedural", "core"],
+      "template": "Package manager, test command, repo style, and project constraints with evidence qids."
+    },
+    {
+      "blockKey": "user_context",
+      "scope": "user",
+      "needs": ["preferences", "core"],
+      "template": "Durable user response style and collaboration preferences with evidence qids."
+    }
+  ],
+  "retrievalNeeds": ["core", "current_facts", "procedural", "preferences", "recent_episodes"],
+  "forgettingPolicy": {
+    "defaultMode": "hard_delete",
+    "propagate": true,
+    "dryRunByDefault": true
+  }
+}
