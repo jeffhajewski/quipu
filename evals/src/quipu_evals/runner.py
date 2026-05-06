@@ -18,7 +18,13 @@ from .graders import (
     grade_scope_leakage,
 )
 from .metrics import grade_counts, metric_groups
-from .provider_clients import LlmClient, OpenRouterClient, openrouter_providers_from_env, supported_llm_provider_ids
+from .provider_clients import (
+    LlmClient,
+    OpenRouterClient,
+    ProviderError,
+    openrouter_providers_from_env,
+    supported_llm_provider_ids,
+)
 from .scenarios import Scenario, load_suite
 
 
@@ -126,8 +132,13 @@ def run_scenario(
             grade_scope_leakage(retrieval.item_scopes, query.scope),
         ]
         if judge_provider is not None:
-            judgment = judge_provider.judge_answer(query.query, query.expected_answer, retrieval.answer)
-            grades.append(grade_llm_judge(judgment.passed, judgment.score, judgment.reason, judgment.model))
+            try:
+                judgment = judge_provider.judge_answer(query.query, query.expected_answer, retrieval.answer)
+            except ProviderError as exc:
+                judge_model = str(getattr(getattr(judge_provider, "settings", None), "judge_model", "unknown"))
+                grades.append(grade_llm_judge(False, 0.0, f"judge failed: {str(exc)[:2000]}", judge_model))
+            else:
+                grades.append(grade_llm_judge(judgment.passed, judgment.score, judgment.reason, judgment.model))
         query_runs.append(QueryRun(scenario.scenario_id, query.query_id, grades))
 
     forget_runs = []
