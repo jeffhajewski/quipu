@@ -1,0 +1,101 @@
+{
+  "artifacts": {
+    "results": "artifacts/benchmarks/llm-longmemeval-full/core_lattice-results.json"
+  },
+  "baseline": "core_lattice",
+  "config": {
+    "answerMethod": "answer",
+    "answerModel": "openai/gpt-4o-mini",
+    "answerProvider": "openrouter",
+    "embeddingModel": null,
+    "embeddingProvider": null,
+    "entityModel": null,
+    "entityProvider": null,
+    "externalBenchmark": "longmemeval",
+    "latticeInclude": "/Users/icarus/github/latticedb/zig-out/include",
+    "latticeLib": "/Users/icarus/github/latticedb/zig-out/lib",
+    "pageSize": 16777216,
+    "resultClass": "publishable",
+    "retrievalMode": null,
+    "suite": "artifacts/benchmarks/llm-longmemeval-full/normalized-longmemeval-suite.json",
+    "vectorDimensions": null
+  },
+  "configHash": "5b8efcc7c7a765f636c71b76dded89decc25c22276c9a90074ebab46488b86ba",
+  "dataset": {
+    "name": "longmemeval",
+    "version": "real-2025-cleaned-oracle"
+  },
+  "durationMs": 1418.393,
+  "generatedAt": "2026-05-06T06:29:31.542025Z",
+  "gitCommit": "e5de381",
+  "hardware": {
+    "machine": "arm64",
+    "processor": "arm",
+    "python": "3.9.6",
+    "release": "25.3.0",
+    "system": "Darwin"
+  },
+  "latticeVersion": "0.7.0",
+  "metrics": {
+    "answer": {
+      "exactMatch": 0.0
+    },
+    "forgetOpsPassed": 0,
+    "forgetOpsTotal": 0,
+    "forgetting": {},
+    "grades": {
+      "evidence_ids": {
+        "passed": 0,
+        "total": 500
+      },
+      "exact_answer": {
+        "passed": 0,
+        "total": 500
+      },
+      "forbidden_evidence": {
+        "passed": 500,
+        "total": 500
+      },
+      "llm_judge": {
+        "passed": 0,
+        "total": 500
+      },
+      "runtime_error": {
+        "passed": 0,
+        "total": 500
+      }
+    },
+    "queriesPassed": 0,
+    "queriesTotal": 500,
+    "retrieval": {
+      "evidencePrecision": 0.0,
+      "evidenceRecall": 0.0,
+      "recallAtK": 0.0,
+      "staleMemoryRate": 0.0
+    },
+    "runtime": {}
+  },
+  "passed": false,
+  "providers": {
+    "answer": "openrouter:openai/gpt-4o-mini",
+    "embedder": "deterministic_fixture",
+    "entityResolver": "none",
+    "extractor": "deterministic_fixture",
+    "judge": "rule_based",
+    "reranker": "none"
+  },
+  "quipuVersion": "0.1.0",
+  "randomSeed": 0,
+  "runId": "run_1cfbe3c589127331",
+  "runner": "quipu_evals.core_runner",
+  "schemaVersion": "quipu.eval.run.v1",
+  "storage": "lattice",
+  "suite": {
+    "name": "longmemeval",
+    "path": "artifacts/benchmarks/llm-longmemeval-full/normalized-longmemeval-suite.json",
+    "version": "real-2025-cleaned-oracle"
+  },
+  "verification": {
+    "status": "failed"
+  }
+}

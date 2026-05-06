@@ -1,0 +1,90 @@
+{
+  "artifacts": {
+    "results": "artifacts/benchmarks/llm-longmemeval-full/ablation_Q6-results.json"
+  },
+  "baseline": "Q6",
+  "config": {
+    "ablation": "Q6",
+    "externalBenchmark": "longmemeval",
+    "resultClass": "publishable",
+    "suite": "artifacts/benchmarks/llm-longmemeval-full/normalized-longmemeval-suite.json"
+  },
+  "configHash": "eacd704c86a0994bdf71110c3c7528e953f9c3812b547b430eb8ff851ebd6a5d",
+  "dataset": {
+    "name": "longmemeval",
+    "version": "real-2025-cleaned-oracle"
+  },
+  "durationMs": 3862.548,
+  "generatedAt": "2026-05-06T05:17:16.993326Z",
+  "gitCommit": "d18c212",
+  "hardware": {
+    "machine": "arm64",
+    "processor": "arm",
+    "python": "3.9.6",
+    "release": "25.3.0",
+    "system": "Darwin"
+  },
+  "latticeVersion": null,
+  "metrics": {
+    "answer": {
+      "exactMatch": 0.442
+    },
+    "forgetOpsPassed": 0,
+    "forgetOpsTotal": 0,
+    "forgetting": {},
+    "grades": {
+      "evidence_ids": {
+        "passed": 455,
+        "total": 500
+      },
+      "exact_answer": {
+        "passed": 221,
+        "total": 500
+      },
+      "forbidden_evidence": {
+        "passed": 500,
+        "total": 500
+      },
+      "llm_judge": {
+        "passed": 244,
+        "total": 500
+      },
+      "scope_leakage": {
+        "passed": 500,
+        "total": 500
+      }
+    },
+    "queriesPassed": 218,
+    "queriesTotal": 500,
+    "retrieval": {
+      "evidencePrecision": 0.968,
+      "evidenceRecall": 0.9400666666666666,
+      "recallAtK": 0.9400666666666666,
+      "scopePrecision": 1.0,
+      "staleMemoryRate": 0.0
+    },
+    "runtime": {}
+  },
+  "passed": false,
+  "providers": {
+    "answer": "deterministic_prompt_match",
+    "embedder": "deterministic_fixture",
+    "extractor": "deterministic_fixture",
+    "judge": "rule_based",
+    "reranker": "none"
+  },
+  "quipuVersion": "0.1.0",
+  "randomSeed": 0,
+  "runId": "run_16d8a50b6f8915fd",
+  "runner": "quipu_evals.runner",
+  "schemaVersion": "quipu.eval.run.v1",
+  "storage": "deterministic",
+  "suite": {
+    "name": "longmemeval",
+    "path": "artifacts/benchmarks/llm-longmemeval-full/normalized-longmemeval-suite.json",
+    "version": "real-2025-cleaned-oracle"
+  },
+  "verification": {
+    "status": "not_run"
+  }
+}

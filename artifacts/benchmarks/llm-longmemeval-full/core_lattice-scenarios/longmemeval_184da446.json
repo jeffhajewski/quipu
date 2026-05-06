@@ -1,0 +1,77 @@
+{
+  "forgetOps": [],
+  "queries": [
+    {
+      "actualAnswer": "",
+      "category": "knowledge-update",
+      "evidenceEventIds": [],
+      "grades": [
+        {
+          "details": {
+            "actual": "",
+            "expected": "220"
+          },
+          "name": "exact_answer",
+          "passed": false
+        },
+        {
+          "details": {
+            "actual": [],
+            "expected": [
+              "answer_e2f4f947_1",
+              "answer_e2f4f947_2"
+            ],
+            "missing": [
+              "answer_e2f4f947_1",
+              "answer_e2f4f947_2"
+            ]
+          },
+          "name": "evidence_ids",
+          "passed": false
+        },
+        {
+          "details": {
+            "actual": [],
+            "forbidden": [],
+            "usedForbidden": []
+          },
+          "name": "forbidden_evidence",
+          "passed": true
+        },
+        {
+          "details": {
+            "error": "core process exited without a response: thread 398399 panic: integer overflow\n/Users/icarus/github/latticedb/src/storage/btree.zig:545:39: 0x103ea6a9f in insertLeafEntry (lattice)\n        const new_offset = min_offset - entry_size;\n                                      ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:637:33: 0x103ea6433 in splitLeafAndInsert (lattice)\n            self.insertLeafEntry(new_buf, @intCast(i - split_point), entries[i].key, entries[i].value);\n                                ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:509:39: 0x103ea54d3 in insertIntoLeaf (lattice)\n        return self.splitLeafAndInsert(frame, search.slot, key, value);\n                                      ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:452:39: 0x103ea216f in insertRecursive (lattice)\n            return self.insertIntoLeaf(frame, key, value);\n                                      ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:459:54: 0x103ea213f in insertRecursive (lattice)\n        const child_result = try self.insertRecursive(child_page, key, value);\n                                                     ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:427:48: 0x103ea19c7 in insert (lattice)\n        const result = try self.insertRecursive(self.root_page, key, value);\n                                               ^\n/Users/icarus/github/latticedb/src/stream/store.zig:264:24: 0x103eb8db3 in appendWithSequence (lattice)\n    trees.events.insert(key, value) catch |err| switch (err) {\n                       ^\n/Users/icarus/github/latticedb/src/storage/database.zig:1614:52: 0x104230e93 in applyTxnOverlay (lattice)\n                stream_store_mod.appendWithSequence(\n                                                   ^\n/Users/icarus/github/latticedb/src/storage/database.zig:1027:45: 0x10422b603 in commitTransaction (lattice)\n                    try self.applyTxnOverlay(txn.id, overlay); ... [truncated]"
+          },
+          "name": "runtime_error",
+          "passed": false
+        },
+        {
+          "details": {
+            "model": "openai/gpt-4o-mini",
+            "reason": "core scenario failed: core process exited without a response: thread 398399 panic: integer overflow\n/Users/icarus/github/latticedb/src/storage/btree.zig:545:39: 0x103ea6a9f in insertLeafEntry (lattice)\n        const new_offset = min_offset - entry_size;\n                                      ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:637:33: 0x103ea6433 in splitLeafAndInsert (lattice)\n            self.insertLeafEntry(new_buf, @intCast(i - split_point), entries[i].key, entries[i].value);\n                                ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:509:39: 0x103ea54d3 in insertIntoLeaf (lattice)\n        return self.splitLeafAndInsert(frame, search.slot, key, value);\n                                      ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:452:39: 0x103ea216f in insertRecursive (lattice)\n            return self.insertIntoLeaf(frame, key, value);\n                                      ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:459:54: 0x103ea213f in insertRecursive (lattice)\n        const child_result = try self.insertRecursive(child_page, key, value);\n                                                     ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:427:48: 0x103ea19c7 in insert (lattice)\n        const result = try self.insertRecursive(self.root_page, key, value);\n                                               ^\n/Users/icarus/github/latticedb/src/stream/store.zig:264:24: 0x103eb8db3 in appendWithSequence (lattice)\n    trees.events.insert(key, value) catch |err| switch (err) {\n                       ^\n/Users/icarus/github/latticedb/src/storage/database.zig:1614:52: 0x104230e93 in applyTxnOverlay (lattice)\n                stream_store_mod.appendWithSequence(\n                                                   ^\n/Users/icarus/github/latticedb/src/storage/database.zig:1027:45: 0x10422b603 in commitTransaction (lattice)\n                    try self.applyTxnOverlay(txn.id, overlay); ... [truncated]",
+            "score": 0.0
+          },
+          "name": "llm_judge",
+          "passed": false
+        }
+      ],
+      "passed": false,
+      "queryId": "184da446",
+      "scenarioId": "longmemeval_184da446",
+      "trace": null
+    }
+  ],
+  "scenarioId": "longmemeval_184da446",
+  "verification": {
+    "exitCode": 1,
+    "issueCount": 1,
+    "issues": [
+      {
+        "code": "core_runtime_error",
+        "message": "core process exited without a response: thread 398399 panic: integer overflow\n/Users/icarus/github/latticedb/src/storage/btree.zig:545:39: 0x103ea6a9f in insertLeafEntry (lattice)\n        const new_offset = min_offset - entry_size;\n                                      ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:637:33: 0x103ea6433 in splitLeafAndInsert (lattice)\n            self.insertLeafEntry(new_buf, @intCast(i - split_point), entries[i].key, entries[i].value);\n                                ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:509:39: 0x103ea54d3 in insertIntoLeaf (lattice)\n        return self.splitLeafAndInsert(frame, search.slot, key, value);\n                                      ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:452:39: 0x103ea216f in insertRecursive (lattice)\n            return self.insertIntoLeaf(frame, key, value);\n                                      ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:459:54: 0x103ea213f in insertRecursive (lattice)\n        const child_result = try self.insertRecursive(child_page, key, value);\n                                                     ^\n/Users/icarus/github/latticedb/src/storage/btree.zig:427:48: 0x103ea19c7 in insert (lattice)\n        const result = try self.insertRecursive(self.root_page, key, value);\n                                               ^\n/Users/icarus/github/latticedb/src/stream/store.zig:264:24: 0x103eb8db3 in appendWithSequence (lattice)\n    trees.events.insert(key, value) catch |err| switch (err) {\n                       ^\n/Users/icarus/github/latticedb/src/storage/database.zig:1614:52: 0x104230e93 in applyTxnOverlay (lattice)\n                stream_store_mod.appendWithSequence(\n                                                   ^\n/Users/icarus/github/latticedb/src/storage/database.zig:1027:45: 0x10422b603 in commitTransaction (lattice)\n                    try self.applyTxnOverlay(txn.id, overlay); ... [truncated]"
+      }
+    ],
+    "scenarioId": "longmemeval_184da446",
+    "status": "failed"
+  }
+}
