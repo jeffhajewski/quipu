@@ -140,6 +140,7 @@ def run_core_suite(
     query_runs: list[CoreQueryRun] = []
     forget_runs: list[CoreForgetRun] = []
     verification_runs: list[Mapping[str, Any]] = []
+    fatal_scenario_error: RuntimeError | None = None
     for scenario in suite.scenarios:
         scenario_artifact = scenario_artifact_path(scenario_artifact_dir, scenario.scenario_id) if scenario_artifact_dir is not None else None
         if reuse_existing and scenario_artifact is not None and scenario_artifact.exists():
@@ -157,28 +158,44 @@ def run_core_suite(
                 raise ValueError("db_dir is required for lattice storage")
             db_path = db_dir / f"{scenario.scenario_id}.lattice"
         retrieval_needs = ["raw"] if suite.metadata.get("benchmark") == "locomo" else None
-        scenario_query_runs, scenario_forget_runs, scenario_verification = run_core_scenario(
-            scenario,
-            db_path=db_path,
-            retrieval_needs=retrieval_needs,
-            skip_verification=skip_verification,
-            log_retrieval=log_retrieval,
-            extract=extract,
-            retrieval_mode=retrieval_mode,
-            answer_method=answer_method,
-            answer_provider=answer_provider,
-            answer_model=answer_model,
-            answer_url=answer_url,
-            entity_provider=entity_provider,
-            entity_model=entity_model,
-            entity_url=entity_url,
-            embedding_provider=embedding_provider,
-            embedding_model=embedding_model,
-            embedding_url=embedding_url,
-            vector_dimensions=vector_dimensions,
-            page_size=page_size,
-            judge_provider=judge_provider,
-        )
+        if fatal_scenario_error is not None:
+            scenario_query_runs, scenario_forget_runs, scenario_verification = failed_core_scenario(
+                scenario,
+                fatal_scenario_error,
+                judge_provider=judge_provider,
+            )
+        else:
+            try:
+                scenario_query_runs, scenario_forget_runs, scenario_verification = run_core_scenario(
+                    scenario,
+                    db_path=db_path,
+                    retrieval_needs=retrieval_needs,
+                    skip_verification=skip_verification,
+                    log_retrieval=log_retrieval,
+                    extract=extract,
+                    retrieval_mode=retrieval_mode,
+                    answer_method=answer_method,
+                    answer_provider=answer_provider,
+                    answer_model=answer_model,
+                    answer_url=answer_url,
+                    entity_provider=entity_provider,
+                    entity_model=entity_model,
+                    entity_url=entity_url,
+                    embedding_provider=embedding_provider,
+                    embedding_model=embedding_model,
+                    embedding_url=embedding_url,
+                    vector_dimensions=vector_dimensions,
+                    page_size=page_size,
+                    judge_provider=judge_provider,
+                )
+            except RuntimeError as exc:
+                if storage == "lattice" and "core process exited without a response" in str(exc):
+                    fatal_scenario_error = exc
+                scenario_query_runs, scenario_forget_runs, scenario_verification = failed_core_scenario(
+                    scenario,
+                    exc,
+                    judge_provider=judge_provider,
+                )
         query_runs.extend(scenario_query_runs)
         forget_runs.extend(scenario_forget_runs)
         if scenario_verification is not None:
@@ -191,6 +208,56 @@ def run_core_suite(
             )
     baseline = "core_lattice" if storage == "lattice" else "core_in_memory"
     return CoreSuiteRun(suite.name, suite.version, baseline, query_runs, forget_runs, verification_runs)
+
+
+def failed_core_scenario(
+    scenario: Scenario,
+    error: RuntimeError,
+    *,
+    judge_provider: object | None = None,
+) -> tuple[list[CoreQueryRun], list[CoreForgetRun], Mapping[str, Any]]:
+    judge_model = str(getattr(getattr(judge_provider, "settings", None), "judge_model", "unknown"))
+    error_text = str(error)
+    query_runs = [
+        failed_core_query_run(scenario.scenario_id, query, error_text, judge_model if judge_provider is not None else None)
+        for query in scenario.queries
+    ]
+    verification = {
+        "scenarioId": scenario.scenario_id,
+        "exitCode": 1,
+        "status": "failed",
+        "issueCount": 1,
+        "issues": [{"code": "core_runtime_error", "message": error_text}],
+    }
+    return query_runs, [], verification
+
+
+def failed_core_query_run(
+    scenario_id: str,
+    query: Query,
+    error_text: str,
+    judge_model: str | None,
+) -> CoreQueryRun:
+    actual_answer = ""
+    evidence_event_ids: list[str] = []
+    grades = [
+        grade_exact_answer(actual_answer, query.expected_answer),
+        grade_evidence_ids(evidence_event_ids, query.expected_evidence_event_ids),
+        grade_forbidden_evidence(evidence_event_ids, query.must_not_use_event_ids),
+        GradeResult(name="runtime_error", passed=False, details={"error": error_text}),
+    ]
+    if judge_model is not None:
+        grades.append(grade_llm_judge(False, 0.0, f"core scenario failed: {error_text}", judge_model))
+    return CoreQueryRun(
+        scenario_id=scenario_id,
+        query_id=query.query_id,
+        category=query.category,
+        prompt=f"Core scenario failed: {error_text}",
+        actual_answer=actual_answer,
+        evidence_event_ids=evidence_event_ids,
+        grades=grades,
+        trace=None,
+    )
 
 
 def run_core_scenario(
