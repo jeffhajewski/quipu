@@ -18,7 +18,7 @@ from .graders import (
     grade_scope_leakage,
 )
 from .metrics import grade_counts, metric_groups
-from .provider_clients import OpenRouterClient, openrouter_providers_from_env
+from .provider_clients import LlmClient, OpenRouterClient, openrouter_providers_from_env, supported_llm_provider_ids
 from .scenarios import Scenario, load_suite
 
 
@@ -181,9 +181,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("suite", nargs="?", default="evals/suites/quipu_synthetic.yaml")
     parser.add_argument("--baseline", choices=supported_baseline_ids(), default="q0_raw_only_fake")
+    llm_provider_choices = supported_llm_provider_ids()
     parser.add_argument("--embedding-provider", choices=["deterministic", "openrouter"], default="deterministic")
-    parser.add_argument("--answer-provider", choices=["deterministic", "openrouter"], default="deterministic")
-    parser.add_argument("--judge-provider", choices=["none", "openrouter"], default="none")
+    parser.add_argument("--answer-provider", choices=["deterministic", *llm_provider_choices], default="deterministic")
+    parser.add_argument("--answer-model")
+    parser.add_argument("--judge-provider", choices=["none", *llm_provider_choices], default="none")
+    parser.add_argument("--judge-model")
+    parser.add_argument("--provider-base-url", help="Override the selected eval LLM provider base URL")
     parser.add_argument("--embedding-cache", type=Path, help="JSONL cache for provider embedding vectors")
     parser.add_argument("--output", type=Path, help="Write the full run result JSON to this path")
     parser.add_argument("--manifest", type=Path, help="Write a compact eval run manifest to this path")
@@ -197,14 +201,21 @@ def main() -> int:
     if args.answer_provider == "openrouter":
         openrouter_client = openrouter_client or OpenRouterClient()
         answer_provider = openrouter_client
+    elif args.answer_provider != "deterministic":
+        answer_provider = LlmClient(args.answer_provider, model=args.answer_model, base_url=args.provider_base_url)
     if args.judge_provider == "openrouter":
         openrouter_client = openrouter_client or OpenRouterClient()
         judge_provider = openrouter_client
-    baseline_label = (
-        f"openrouter_{args.baseline}"
-        if args.embedding_provider == "openrouter" or args.answer_provider == "openrouter" or args.judge_provider == "openrouter"
-        else args.baseline
+    elif args.judge_provider != "none":
+        judge_provider = LlmClient(args.judge_provider, judge_model=args.judge_model, base_url=args.provider_base_url)
+    provider_backed = args.embedding_provider == "openrouter" or args.answer_provider != "deterministic" or args.judge_provider != "none"
+    openrouter_only = (
+        args.embedding_provider in ("deterministic", "openrouter")
+        and args.answer_provider in ("deterministic", "openrouter")
+        and args.judge_provider in ("none", "openrouter")
+        and provider_backed
     )
+    baseline_label = f"openrouter_{args.baseline}" if openrouter_only else f"provider_{args.baseline}" if provider_backed else args.baseline
     run = run_suite(
         args.suite,
         baseline_id=args.baseline,

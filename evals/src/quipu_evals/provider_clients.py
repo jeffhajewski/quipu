@@ -30,6 +30,198 @@ class LlmJudgeResult:
 
 
 @dataclass(frozen=True)
+class ProviderProfile:
+    provider: str
+    format: str
+    base_url: str
+    answer_model: str
+    judge_model: str
+    api_key_env: str | None
+    embedding_model: str | None = None
+    embedding_base_url: str | None = None
+    embedding_batch_size: int = 32
+
+
+PROVIDER_PROFILES: dict[str, ProviderProfile] = {
+    "openai": ProviderProfile(
+        provider="openai",
+        format="openai_compatible",
+        base_url="https://api.openai.com/v1",
+        answer_model="gpt-4o",
+        judge_model="gpt-4o",
+        api_key_env="OPENAI_API_KEY",
+        embedding_model="text-embedding-3-small",
+    ),
+    "anthropic": ProviderProfile(
+        provider="anthropic",
+        format="anthropic_messages",
+        base_url="https://api.anthropic.com/v1",
+        answer_model="claude-sonnet-4-20250514",
+        judge_model="claude-sonnet-4-20250514",
+        api_key_env="ANTHROPIC_API_KEY",
+    ),
+    "google": ProviderProfile(
+        provider="google",
+        format="google_gemini",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+        answer_model="gemini-2.0-flash",
+        judge_model="gemini-2.0-flash",
+        api_key_env="GOOGLE_API_KEY",
+    ),
+    "gemini": ProviderProfile(
+        provider="google",
+        format="google_gemini",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+        answer_model="gemini-2.0-flash",
+        judge_model="gemini-2.0-flash",
+        api_key_env="GOOGLE_API_KEY",
+    ),
+    "openrouter": ProviderProfile(
+        provider="openrouter",
+        format="openai_compatible",
+        base_url=DEFAULT_OPENROUTER_BASE_URL,
+        answer_model=DEFAULT_OPENROUTER_ANSWER_MODEL,
+        judge_model=DEFAULT_OPENROUTER_JUDGE_MODEL,
+        api_key_env="OPENROUTER_API_KEY",
+        embedding_model=DEFAULT_OPENROUTER_EMBEDDING_MODEL,
+    ),
+    "azure": ProviderProfile(
+        provider="azure",
+        format="openai_compatible",
+        base_url="",
+        answer_model="gpt-4o",
+        judge_model="gpt-4o",
+        api_key_env="AZURE_OPENAI_API_KEY",
+    ),
+    "groq": ProviderProfile(
+        provider="groq",
+        format="openai_compatible",
+        base_url="https://api.groq.com/openai/v1",
+        answer_model="llama-3.3-70b-versatile",
+        judge_model="llama-3.3-70b-versatile",
+        api_key_env="GROQ_API_KEY",
+    ),
+    "ollama": ProviderProfile(
+        provider="ollama",
+        format="openai_compatible",
+        base_url="http://localhost:11434/v1",
+        answer_model="llama3.3",
+        judge_model="llama3.3",
+        api_key_env=None,
+    ),
+    "together": ProviderProfile(
+        provider="together",
+        format="openai_compatible",
+        base_url="https://api.together.xyz/v1",
+        answer_model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        judge_model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        api_key_env="TOGETHER_API_KEY",
+    ),
+    "mistral": ProviderProfile(
+        provider="mistral",
+        format="openai_compatible",
+        base_url="https://api.mistral.ai/v1",
+        answer_model="mistral-large-latest",
+        judge_model="mistral-large-latest",
+        api_key_env="MISTRAL_API_KEY",
+    ),
+    "deepseek": ProviderProfile(
+        provider="deepseek",
+        format="openai_compatible",
+        base_url="https://api.deepseek.com",
+        answer_model="deepseek-chat",
+        judge_model="deepseek-chat",
+        api_key_env="DEEPSEEK_API_KEY",
+    ),
+    "kimi": ProviderProfile(
+        provider="kimi",
+        format="openai_compatible",
+        base_url="https://api.moonshot.ai/v1",
+        answer_model="kimi-latest",
+        judge_model="kimi-latest",
+        api_key_env="MOONSHOT_API_KEY",
+    ),
+    "moonshot": ProviderProfile(
+        provider="kimi",
+        format="openai_compatible",
+        base_url="https://api.moonshot.ai/v1",
+        answer_model="kimi-latest",
+        judge_model="kimi-latest",
+        api_key_env="MOONSHOT_API_KEY",
+    ),
+    "cohere": ProviderProfile(
+        provider="cohere",
+        format="cohere_chat",
+        base_url="https://api.cohere.com/v2",
+        answer_model="command-a-03-2025",
+        judge_model="command-a-03-2025",
+        api_key_env="COHERE_API_KEY",
+    ),
+    "custom": ProviderProfile(
+        provider="custom",
+        format="openai_compatible",
+        base_url="",
+        answer_model="model",
+        judge_model="model",
+        api_key_env="QUIPU_LLM_API_KEY",
+    ),
+}
+
+
+def supported_llm_provider_ids() -> list[str]:
+    return sorted(PROVIDER_PROFILES)
+
+
+@dataclass(frozen=True)
+class LlmSettings:
+    provider: str
+    api_key: str | None
+    base_url: str
+    answer_model: str
+    judge_model: str
+    embedding_model: str | None = None
+    embedding_base_url: str | None = None
+    embedding_batch_size: int = 32
+    app_title: str = "Quipu Evals"
+    app_url: str | None = None
+
+    @classmethod
+    def from_env(cls, provider: str | None = None) -> "LlmSettings":
+        provider_id = provider or _detect_provider_from_env() or "openrouter"
+        profile = _profile(provider_id)
+        prefix = profile.provider.upper()
+        api_key = os.environ.get("QUIPU_LLM_API_KEY")
+        if api_key is None and profile.api_key_env:
+            api_key = os.environ.get(profile.api_key_env)
+        if profile.api_key_env and not api_key:
+            raise ProviderError(f"{profile.api_key_env} or QUIPU_LLM_API_KEY is required for {profile.provider}")
+        base_url = (
+            os.environ.get("QUIPU_LLM_BASE_URL")
+            or os.environ.get(f"{prefix}_BASE_URL")
+            or os.environ.get(f"{prefix}_CHAT_URL")
+            or profile.base_url
+        ).rstrip("/")
+        return cls(
+            provider=profile.provider,
+            api_key=api_key,
+            base_url=base_url,
+            answer_model=os.environ.get("QUIPU_LLM_MODEL")
+            or os.environ.get(f"{prefix}_ANSWER_MODEL")
+            or os.environ.get(f"{prefix}_MODEL")
+            or profile.answer_model,
+            judge_model=os.environ.get("QUIPU_JUDGE_MODEL")
+            or os.environ.get(f"{prefix}_JUDGE_MODEL")
+            or os.environ.get(f"{prefix}_MODEL")
+            or profile.judge_model,
+            embedding_model=os.environ.get(f"{prefix}_EMBEDDING_MODEL") or profile.embedding_model,
+            embedding_base_url=(os.environ.get(f"{prefix}_EMBEDDING_BASE_URL") or profile.embedding_base_url or base_url).rstrip("/"),
+            embedding_batch_size=int(os.environ.get(f"{prefix}_EMBEDDING_BATCH_SIZE", str(profile.embedding_batch_size))),
+            app_title=os.environ.get("OPENROUTER_APP_TITLE", "Quipu Evals"),
+            app_url=os.environ.get("OPENROUTER_APP_URL"),
+        )
+
+
+@dataclass(frozen=True)
 class OpenRouterSettings:
     api_key: str
     base_url: str = DEFAULT_OPENROUTER_BASE_URL
@@ -57,11 +249,70 @@ class OpenRouterSettings:
         )
 
 
-class OpenRouterClient:
-    def __init__(self, settings: OpenRouterSettings | None = None) -> None:
-        self.settings = settings or OpenRouterSettings.from_env()
+class LlmClient:
+    def __init__(
+        self,
+        provider: str = "openrouter",
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        judge_model: str | None = None,
+        embedding_model: str | None = None,
+        settings: LlmSettings | None = None,
+    ) -> None:
+        profile = _profile(provider)
+        self.profile = profile
+        if settings is None:
+            try:
+                env_settings = LlmSettings.from_env(provider)
+            except ProviderError:
+                if api_key is None and profile.api_key_env:
+                    raise
+                env_settings = LlmSettings(
+                    provider=profile.provider,
+                    api_key=None,
+                    base_url=profile.base_url,
+                    answer_model=profile.answer_model,
+                    judge_model=profile.judge_model,
+                    embedding_model=profile.embedding_model,
+                    embedding_base_url=profile.embedding_base_url or profile.base_url,
+                    embedding_batch_size=profile.embedding_batch_size,
+                )
+            settings = LlmSettings(
+                provider=profile.provider,
+                api_key=api_key if api_key is not None else env_settings.api_key,
+                base_url=(base_url or env_settings.base_url or profile.base_url).rstrip("/"),
+                answer_model=model or env_settings.answer_model or profile.answer_model,
+                judge_model=judge_model or env_settings.judge_model or profile.judge_model,
+                embedding_model=embedding_model or env_settings.embedding_model or profile.embedding_model,
+                embedding_base_url=env_settings.embedding_base_url,
+                embedding_batch_size=env_settings.embedding_batch_size,
+                app_title=env_settings.app_title,
+                app_url=env_settings.app_url,
+            )
+        self.settings = settings
+
+    def chat_completion(
+        self,
+        system: str,
+        user: str,
+        context: str | Sequence[str] | None = None,
+        *,
+        temperature: float = 0.1,
+        json_mode: bool = False,
+        model: str | None = None,
+    ) -> str:
+        user_content = _join_user_context(user, context)
+        payload = self._chat_payload(system, user_content, model or self.settings.answer_model, temperature, json_mode)
+        response = self._post(_chat_path(self.profile, self.settings.base_url, model or self.settings.answer_model), payload)
+        return _parse_chat_content(self.profile.format, response)
+
+    def embed_batch(self, texts: Sequence[str]) -> list[list[float]]:
+        return self.embed_texts(texts)
 
     def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        if self.profile.format != "openai_compatible" or not self.settings.embedding_model:
+            raise ProviderError(f"{self.profile.provider} does not expose an eval embedding endpoint")
         vectors: list[list[float]] = []
         batch_size = max(self.settings.embedding_batch_size, 1)
         for start in range(0, len(texts), batch_size):
@@ -69,15 +320,12 @@ class OpenRouterClient:
             if not batch:
                 continue
             payload = self._post(
-                "/embeddings",
-                {
-                    "model": self.settings.embedding_model,
-                    "input": batch,
-                },
+                _join_url(self.settings.embedding_base_url or self.settings.base_url, "/embeddings"),
+                {"model": self.settings.embedding_model, "input": batch},
             )
             data = payload.get("data")
             if not isinstance(data, list):
-                raise ProviderError("OpenRouter embeddings response missing data list")
+                raise ProviderError(f"{self.profile.provider} embeddings response missing data list")
             by_index: dict[int, list[float]] = {}
             for item in data:
                 if not isinstance(item, Mapping):
@@ -85,63 +333,34 @@ class OpenRouterClient:
                 index = int(item.get("index", len(by_index)))
                 embedding = item.get("embedding")
                 if not isinstance(embedding, list):
-                    raise ProviderError("OpenRouter embeddings response item missing embedding")
+                    raise ProviderError(f"{self.profile.provider} embeddings response item missing embedding")
                 by_index[index] = [float(value) for value in embedding]
             if len(by_index) != len(batch):
-                raise ProviderError("OpenRouter embeddings response count did not match request")
+                raise ProviderError(f"{self.profile.provider} embeddings response count did not match request")
             vectors.extend(by_index[index] for index in range(len(batch)))
         return vectors
 
     def generate_answer(self, question: str, contexts: Sequence[str]) -> str:
         context = "\n\n".join(f"[{index + 1}] {text}" for index, text in enumerate(contexts))
-        payload = self._post(
-            "/chat/completions",
-            {
-                "model": self.settings.answer_model,
-                "temperature": 0,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Answer the question using only the provided retrieved memory context. "
-                            "Return a concise answer. If the answer is not present, return: I don't know."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Question:\n{question}\n\nRetrieved memory context:\n{context}",
-                    },
-                ],
-            },
+        return self.chat_completion(
+            "Answer the question using only the provided retrieved memory context. "
+            "Return a concise answer. If the answer is not present, return: I don't know.",
+            question,
+            context,
+            temperature=0,
         )
-        return _chat_content(payload)
 
     def judge_answer(self, question: str, expected_answer: str, actual_answer: str) -> LlmJudgeResult:
-        payload = self._post(
-            "/chat/completions",
-            {
-                "model": self.settings.judge_model,
-                "temperature": 0,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are grading a memory benchmark answer. Return only JSON with keys "
-                            "correct (boolean), score (number from 0 to 1), and reason (short string)."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Question: {question}\n"
-                            f"Ground truth answer: {expected_answer}\n"
-                            f"Candidate answer: {actual_answer}"
-                        ),
-                    },
-                ],
-            },
+        payload = self._chat_payload(
+            "You are grading a memory benchmark answer. Return only JSON with keys "
+            "correct (boolean), score (number from 0 to 1), and reason (short string).",
+            f"Question: {question}\nGround truth answer: {expected_answer}\nCandidate answer: {actual_answer}",
+            self.settings.judge_model,
+            0,
+            True,
         )
-        parsed = _parse_json_object(_chat_content(payload))
+        response = self._post(_chat_path(self.profile, self.settings.base_url, self.settings.judge_model), payload)
+        parsed = _parse_json_object(_parse_chat_content(self.profile.format, response))
         return LlmJudgeResult(
             passed=bool(parsed.get("correct")),
             score=float(parsed.get("score", 1.0 if parsed.get("correct") else 0.0)),
@@ -149,15 +368,57 @@ class OpenRouterClient:
             model=self.settings.judge_model,
         )
 
-    def _post(self, path: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        url = f"{self.settings.base_url}{path}"
-        headers = {
-            "Authorization": f"Bearer {self.settings.api_key}",
-            "Content-Type": "application/json",
-            "X-Title": self.settings.app_title,
+    def _chat_payload(self, system: str, user: str, model: str, temperature: float, json_mode: bool) -> Mapping[str, Any]:
+        if self.profile.format == "anthropic_messages":
+            return {
+                "model": model,
+                "system": system,
+                "messages": [{"role": "user", "content": user}],
+                "temperature": temperature,
+                "max_tokens": 4096,
+            }
+        if self.profile.format == "google_gemini":
+            return {
+                "system_instruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "user", "parts": [{"text": user}]}],
+                "generationConfig": {"temperature": temperature},
+            }
+        if self.profile.format == "cohere_chat":
+            return {
+                "model": model,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                "temperature": temperature,
+            }
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "temperature": temperature,
         }
-        if self.settings.app_url:
-            headers["HTTP-Referer"] = self.settings.app_url
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        return payload
+
+    def _post(self, url: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "quipu-evals/0.1.0",
+        }
+        if self.profile.format == "anthropic_messages":
+            headers["anthropic-version"] = "2023-06-01"
+            if self.settings.api_key:
+                headers["x-api-key"] = self.settings.api_key
+        elif self.profile.format == "google_gemini":
+            if self.settings.api_key:
+                headers["x-goog-api-key"] = self.settings.api_key
+        elif self.profile.provider == "azure":
+            if self.settings.api_key:
+                headers["api-key"] = self.settings.api_key
+        elif self.settings.api_key:
+            headers["Authorization"] = f"Bearer {self.settings.api_key}"
+        if self.profile.provider == "openrouter":
+            headers["X-Title"] = self.settings.app_title
+            if self.settings.app_url:
+                headers["HTTP-Referer"] = self.settings.app_url
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -169,15 +430,36 @@ class OpenRouterClient:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise ProviderError(f"OpenRouter request failed with HTTP {exc.code}: {body}") from exc
+            raise ProviderError(f"{self.profile.provider} request failed with HTTP {exc.code}: {body}") from exc
         except urllib.error.URLError as exc:
-            raise ProviderError(f"OpenRouter request failed: {exc.reason}") from exc
+            raise ProviderError(f"{self.profile.provider} request failed: {exc.reason}") from exc
+
+
+class OpenRouterClient(LlmClient):
+    def __init__(self, settings: OpenRouterSettings | None = None) -> None:
+        if settings is None:
+            settings = OpenRouterSettings.from_env()
+        super().__init__(
+            "openrouter",
+            settings=LlmSettings(
+                provider="openrouter",
+                api_key=settings.api_key,
+                base_url=settings.base_url,
+                answer_model=settings.answer_model,
+                judge_model=settings.judge_model,
+                embedding_model=settings.embedding_model,
+                embedding_base_url=settings.base_url,
+                embedding_batch_size=settings.embedding_batch_size,
+                app_title=settings.app_title,
+                app_url=settings.app_url,
+            ),
+        )
 
 
 class CachedEmbeddingProvider:
-    def __init__(self, client: OpenRouterClient, cache_path: str | Path | None = None) -> None:
+    def __init__(self, client: LlmClient, cache_path: str | Path | None = None) -> None:
         self.client = client
-        self.model = client.settings.embedding_model
+        self.model = client.settings.embedding_model or "embedding"
         self.cache_path = Path(cache_path) if cache_path else None
         self._cache: dict[str, list[float]] = {}
         if self.cache_path and self.cache_path.exists():
@@ -227,19 +509,99 @@ def openrouter_providers_from_env(cache_path: str | Path | None = None) -> tuple
     return CachedEmbeddingProvider(client, cache_path=cache_path), client
 
 
+def _profile(provider: str) -> ProviderProfile:
+    normalized = provider.lower().replace("_", "-")
+    aliases = {
+        "azure-openai": "azure",
+        "openai-compatible": "custom",
+        "http": "custom",
+    }
+    key = aliases.get(normalized, normalized)
+    if key not in PROVIDER_PROFILES:
+        raise ProviderError(f"Unsupported LLM provider: {provider}")
+    return PROVIDER_PROFILES[key]
+
+
+def _detect_provider_from_env() -> str | None:
+    for provider in ("openai", "anthropic", "google", "openrouter", "azure", "groq", "mistral", "deepseek", "kimi", "cohere"):
+        env_name = PROVIDER_PROFILES[provider].api_key_env
+        if env_name and os.environ.get(env_name):
+            return provider
+    return None
+
+
+def _join_user_context(user: str, context: str | Sequence[str] | None) -> str:
+    if context is None or context == "":
+        return user
+    if isinstance(context, str):
+        context_text = context
+    else:
+        context_text = "\n\n".join(str(item) for item in context)
+    return f"Question:\n{user}\n\nRetrieved memory context:\n{context_text}"
+
+
+def _chat_path(profile: ProviderProfile, base_url: str, model: str) -> str:
+    if profile.format == "anthropic_messages":
+        return _join_url(base_url, "/messages")
+    if profile.format == "google_gemini":
+        if ":generateContent" in base_url:
+            return base_url
+        return _join_url(base_url, f"/models/{model}:generateContent")
+    if profile.format == "cohere_chat":
+        return _join_url(base_url, "/chat")
+    if "chat/completions" in base_url or profile.provider == "azure":
+        return base_url
+    return _join_url(base_url, "/chat/completions")
+
+
+def _join_url(base_url: str, path: str) -> str:
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def _parse_chat_content(format_name: str, payload: Mapping[str, Any]) -> str:
+    if format_name == "anthropic_messages":
+        content = payload.get("content")
+        if not isinstance(content, list):
+            raise ProviderError("Anthropic chat response missing content")
+        return "\n".join(str(block.get("text", "")) for block in content if isinstance(block, Mapping)).strip()
+    if format_name == "google_gemini":
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            raise ProviderError("Google chat response missing candidates")
+        first = candidates[0]
+        if not isinstance(first, Mapping):
+            raise ProviderError("Google chat response candidate is invalid")
+        content = first.get("content")
+        if not isinstance(content, Mapping):
+            raise ProviderError("Google chat response missing content")
+        parts = content.get("parts")
+        if not isinstance(parts, list):
+            raise ProviderError("Google chat response missing parts")
+        return "\n".join(str(part.get("text", "")) for part in parts if isinstance(part, Mapping)).strip()
+    if format_name == "cohere_chat":
+        message = payload.get("message")
+        if not isinstance(message, Mapping):
+            raise ProviderError("Cohere chat response missing message")
+        content = message.get("content")
+        if not isinstance(content, list):
+            raise ProviderError("Cohere chat response missing content")
+        return "\n".join(str(block.get("text", "")) for block in content if isinstance(block, Mapping)).strip()
+    return _chat_content(payload)
+
+
 def _chat_content(payload: Mapping[str, Any]) -> str:
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise ProviderError("OpenRouter chat response missing choices")
+        raise ProviderError("OpenAI-compatible chat response missing choices")
     first = choices[0]
     if not isinstance(first, Mapping):
-        raise ProviderError("OpenRouter chat response choice is invalid")
+        raise ProviderError("OpenAI-compatible chat response choice is invalid")
     message = first.get("message")
     if not isinstance(message, Mapping):
-        raise ProviderError("OpenRouter chat response missing message")
+        raise ProviderError("OpenAI-compatible chat response missing message")
     content = message.get("content")
     if not isinstance(content, str):
-        raise ProviderError("OpenRouter chat response missing content")
+        raise ProviderError("OpenAI-compatible chat response missing content")
     return content.strip()
 
 

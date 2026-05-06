@@ -21,6 +21,7 @@ from .graders import (
     grade_forbidden_evidence,
 )
 from .metrics import grade_counts, metric_groups
+from .provider_clients import supported_llm_provider_ids
 from .scenarios import Event, Query, Scenario, load_suite
 
 
@@ -705,10 +706,11 @@ def main() -> int:
     parser.add_argument("--no-extract", action="store_true", help="Replay raw messages without synchronous extraction")
     parser.add_argument("--retrieval-mode", choices=["fts", "vector", "hybrid", "graph"], default=os.environ.get("QUIPU_CORE_RETRIEVAL_MODE"))
     parser.add_argument("--answer-method", choices=["retrieve", "answer"], default=os.environ.get("QUIPU_CORE_ANSWER_METHOD", "retrieve"))
-    parser.add_argument("--answer-provider", choices=["deterministic", "openrouter"], default=os.environ.get("QUIPU_ANSWER_PROVIDER"))
+    core_llm_provider_choices = ["deterministic", *supported_llm_provider_ids()]
+    parser.add_argument("--answer-provider", choices=core_llm_provider_choices, default=os.environ.get("QUIPU_ANSWER_PROVIDER"))
     parser.add_argument("--answer-model", default=os.environ.get("QUIPU_ANSWER_MODEL") or os.environ.get("OPENROUTER_ANSWER_MODEL"))
     parser.add_argument("--answer-url", default=os.environ.get("QUIPU_ANSWER_URL") or os.environ.get("OPENROUTER_ANSWER_URL"))
-    parser.add_argument("--entity-provider", choices=["deterministic", "openrouter"], default=os.environ.get("QUIPU_ENTITY_PROVIDER"))
+    parser.add_argument("--entity-provider", choices=core_llm_provider_choices, default=os.environ.get("QUIPU_ENTITY_PROVIDER"))
     parser.add_argument("--entity-model", default=os.environ.get("QUIPU_ENTITY_MODEL") or os.environ.get("OPENROUTER_ENTITY_MODEL"))
     parser.add_argument("--entity-url", default=os.environ.get("QUIPU_ENTITY_URL") or os.environ.get("OPENROUTER_ENTITY_URL"))
     parser.add_argument("--embedding-provider", choices=["hash", "openrouter"], default=os.environ.get("QUIPU_EMBEDDING_PROVIDER"))

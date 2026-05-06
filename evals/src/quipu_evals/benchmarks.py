@@ -18,7 +18,7 @@ from .core_runner import CORE_BINARY, lattice_lib_from_env, run_core_suite
 from .external import DEFAULT_EXTERNAL_SUITES, external_suite_metadata, is_normalized_external_suite, load_external_suite
 from .locomo import download_locomo, load_locomo_suite, write_suite
 from .longmemeval import download_longmemeval, load_longmemeval_suite
-from .provider_clients import ProviderError, openrouter_providers_from_env
+from .provider_clients import ProviderError, openrouter_providers_from_env, supported_llm_provider_ids
 from .readiness import evaluate_readiness
 from .runner import run_suite
 from .scenarios import load_suite
@@ -850,10 +850,11 @@ def main() -> int:
     parser.add_argument("--include-provider-baselines", action="store_true")
     parser.add_argument("--core-retrieval-mode", choices=["fts", "vector", "hybrid", "graph"], default=os.environ.get("QUIPU_CORE_RETRIEVAL_MODE"))
     parser.add_argument("--core-answer-method", choices=["retrieve", "answer"], default=os.environ.get("QUIPU_CORE_ANSWER_METHOD", "retrieve"))
-    parser.add_argument("--core-answer-provider", choices=["deterministic", "openrouter"], default=os.environ.get("QUIPU_ANSWER_PROVIDER"))
+    core_llm_provider_choices = ["deterministic", *supported_llm_provider_ids()]
+    parser.add_argument("--core-answer-provider", choices=core_llm_provider_choices, default=os.environ.get("QUIPU_ANSWER_PROVIDER"))
     parser.add_argument("--core-answer-model", default=os.environ.get("QUIPU_ANSWER_MODEL") or os.environ.get("OPENROUTER_ANSWER_MODEL"))
     parser.add_argument("--core-answer-url", default=os.environ.get("QUIPU_ANSWER_URL") or os.environ.get("OPENROUTER_ANSWER_URL"))
-    parser.add_argument("--core-entity-provider", choices=["deterministic", "openrouter"], default=os.environ.get("QUIPU_ENTITY_PROVIDER"))
+    parser.add_argument("--core-entity-provider", choices=core_llm_provider_choices, default=os.environ.get("QUIPU_ENTITY_PROVIDER"))
     parser.add_argument("--core-entity-model", default=os.environ.get("QUIPU_ENTITY_MODEL") or os.environ.get("OPENROUTER_ENTITY_MODEL"))
     parser.add_argument("--core-entity-url", default=os.environ.get("QUIPU_ENTITY_URL") or os.environ.get("OPENROUTER_ENTITY_URL"))
     parser.add_argument("--core-embedding-provider", choices=["hash", "openrouter"], default=os.environ.get("QUIPU_EMBEDDING_PROVIDER"))
