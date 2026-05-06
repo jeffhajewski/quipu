@@ -82,7 +82,9 @@ large-message writes, stream rereads during worker processing, and
 the last generated full LoCoMo raw/hybrid reports until those LatticeDB issues
 are fixed and a new full graph+ER report is generated.
 
-Optional LLM answer and judge hooks are also wired through OpenRouter:
+Optional LLM answer and judge hooks use the unified provider IDs documented in
+[`docs/providers.md`](providers.md). OpenRouter remains supported for
+embeddings and as a universal answer/judge provider:
 
 ```bash
 PYTHONPATH=evals/src python3 -m quipu_evals.runner \
@@ -98,6 +100,7 @@ Model overrides:
 - `OPENROUTER_EMBEDDING_MODEL`, default `openai/text-embedding-3-small`
 - `OPENROUTER_ANSWER_MODEL`, default `openai/gpt-4o`
 - `OPENROUTER_JUDGE_MODEL`, default `openai/gpt-4o`
+- `QUIPU_LLM_MODEL` and `QUIPU_JUDGE_MODEL` for generic provider clients
 - `OPENROUTER_EMBEDDING_BATCH_SIZE`, default `32`
 
 The in-memory core smoke baseline runs the compiled Zig process through `quipu serve-stdio`:
@@ -193,9 +196,10 @@ synthetic fixtures but can under-score real datasets whose answers require
 reasoning or synthesis. To verify core-based answering on real-style fixtures,
 run the core path with `--core-answer-method answer --core-answer-provider
 openrouter`, or run `quipu_evals.core_runner` with `--answer-method answer
---answer-provider openrouter`. This provider-backed path requires
-`OPENROUTER_API_KEY`; without that key, skipped or absent LLM-answer runs are
-expected.
+--answer-provider openai|anthropic|google|openrouter|ollama|custom`. This
+provider-backed path requires the selected provider's API key unless using a
+local provider such as Ollama; without that key, skipped or absent LLM-answer
+runs are expected.
 
 For full runs, `--skip-core` omits the redundant in-memory core pass while
 still allowing the LatticeDB core pass when `--include-lattice` is set.

@@ -42,13 +42,16 @@ are `QUIPU_VECTOR_DIMENSIONS`, `QUIPU_LATTICE_PAGE_SIZE`,
 `QUIPU_EMBEDDING_PROVIDER`, `QUIPU_EMBEDDING_URL`,
 `QUIPU_EMBEDDING_MODEL`, and `QUIPU_EMBEDDING_API_KEY`.
 
-Answer and entity-resolution providers are configured with
+LLM-backed answer and entity-resolution providers can be configured once with
+`--llm-provider`, `--llm-model`, `--llm-base-url`, `--llm-api-key`,
+`--llm-temperature`, and `--llm-max-tokens`, or separately with
 `--answer-provider`, `--answer-url`, `--answer-model`, `--entity-provider`,
-`--entity-url`, and `--entity-model`. Matching environment variables are
-`QUIPU_ANSWER_PROVIDER`, `QUIPU_ANSWER_URL`, `QUIPU_ANSWER_MODEL`,
-`QUIPU_ENTITY_PROVIDER`, `QUIPU_ENTITY_URL`, and `QUIPU_ENTITY_MODEL`; all
-OpenRouter-compatible chat calls use `OPENROUTER_API_KEY` unless
-`QUIPU_MODEL_API_KEY` is set.
+`--entity-url`, and `--entity-model`. Matching environment variables include
+`QUIPU_LLM_PROVIDER`, `QUIPU_LLM_MODEL`, `QUIPU_LLM_BASE_URL`,
+`QUIPU_LLM_API_KEY`, `QUIPU_ANSWER_PROVIDER`, `QUIPU_ANSWER_MODEL`,
+`QUIPU_ENTITY_PROVIDER`, and `QUIPU_ENTITY_MODEL`. See
+[`docs/providers.md`](providers.md) for provider IDs, API key variables, and
+config file examples.
 
 ## Inspection V0
 

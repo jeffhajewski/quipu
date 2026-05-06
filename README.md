@@ -181,20 +181,24 @@ local smoke tests show commits fail with `LatticeIo` at `1017` dimensions and
 above. Full 1536-dimensional OpenAI embeddings should be re-enabled after that
 LatticeDB persistence issue is fixed.
 
-Provider-backed answer generation and async entity resolution use the same
-OpenRouter-compatible chat surface:
+Provider-backed answer generation and async entity resolution use the unified
+LLM provider surface:
 
 ```bash
-export OPENROUTER_API_KEY=...
+export OPENAI_API_KEY=...
 quipu --db "$HOME/.quipu/memory.lattice" \
-  --answer-provider openrouter \
-  --entity-provider openrouter \
+  --llm-provider openai \
+  --llm-model gpt-4o \
   remember --project repo:quipu --text "Alice Smith owns the Lisbon rollout."
 quipu --db "$HOME/.quipu/memory.lattice" jobs run entity-resolve
 quipu --db "$HOME/.quipu/memory.lattice" \
-  --answer-provider openrouter \
+  --llm-provider openai \
   answer --project repo:quipu --mode graph --query "Who owns the Lisbon rollout?"
 ```
+
+OpenRouter, Anthropic, Google Gemini, Ollama, Groq, Together, Mistral,
+DeepSeek, Kimi/Moonshot, Cohere, Azure OpenAI, and custom OpenAI-compatible
+endpoints are documented in [`docs/providers.md`](docs/providers.md).
 
 For local smoke tests without model keys, use
 `--entity-provider deterministic` and omit `--answer-provider`; `memory.answer`
