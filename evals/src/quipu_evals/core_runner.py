@@ -217,7 +217,7 @@ def failed_core_scenario(
     judge_provider: object | None = None,
 ) -> tuple[list[CoreQueryRun], list[CoreForgetRun], Mapping[str, Any]]:
     judge_model = str(getattr(getattr(judge_provider, "settings", None), "judge_model", "unknown"))
-    error_text = str(error)
+    error_text = short_error_text(error)
     query_runs = [
         failed_core_query_run(scenario.scenario_id, query, error_text, judge_model if judge_provider is not None else None)
         for query in scenario.queries
@@ -258,6 +258,13 @@ def failed_core_query_run(
         grades=grades,
         trace=None,
     )
+
+
+def short_error_text(error: RuntimeError, *, limit: int = 2000) -> str:
+    text = str(error)
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + " ... [truncated]"
 
 
 def run_core_scenario(
@@ -653,22 +660,23 @@ def run_query(
             prompt = str(retrieved["prompt"])
             actual_answer = answer_from_prompt(prompt, query.expected_answer)
     except RuntimeError as exc:
+        error_text = short_error_text(exc)
         actual_answer = ""
         evidence_event_ids: list[str] = []
         grades = [
             grade_exact_answer(actual_answer, query.expected_answer),
             grade_evidence_ids(evidence_event_ids, query.expected_evidence_event_ids),
             grade_forbidden_evidence(evidence_event_ids, query.must_not_use_event_ids),
-            GradeResult(name="runtime_error", passed=False, details={"error": str(exc)}),
+            GradeResult(name="runtime_error", passed=False, details={"error": error_text}),
         ]
         if judge_provider is not None:
             judge_model = str(getattr(getattr(judge_provider, "settings", None), "judge_model", "unknown"))
-            grades.append(grade_llm_judge(False, 0.0, f"core query failed: {exc}", judge_model))
+            grades.append(grade_llm_judge(False, 0.0, f"core query failed: {error_text}", judge_model))
         return CoreQueryRun(
             scenario_id=scenario_id,
             query_id=query.query_id,
             category=query.category,
-            prompt=f"Core query failed: {exc}",
+            prompt=f"Core query failed: {error_text}",
             actual_answer=actual_answer,
             evidence_event_ids=evidence_event_ids,
             grades=grades,
