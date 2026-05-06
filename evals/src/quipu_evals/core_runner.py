@@ -132,6 +132,7 @@ def run_core_suite(
     embedding_url: str | None = None,
     vector_dimensions: int | None = None,
     page_size: int | None = None,
+    judge_provider: object | None = None,
 ) -> CoreSuiteRun:
     ensure_core_binary(storage=storage, lattice_include=lattice_include, lattice_lib=lattice_lib)
     suite = load_suite(path)
@@ -175,6 +176,7 @@ def run_core_suite(
             embedding_url=embedding_url,
             vector_dimensions=vector_dimensions,
             page_size=page_size,
+            judge_provider=judge_provider,
         )
         query_runs.extend(scenario_query_runs)
         forget_runs.extend(scenario_forget_runs)
@@ -211,6 +213,7 @@ def run_core_scenario(
     embedding_url: str | None = None,
     vector_dimensions: int | None = None,
     page_size: int | None = None,
+    judge_provider: object | None = None,
 ) -> tuple[list[CoreQueryRun], list[CoreForgetRun], Mapping[str, Any] | None]:
     if answer_method not in {"retrieve", "answer"}:
         raise ValueError("answer_method must be 'retrieve' or 'answer'")
@@ -248,6 +251,7 @@ def run_core_scenario(
                 log_retrieval=log_retrieval,
                 retrieval_mode=retrieval_mode,
                 answer_method=answer_method,
+                judge_provider=judge_provider,
             )
 
     if entity_provider is None:
@@ -279,6 +283,7 @@ def run_core_scenario(
             log_retrieval=log_retrieval,
             retrieval_mode=retrieval_mode,
             answer_method=answer_method,
+            judge_provider=judge_provider,
         )
 
     verification = verify_db(db_path, scenario.scenario_id, extra_args=extra_args) if db_path is not None and not skip_verification else None
@@ -496,6 +501,7 @@ def run_core_queries_and_forgets(
     log_retrieval: bool = True,
     retrieval_mode: str | None = None,
     answer_method: str = "retrieve",
+    judge_provider: object | None = None,
 ) -> tuple[list[CoreQueryRun], list[CoreForgetRun]]:
     query_runs = [
         run_query(
@@ -507,6 +513,7 @@ def run_core_queries_and_forgets(
             log_retrieval=log_retrieval,
             retrieval_mode=retrieval_mode,
             answer_method=answer_method,
+            judge_provider=judge_provider,
         )
         for query in scenario.queries
     ]
@@ -555,6 +562,7 @@ def run_query(
     log_retrieval: bool = True,
     retrieval_mode: str | None = None,
     answer_method: str = "retrieve",
+    judge_provider: object | None = None,
 ) -> CoreQueryRun:
     params = {
         "query": query.query,
@@ -581,6 +589,9 @@ def run_query(
         grade_evidence_ids(evidence_event_ids, query.expected_evidence_event_ids),
         grade_forbidden_evidence(evidence_event_ids, query.must_not_use_event_ids),
     ]
+    if judge_provider is not None:
+        judgment = judge_provider.judge_answer(query.query, query.expected_answer, actual_answer)
+        grades.append(grade_llm_judge(judgment.passed, judgment.score, judgment.reason, judgment.model))
     return CoreQueryRun(
         scenario_id=scenario_id,
         query_id=query.query_id,

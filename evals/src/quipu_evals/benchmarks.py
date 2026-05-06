@@ -61,6 +61,8 @@ def collect_benchmarks(
     core_embedding_url: str | None = None,
     core_vector_dimensions: int | None = None,
     core_page_size: int | None = None,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
     reuse_existing: bool = False,
 ) -> dict[str, Any]:
     suite_path = Path(suite_path)
@@ -93,11 +95,15 @@ def collect_benchmarks(
     runs: list[dict[str, Any]] = []
     skipped_runs: list[dict[str, str]] = []
     provider_options = provider_options or {}
+    judge_client = None
+    if judge_provider and judge_provider != "none":
+        from .provider_clients import LlmClient
+        judge_client = LlmClient(judge_provider, judge_model=judge_model)
 
     runs.append(
         run_case(
             "q0_raw_only_fake",
-            lambda: run_suite(suite_path, baseline_id="q0_raw_only_fake"),
+            lambda: run_suite(suite_path, baseline_id="q0_raw_only_fake", judge_provider=judge_client),
             suite_path=suite_path,
             output_dir=output_dir,
             generated_at=generated_at,
@@ -120,7 +126,7 @@ def collect_benchmarks(
             runs.append(
                 run_case(
                     baseline_id,
-                    lambda baseline_id=baseline_id: run_suite(suite_path, baseline_id=baseline_id),
+                    lambda baseline_id=baseline_id: run_suite(suite_path, baseline_id=baseline_id, judge_provider=judge_client),
                     suite_path=suite_path,
                     output_dir=output_dir,
                     generated_at=generated_at,
@@ -163,6 +169,7 @@ def collect_benchmarks(
                             baseline_id=baseline_id,
                             baseline_label=baseline_label,
                             embedding_provider=openrouter_embedding_provider,
+                            judge_provider=judge_client,
                         ),
                         suite_path=suite_path,
                         output_dir=output_dir,
@@ -190,7 +197,7 @@ def collect_benchmarks(
             runs.append(
                 run_case(
                     f"ablation_{ablation_id}",
-                    lambda ablation_id=ablation_id: run_suite(suite_path, baseline_id=ablation_id),
+                    lambda ablation_id=ablation_id: run_suite(suite_path, baseline_id=ablation_id, judge_provider=judge_client),
                     suite_path=suite_path,
                     output_dir=output_dir,
                     generated_at=generated_at,
@@ -226,6 +233,7 @@ def collect_benchmarks(
                     embedding_url=core_embedding_url,
                     vector_dimensions=core_vector_dimensions,
                     page_size=core_page_size,
+                    judge_provider=judge_client,
                 ),
                 suite_path=suite_path,
                 output_dir=output_dir,
@@ -290,6 +298,7 @@ def collect_benchmarks(
                         embedding_url=core_embedding_url,
                         vector_dimensions=core_vector_dimensions,
                         page_size=core_page_size,
+                        judge_provider=judge_client,
                     ),
                     suite_path=suite_path,
                     output_dir=output_dir,
@@ -862,6 +871,8 @@ def main() -> int:
     parser.add_argument("--core-embedding-url", default=os.environ.get("QUIPU_EMBEDDING_URL") or os.environ.get("OPENROUTER_EMBEDDING_URL"))
     parser.add_argument("--core-vector-dimensions", type=int, default=int(os.environ["QUIPU_VECTOR_DIMENSIONS"]) if os.environ.get("QUIPU_VECTOR_DIMENSIONS") else None)
     parser.add_argument("--core-page-size", type=int, default=int(os.environ["QUIPU_LATTICE_PAGE_SIZE"]) if os.environ.get("QUIPU_LATTICE_PAGE_SIZE") else None)
+    parser.add_argument("--judge-provider", choices=["none", *supported_llm_provider_ids()], default=os.environ.get("QUIPU_JUDGE_PROVIDER", "none"))
+    parser.add_argument("--judge-model", default=os.environ.get("QUIPU_JUDGE_MODEL"))
     parser.add_argument(
         "--provider-embedding-cache",
         type=Path,
@@ -938,6 +949,8 @@ def main() -> int:
         core_embedding_url=args.core_embedding_url,
         core_vector_dimensions=args.core_vector_dimensions,
         core_page_size=args.core_page_size,
+        judge_provider=args.judge_provider,
+        judge_model=args.judge_model,
         reuse_existing=args.reuse_existing,
         locomo_options={
             "max_conversations": args.locomo_max_conversations,

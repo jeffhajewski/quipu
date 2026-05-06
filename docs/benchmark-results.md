@@ -6,16 +6,36 @@ claim of performance on external long-memory benchmarks yet.
 
 Durations are local harness wall-clock timings, not optimized daemon latency.
 
-- Generated: `2026-04-29T13:34:30.909997Z`
-- Git commit: `73c890f+dirty`
+- Generated: `2026-05-06T02:42:38.926060Z`
+- Git commit: `a27459b+dirty`
+- Result class: `synthetic_smoke`
+- External benchmark: `-`
+- Dataset: `quipu_synthetic` `0.1.0`
 - Suite: `evals/suites/quipu_synthetic.yaml`
-- Lattice included: `true`
+- Lattice included: `false`
 
 | Baseline | Storage | Pass | Queries | Forget Ops | Duration | LatticeDB |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
-| `q0_raw_only_fake` | `fake` | yes | 5/5 | 1/1 | 0.5 ms | `-` |
-| `core_in_memory` | `memory` | yes | 5/5 | 1/1 | 635.4 ms | `-` |
-| `core_lattice` | `lattice` | yes | 5/5 | 1/1 | 484.0 ms | `0.6.0` |
+| `q0_raw_only_fake` | `fake` | yes | 5/5 | 1/1 | 0.4 ms | `-` |
+| `core_in_memory` | `memory` | yes | 5/5 | 1/1 | 463.2 ms | `-` |
+
+## Real Benchmark Readiness Gate
+
+Status: `not_ready`
+
+| Requirement | Pass |
+| --- | ---: |
+| External dataset adapter | no |
+| Full external dataset | no |
+| Replay into daemon | yes |
+| Lattice-backed storage | no |
+| Retrieval traces | yes |
+| Answer generation | yes |
+| Grading | yes |
+| Required baselines | no |
+| Quipu ablations | no |
+| Verification pass | no |
+| Reproducible report and manifests | yes |
 
 ## What This Covers
 
@@ -27,7 +47,7 @@ Durations are local harness wall-clock timings, not optimized daemon latency.
 
 ## What This Does Not Cover Yet
 
-- LoCoMo, LongMemEval, or MemoryAgentBench.
+- Publishable LoCoMo, LongMemEval, or MemoryAgentBench results.
 - Real provider embeddings, reranking, or LLM extraction quality.
 - Long-running daemon transport latency.
 - Large-store retrieval latency or storage growth.
