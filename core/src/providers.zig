@@ -8,13 +8,41 @@ pub const ProviderKind = enum {
     http,
 };
 
+pub const ProviderFormat = enum {
+    openai_compatible,
+    anthropic_messages,
+    google_gemini,
+    cohere_chat,
+};
+
+pub const ProviderCapabilities = struct {
+    supports_vision: bool = false,
+    supports_json_mode: bool = false,
+    supports_streaming: bool = false,
+    supports_tools: bool = false,
+    max_context_length: ?u32 = null,
+};
+
 pub const ProviderEndpoint = struct {
     kind: ProviderKind = .none,
     name: []const u8 = "none",
+    format: ProviderFormat = .openai_compatible,
     command: ?[]const u8 = null,
     url: ?[]const u8 = null,
     model: ?[]const u8 = null,
     api_key: ?[]const u8 = null,
+    temperature: f32 = 0,
+    max_tokens: ?u32 = null,
+    capabilities: ProviderCapabilities = .{},
+};
+
+const GeminiPart = struct {
+    text: []const u8,
+};
+
+const GeminiContent = struct {
+    role: []const u8,
+    parts: []const GeminiPart,
 };
 
 pub const ProviderConfig = struct {
@@ -155,6 +183,28 @@ fn validateEndpoint(endpoint: ProviderEndpoint) !void {
     }
 }
 
+pub fn apiKeyEnvName(provider_name: []const u8) ?[]const u8 {
+    if (isProviderName(provider_name, "openai") or isProviderName(provider_name, "openai-compatible") or isProviderName(provider_name, "custom")) return "OPENAI_API_KEY";
+    if (isProviderName(provider_name, "anthropic")) return "ANTHROPIC_API_KEY";
+    if (isProviderName(provider_name, "google") or isProviderName(provider_name, "gemini")) return "GOOGLE_API_KEY";
+    if (isProviderName(provider_name, "openrouter")) return "OPENROUTER_API_KEY";
+    if (isProviderName(provider_name, "azure") or isProviderName(provider_name, "azure-openai")) return "AZURE_OPENAI_API_KEY";
+    if (isProviderName(provider_name, "groq")) return "GROQ_API_KEY";
+    if (isProviderName(provider_name, "together")) return "TOGETHER_API_KEY";
+    if (isProviderName(provider_name, "mistral")) return "MISTRAL_API_KEY";
+    if (isProviderName(provider_name, "deepseek")) return "DEEPSEEK_API_KEY";
+    if (isProviderName(provider_name, "kimi") or isProviderName(provider_name, "moonshot")) return "MOONSHOT_API_KEY";
+    if (isProviderName(provider_name, "cohere")) return "COHERE_API_KEY";
+    if (isProviderName(provider_name, "ollama")) return null;
+    return "QUIPU_MODEL_API_KEY";
+}
+
+fn requiresApiKey(endpoint: ProviderEndpoint) bool {
+    return !isProviderName(endpoint.name, "ollama") and
+        !isProviderName(endpoint.name, "local") and
+        !isProviderName(endpoint.name, "custom-local");
+}
+
 const answerSystemPrompt =
     \\You answer memory benchmark questions using only the supplied memory context.
     \\Return a concise answer. If the context does not contain the answer, return exactly: I don't know.
@@ -174,7 +224,7 @@ fn chatCompletion(
     user_text: []const u8,
     context_prompt: []const u8,
 ) ![]u8 {
-    const url = endpoint.url orelse return error.InvalidProviderConfig;
+    if (requiresApiKey(endpoint) and endpoint.api_key == null) return error.MissingProviderApiKey;
     const model = endpoint.model orelse return error.InvalidProviderConfig;
     const user_content = if (context_prompt.len == 0)
         try allocator.dupe(u8, user_text)
@@ -182,17 +232,9 @@ fn chatCompletion(
         try std.fmt.allocPrint(allocator, "Question:\n{s}\n\nMemory context:\n{s}", .{ user_text, context_prompt });
     defer allocator.free(user_content);
 
-    const request_body = try stringifyAlloc(allocator, .{
-        .model = model,
-        .messages = &[_]struct {
-            role: []const u8,
-            content: []const u8,
-        }{
-            .{ .role = "system", .content = system_prompt },
-            .{ .role = "user", .content = user_content },
-        },
-        .temperature = 0,
-    });
+    const url = try providerChatUrl(allocator, endpoint, model);
+    defer allocator.free(url);
+    const request_body = try buildChatRequestBody(allocator, endpoint, model, system_prompt, user_content);
     defer allocator.free(request_body);
 
     const authorization = if (endpoint.api_key) |api_key|
@@ -200,6 +242,23 @@ fn chatCompletion(
     else
         null;
     defer if (authorization) |value| allocator.free(value);
+    const google_api_key = endpoint.api_key orelse "";
+    const anthropic_api_key = endpoint.api_key orelse "";
+    const azure_api_key = endpoint.api_key orelse "";
+    const extra_headers = switch (endpoint.format) {
+        .anthropic_messages => &[_]std.http.Header{
+            .{ .name = "x-api-key", .value = anthropic_api_key },
+            .{ .name = "anthropic-version", .value = "2023-06-01" },
+        },
+        .google_gemini => &[_]std.http.Header{
+            .{ .name = "x-goog-api-key", .value = google_api_key },
+        },
+        .cohere_chat => &[_]std.http.Header{},
+        .openai_compatible => if (isProviderName(endpoint.name, "azure") or isProviderName(endpoint.name, "azure-openai"))
+            &[_]std.http.Header{.{ .name = "api-key", .value = azure_api_key }}
+        else
+            &[_]std.http.Header{},
+    };
 
     var client = std.http.Client{ .allocator = allocator, .io = io };
     defer client.deinit();
@@ -210,8 +269,12 @@ fn chatCompletion(
         .method = .POST,
         .payload = request_body,
         .response_writer = &response_body.writer,
+        .extra_headers = extra_headers,
         .headers = .{
-            .authorization = if (authorization) |value| .{ .override = value } else .omit,
+            .authorization = if (endpoint.format == .openai_compatible or endpoint.format == .cohere_chat)
+                if (authorization) |value| .{ .override = value } else .omit
+            else
+                .omit,
             .content_type = .{ .override = "application/json" },
             .user_agent = .{ .override = "quipu/0.1.0" },
         },
@@ -219,10 +282,93 @@ fn chatCompletion(
     if (result.status.class() != .success) return error.ProviderRequestFailed;
     const response = try response_body.toOwnedSlice();
     defer allocator.free(response);
-    return parseChatContent(allocator, response);
+    return parseChatContent(allocator, endpoint.format, response);
 }
 
-fn parseChatContent(allocator: std.mem.Allocator, response_json: []const u8) ![]u8 {
+fn providerChatUrl(allocator: std.mem.Allocator, endpoint: ProviderEndpoint, model: []const u8) ![]u8 {
+    const raw_url = endpoint.url orelse return error.InvalidProviderConfig;
+    if (endpoint.format != .google_gemini) return allocator.dupe(u8, raw_url);
+    if (std.mem.indexOf(u8, raw_url, ":generateContent") != null) return allocator.dupe(u8, raw_url);
+    const trimmed = std.mem.trim(u8, raw_url, "/");
+    return std.fmt.allocPrint(allocator, "{s}/models/{s}:generateContent", .{ trimmed, model });
+}
+
+fn buildChatRequestBody(
+    allocator: std.mem.Allocator,
+    endpoint: ProviderEndpoint,
+    model: []const u8,
+    system_prompt: []const u8,
+    user_content: []const u8,
+) ![]u8 {
+    return switch (endpoint.format) {
+        .openai_compatible => stringifyAlloc(allocator, .{
+            .model = model,
+            .messages = &[_]struct {
+                role: []const u8,
+                content: []const u8,
+            }{
+                .{ .role = "system", .content = system_prompt },
+                .{ .role = "user", .content = user_content },
+            },
+            .temperature = endpoint.temperature,
+            .max_tokens = endpoint.max_tokens,
+        }),
+        .anthropic_messages => stringifyAlloc(allocator, .{
+            .model = model,
+            .system = system_prompt,
+            .messages = &[_]struct {
+                role: []const u8,
+                content: []const u8,
+            }{
+                .{ .role = "user", .content = user_content },
+            },
+            .temperature = endpoint.temperature,
+            .max_tokens = endpoint.max_tokens orelse 4096,
+        }),
+        .google_gemini => stringifyAlloc(allocator, .{
+            .system_instruction = .{
+                .parts = &[_]GeminiPart{
+                    .{ .text = system_prompt },
+                },
+            },
+            .contents = &[_]GeminiContent{
+                .{
+                    .role = "user",
+                    .parts = &[_]GeminiPart{
+                        .{ .text = user_content },
+                    },
+                },
+            },
+            .generationConfig = .{
+                .temperature = endpoint.temperature,
+                .maxOutputTokens = endpoint.max_tokens,
+            },
+        }),
+        .cohere_chat => stringifyAlloc(allocator, .{
+            .model = model,
+            .messages = &[_]struct {
+                role: []const u8,
+                content: []const u8,
+            }{
+                .{ .role = "system", .content = system_prompt },
+                .{ .role = "user", .content = user_content },
+            },
+            .temperature = endpoint.temperature,
+            .max_tokens = endpoint.max_tokens,
+        }),
+    };
+}
+
+fn parseChatContent(allocator: std.mem.Allocator, format: ProviderFormat, response_json: []const u8) ![]u8 {
+    return switch (format) {
+        .openai_compatible => parseOpenAIChatContent(allocator, response_json),
+        .anthropic_messages => parseAnthropicChatContent(allocator, response_json),
+        .google_gemini => parseGoogleChatContent(allocator, response_json),
+        .cohere_chat => parseCohereChatContent(allocator, response_json),
+    };
+}
+
+fn parseOpenAIChatContent(allocator: std.mem.Allocator, response_json: []const u8) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response_json, .{});
     defer parsed.deinit();
     const root = switch (parsed.value) {
@@ -247,6 +393,107 @@ fn parseChatContent(allocator: std.mem.Allocator, response_json: []const u8) ![]
         else => return error.InvalidProviderResponse,
     };
     return allocator.dupe(u8, std.mem.trim(u8, content, " \t\r\n"));
+}
+
+fn parseAnthropicChatContent(allocator: std.mem.Allocator, response_json: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response_json, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.InvalidProviderResponse,
+    };
+    const content = switch (root.get("content") orelse return error.InvalidProviderResponse) {
+        .array => |array| array,
+        else => return error.InvalidProviderResponse,
+    };
+    var output = std.ArrayList(u8).empty;
+    errdefer output.deinit(allocator);
+    for (content.items) |item| {
+        const block = switch (item) {
+            .object => |object| object,
+            else => continue,
+        };
+        const text = jsonString(block.get("text")) orelse continue;
+        if (output.items.len > 0) try output.append(allocator, '\n');
+        try output.appendSlice(allocator, text);
+    }
+    return trimOwned(allocator, try output.toOwnedSlice(allocator));
+}
+
+fn parseGoogleChatContent(allocator: std.mem.Allocator, response_json: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response_json, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.InvalidProviderResponse,
+    };
+    const candidates = switch (root.get("candidates") orelse return error.InvalidProviderResponse) {
+        .array => |array| array,
+        else => return error.InvalidProviderResponse,
+    };
+    if (candidates.items.len == 0) return error.InvalidProviderResponse;
+    const first = switch (candidates.items[0]) {
+        .object => |object| object,
+        else => return error.InvalidProviderResponse,
+    };
+    const content = switch (first.get("content") orelse return error.InvalidProviderResponse) {
+        .object => |object| object,
+        else => return error.InvalidProviderResponse,
+    };
+    const parts = switch (content.get("parts") orelse return error.InvalidProviderResponse) {
+        .array => |array| array,
+        else => return error.InvalidProviderResponse,
+    };
+    var output = std.ArrayList(u8).empty;
+    errdefer output.deinit(allocator);
+    for (parts.items) |item| {
+        const part = switch (item) {
+            .object => |object| object,
+            else => continue,
+        };
+        const text = jsonString(part.get("text")) orelse continue;
+        if (output.items.len > 0) try output.append(allocator, '\n');
+        try output.appendSlice(allocator, text);
+    }
+    return trimOwned(allocator, try output.toOwnedSlice(allocator));
+}
+
+fn parseCohereChatContent(allocator: std.mem.Allocator, response_json: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response_json, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.InvalidProviderResponse,
+    };
+    const message = switch (root.get("message") orelse return error.InvalidProviderResponse) {
+        .object => |object| object,
+        else => return error.InvalidProviderResponse,
+    };
+    const content = switch (message.get("content") orelse return error.InvalidProviderResponse) {
+        .array => |array| array,
+        else => return error.InvalidProviderResponse,
+    };
+    var output = std.ArrayList(u8).empty;
+    errdefer output.deinit(allocator);
+    for (content.items) |item| {
+        const block = switch (item) {
+            .object => |object| object,
+            else => continue,
+        };
+        const text = jsonString(block.get("text")) orelse continue;
+        if (output.items.len > 0) try output.append(allocator, '\n');
+        try output.appendSlice(allocator, text);
+    }
+    return trimOwned(allocator, try output.toOwnedSlice(allocator));
+}
+
+fn trimOwned(allocator: std.mem.Allocator, owned: []u8) ![]u8 {
+    errdefer allocator.free(owned);
+    const trimmed = std.mem.trim(u8, owned, " \t\r\n");
+    if (trimmed.len == owned.len) return owned;
+    const result = try allocator.dupe(u8, trimmed);
+    allocator.free(owned);
+    return result;
 }
 
 fn deterministicAnswer(allocator: std.mem.Allocator, context_prompt: []const u8) ![]u8 {
@@ -384,6 +631,10 @@ fn jsonStringValue(value: std.json.Value) ?[]const u8 {
         .string => |string| string,
         else => null,
     };
+}
+
+fn isProviderName(actual: []const u8, expected: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(actual, expected);
 }
 
 fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
