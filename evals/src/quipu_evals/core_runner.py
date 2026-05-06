@@ -133,6 +133,7 @@ def run_core_suite(
     embedding_url: str | None = None,
     vector_dimensions: int | None = None,
     page_size: int | None = None,
+    budget_tokens: int | None = None,
     judge_provider: object | None = None,
 ) -> CoreSuiteRun:
     ensure_core_binary(storage=storage, lattice_include=lattice_include, lattice_lib=lattice_lib)
@@ -186,6 +187,7 @@ def run_core_suite(
                     embedding_url=embedding_url,
                     vector_dimensions=vector_dimensions,
                     page_size=page_size,
+                    budget_tokens=budget_tokens,
                     judge_provider=judge_provider,
                 )
             except RuntimeError as exc:
@@ -288,12 +290,11 @@ def run_core_scenario(
     embedding_url: str | None = None,
     vector_dimensions: int | None = None,
     page_size: int | None = None,
+    budget_tokens: int | None = None,
     judge_provider: object | None = None,
 ) -> tuple[list[CoreQueryRun], list[CoreForgetRun], Mapping[str, Any] | None]:
     if answer_method not in {"retrieve", "answer"}:
         raise ValueError("answer_method must be 'retrieve' or 'answer'")
-    if entity_provider is not None and db_path is None:
-        raise ValueError("entity_provider requires persistent core storage")
 
     extra_args = core_process_args(
         db_path=db_path,
@@ -326,10 +327,26 @@ def run_core_scenario(
                 log_retrieval=log_retrieval,
                 retrieval_mode=retrieval_mode,
                 answer_method=answer_method,
+                budget_tokens=budget_tokens,
+                judge_provider=judge_provider,
+            )
+        elif db_path is None:
+            entity_result = client.call("memory.entityResolve.run", {"owner": "eval-runner", "limit": 100000})
+            if int(entity_result.get("failedCount") or 0) > 0:
+                raise RuntimeError(f"entity resolver job failed: {json.dumps(entity_result, sort_keys=True)}")
+            query_runs, forget_runs = run_core_queries_and_forgets(
+                client,
+                scenario,
+                event_to_message_qids,
+                retrieval_needs=retrieval_needs,
+                log_retrieval=log_retrieval,
+                retrieval_mode=retrieval_mode,
+                answer_method=answer_method,
+                budget_tokens=budget_tokens,
                 judge_provider=judge_provider,
             )
 
-    if entity_provider is None:
+    if entity_provider is None or db_path is None:
         verification = verify_db(db_path, scenario.scenario_id, extra_args=extra_args) if db_path is not None and not skip_verification else None
         return query_runs or [], forget_runs or [], verification
 
@@ -358,6 +375,7 @@ def run_core_scenario(
             log_retrieval=log_retrieval,
             retrieval_mode=retrieval_mode,
             answer_method=answer_method,
+            budget_tokens=budget_tokens,
             judge_provider=judge_provider,
         )
 
@@ -576,6 +594,7 @@ def run_core_queries_and_forgets(
     log_retrieval: bool = True,
     retrieval_mode: str | None = None,
     answer_method: str = "retrieve",
+    budget_tokens: int | None = None,
     judge_provider: object | None = None,
 ) -> tuple[list[CoreQueryRun], list[CoreForgetRun]]:
     query_runs = [
@@ -588,6 +607,7 @@ def run_core_queries_and_forgets(
             log_retrieval=log_retrieval,
             retrieval_mode=retrieval_mode,
             answer_method=answer_method,
+            budget_tokens=budget_tokens,
             judge_provider=judge_provider,
         )
         for query in scenario.queries
@@ -637,6 +657,7 @@ def run_query(
     log_retrieval: bool = True,
     retrieval_mode: str | None = None,
     answer_method: str = "retrieve",
+    budget_tokens: int | None = None,
     judge_provider: object | None = None,
 ) -> CoreQueryRun:
     params = {
@@ -649,6 +670,8 @@ def run_query(
         params["needs"] = retrieval_needs
     if retrieval_mode is not None:
         params["mode"] = retrieval_mode
+    if budget_tokens is not None:
+        params["budgetTokens"] = budget_tokens
     try:
         if answer_method == "answer":
             retrieved = client.call("memory.answer", params)

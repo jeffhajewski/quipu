@@ -61,6 +61,8 @@ def collect_benchmarks(
     core_embedding_url: str | None = None,
     core_vector_dimensions: int | None = None,
     core_page_size: int | None = None,
+    enable_entity_resolution: bool = False,
+    core_budget_tokens: int | None = None,
     judge_provider: str | None = None,
     judge_model: str | None = None,
     reuse_existing: bool = False,
@@ -228,11 +230,15 @@ def collect_benchmarks(
                     answer_provider=core_answer_provider,
                     answer_model=core_answer_model,
                     answer_url=core_answer_url,
+                    entity_provider=core_entity_provider if enable_entity_resolution else None,
+                    entity_model=core_entity_model if enable_entity_resolution else None,
+                    entity_url=core_entity_url if enable_entity_resolution else None,
                     embedding_provider=core_embedding_provider,
                     embedding_model=core_embedding_model,
                     embedding_url=core_embedding_url,
                     vector_dimensions=core_vector_dimensions,
                     page_size=core_page_size,
+                    budget_tokens=core_budget_tokens,
                     judge_provider=judge_client,
                 ),
                 suite_path=suite_path,
@@ -249,18 +255,24 @@ def collect_benchmarks(
                     "answerMethod": core_answer_method,
                     "answerProvider": core_answer_provider,
                     "answerModel": core_answer_model,
-                    "entityProvider": None,
-                    "entityProviderNote": "async entity resolution requires persistent core storage",
+                    "entityProvider": core_entity_provider if enable_entity_resolution else None,
+                    **(
+                        {}
+                        if enable_entity_resolution
+                        else {"entityProviderNote": "async entity resolution disabled for in-memory core storage"}
+                    ),
+                    "entityModel": core_entity_model if enable_entity_resolution else None,
                     "embeddingProvider": core_embedding_provider,
                     "embeddingModel": core_embedding_model,
                     "vectorDimensions": core_vector_dimensions,
                     "pageSize": core_page_size,
+                    "budgetTokens": core_budget_tokens,
                 },
                 providers=core_provider_names(
                     answer_provider=core_answer_provider,
                     answer_model=core_answer_model,
-                    entity_provider=None,
-                    entity_model=None,
+                    entity_provider=core_entity_provider if enable_entity_resolution else None,
+                    entity_model=core_entity_model if enable_entity_resolution else None,
                     embedding_provider=core_embedding_provider,
                     embedding_model=core_embedding_model,
                 ),
@@ -298,6 +310,7 @@ def collect_benchmarks(
                         embedding_url=core_embedding_url,
                         vector_dimensions=core_vector_dimensions,
                         page_size=core_page_size,
+                        budget_tokens=core_budget_tokens,
                         judge_provider=judge_client,
                     ),
                     suite_path=suite_path,
@@ -322,6 +335,7 @@ def collect_benchmarks(
                         "embeddingModel": core_embedding_model,
                         "vectorDimensions": core_vector_dimensions,
                         "pageSize": core_page_size,
+                        "budgetTokens": core_budget_tokens,
                     },
                     lattice_version=lattice_version(lattice_include, lattice_lib),
                     seed=seed,
@@ -871,6 +885,8 @@ def main() -> int:
     parser.add_argument("--core-embedding-url", default=os.environ.get("QUIPU_EMBEDDING_URL") or os.environ.get("OPENROUTER_EMBEDDING_URL"))
     parser.add_argument("--core-vector-dimensions", type=int, default=int(os.environ["QUIPU_VECTOR_DIMENSIONS"]) if os.environ.get("QUIPU_VECTOR_DIMENSIONS") else None)
     parser.add_argument("--core-page-size", type=int, default=int(os.environ["QUIPU_LATTICE_PAGE_SIZE"]) if os.environ.get("QUIPU_LATTICE_PAGE_SIZE") else None)
+    parser.add_argument("--enable-entity-resolution", action="store_true")
+    parser.add_argument("--core-budget-tokens", type=int, default=None)
     parser.add_argument("--judge-provider", choices=["none", *supported_llm_provider_ids()], default=os.environ.get("QUIPU_JUDGE_PROVIDER", "none"))
     parser.add_argument("--judge-model", default=os.environ.get("QUIPU_JUDGE_MODEL"))
     parser.add_argument(
@@ -949,6 +965,8 @@ def main() -> int:
         core_embedding_url=args.core_embedding_url,
         core_vector_dimensions=args.core_vector_dimensions,
         core_page_size=args.core_page_size,
+        enable_entity_resolution=args.enable_entity_resolution,
+        core_budget_tokens=args.core_budget_tokens,
         judge_provider=args.judge_provider,
         judge_model=args.judge_model,
         reuse_existing=args.reuse_existing,

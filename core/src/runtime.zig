@@ -333,6 +333,7 @@ pub const Runtime = struct {
         if (std.mem.eql(u8, method, "memory.inspect")) return self.memoryInspect(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.forget")) return self.memoryForget(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.feedback")) return self.memoryFeedback(allocator, id, &params);
+        if (std.mem.eql(u8, method, "memory.entityResolve.run")) return self.memoryEntityResolveRun(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.get")) return self.memoryCoreGet(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.update")) return self.memoryCoreUpdate(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.consolidate")) return self.memoryCoreConsolidate(allocator, id, &params);
@@ -358,6 +359,27 @@ pub const Runtime = struct {
                     .entityResolver = if (self.options.entity_provider.kind == .none) "unavailable" else "running",
                     .answerer = if (self.options.answer_provider.kind == .none) "unavailable" else "running",
                 },
+            },
+        };
+        return stringifyAlloc(allocator, response);
+    }
+
+    fn memoryEntityResolveRun(self: *Runtime, allocator: std.mem.Allocator, id: ?[]const u8, params: *const ObjectMap) ![]u8 {
+        const owner = stringField(params, "owner") orelse "eval-runner";
+        const requested_limit = integerField(params, "limit") orelse 100000;
+        if (requested_limit < 1) {
+            return errorResponse(allocator, id, "invalid_request", "limit must be positive");
+        }
+        const result = try self.runEntityResolveJobs(allocator, owner, @intCast(requested_limit));
+        const response = .{
+            .jsonrpc = "2.0",
+            .id = id,
+            .result = .{
+                .materializedCount = result.materializedCount,
+                .leasedCount = result.leasedCount,
+                .succeededCount = result.succeededCount,
+                .failedCount = result.failedCount,
+                .lastError = result.lastError,
             },
         };
         return stringifyAlloc(allocator, response);

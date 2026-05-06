@@ -134,13 +134,24 @@ pub const InMemoryAdapter = struct {
 
     fn putEdge(context: *anyopaque, edge: storage.Edge) !void {
         const self = ctx(context);
-        try self.edges.append(self.allocator, .{
+        const record = EdgeRecord{
             .qid = try self.allocator.dupe(u8, edge.qid),
             .from_qid = try self.allocator.dupe(u8, edge.from_qid),
             .to_qid = try self.allocator.dupe(u8, edge.to_qid),
             .edge_type = try self.allocator.dupe(u8, edge.edge_type),
             .properties_json = try self.allocator.dupe(u8, edge.properties_json),
-        });
+        };
+        errdefer record.deinit(self.allocator);
+
+        for (self.edges.items) |*existing| {
+            if (std.mem.eql(u8, existing.qid, edge.qid)) {
+                existing.deinit(self.allocator);
+                existing.* = record;
+                return;
+            }
+        }
+
+        try self.edges.append(self.allocator, record);
     }
 
     fn findEdges(context: *anyopaque, allocator: std.mem.Allocator, query: storage.EdgeQuery) ![]storage.Edge {

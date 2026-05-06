@@ -37,19 +37,22 @@ benchmark-locomo-smoke:
     PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --include-baselines --include-ablations --allow-failures --output-dir artifacts/benchmarks/locomo-smoke --report artifacts/benchmarks/locomo-smoke/report.json --markdown artifacts/benchmarks/locomo-smoke/report.md
 
 benchmark-locomo-graph-smoke:
-    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --include-baselines --include-ablations --include-lattice --skip-core --core-retrieval-mode graph --core-entity-provider deterministic --allow-failures --output-dir artifacts/benchmarks/locomo-graph-smoke --report artifacts/benchmarks/locomo-graph-smoke/report.json --markdown artifacts/benchmarks/locomo-graph-smoke/report.md
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --include-baselines --include-ablations --include-lattice --core-retrieval-mode graph --core-entity-provider deterministic --enable-entity-resolution --core-budget-tokens 8192 --allow-failures --output-dir artifacts/benchmarks/locomo-graph-smoke --report artifacts/benchmarks/locomo-graph-smoke/report.json --markdown artifacts/benchmarks/locomo-graph-smoke/report.md
 
 benchmark-locomo-full dataset:
-    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks {{dataset}} --result-class publishable --external-benchmark locomo --include-baselines --include-ablations --include-lattice --require-lattice --skip-core --core-retrieval-mode graph --core-entity-provider deterministic --reuse-existing --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks {{dataset}} --result-class publishable --external-benchmark locomo --include-baselines --include-ablations --include-lattice --require-lattice --core-retrieval-mode graph --core-answer-method answer --core-entity-provider deterministic --enable-entity-resolution --core-budget-tokens 32768 --reuse-existing --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
 
 benchmark-locomo-download:
-    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --download-locomo --result-class publishable --include-baselines --include-ablations --include-lattice --require-lattice --skip-core --core-retrieval-mode graph --core-entity-provider deterministic --reuse-existing --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --download-locomo --result-class publishable --include-baselines --include-ablations --include-lattice --require-lattice --core-retrieval-mode graph --core-answer-method answer --core-entity-provider deterministic --enable-entity-resolution --core-budget-tokens 32768 --reuse-existing --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
 
 benchmark-longmemeval-smoke:
-    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark longmemeval --include-baselines --include-ablations --allow-failures --output-dir artifacts/benchmarks/longmemeval-smoke --report artifacts/benchmarks/longmemeval-smoke/report.json --markdown artifacts/benchmarks/longmemeval-smoke/report.md
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark longmemeval --include-baselines --include-ablations --enable-entity-resolution --core-budget-tokens 8192 --allow-failures --output-dir artifacts/benchmarks/longmemeval-smoke --report artifacts/benchmarks/longmemeval-smoke/report.json --markdown artifacts/benchmarks/longmemeval-smoke/report.md
+
+benchmark-longmemeval-full dataset:
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks {{dataset}} --result-class publishable --external-benchmark longmemeval --include-baselines --include-ablations --include-lattice --require-lattice --core-retrieval-mode graph --core-answer-method answer --core-answer-provider openrouter --core-answer-model openai/gpt-4o --core-entity-provider deterministic --enable-entity-resolution --core-budget-tokens 32768 --reuse-existing --allow-failures --markdown artifacts/benchmarks/longmemeval-full/report.md
 
 benchmark-longmemeval-download:
-    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark longmemeval --download-longmemeval --longmemeval-variant oracle --result-class publishable --include-baselines --include-ablations --include-lattice --require-lattice --skip-core --core-retrieval-mode graph --core-entity-provider deterministic --reuse-existing --allow-failures --markdown artifacts/benchmarks/longmemeval-full/report.md
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark longmemeval --download-longmemeval --longmemeval-variant oracle --result-class publishable --include-baselines --include-ablations --include-lattice --require-lattice --core-retrieval-mode graph --core-answer-method answer --core-answer-provider openrouter --core-answer-model openai/gpt-4o --core-entity-provider deterministic --enable-entity-resolution --core-budget-tokens 32768 --reuse-existing --allow-failures --markdown artifacts/benchmarks/longmemeval-full/report.md
 
 benchmark-external-all: benchmark-locomo-smoke benchmark-locomo-graph-smoke benchmark-longmemeval-smoke
 
