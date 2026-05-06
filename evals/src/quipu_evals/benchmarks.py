@@ -66,6 +66,7 @@ def collect_benchmarks(
     judge_provider: str | None = None,
     judge_model: str | None = None,
     reuse_existing: bool = False,
+    allow_weak_judge: bool = False,
 ) -> dict[str, Any]:
     suite_path = Path(suite_path)
     suite_path, suite = prepare_suite(
@@ -98,9 +99,40 @@ def collect_benchmarks(
     skipped_runs: list[dict[str, str]] = []
     provider_options = provider_options or {}
     judge_client = None
+    resolved_judge_provider = judge_provider or "none"
+    resolved_judge_model = resolve_judge_model_for_guard(judge_provider, judge_model)
+    validate_publishable_judge(
+        result_class=result_class,
+        judge_provider=resolved_judge_provider,
+        judge_model=resolved_judge_model,
+        allow_weak_judge=allow_weak_judge,
+    )
     if judge_provider and judge_provider != "none":
         from .provider_clients import LlmClient
         judge_client = LlmClient(judge_provider, judge_model=judge_model)
+        resolved_judge_model = str(judge_client.settings.judge_model)
+    judge_provider_for_label = resolved_judge_provider if judge_client is not None else None
+    common_config = benchmark_run_config(
+        suite_path=suite_path,
+        result_class=result_class,
+        external_benchmark=external_benchmark,
+        judge_provider=resolved_judge_provider,
+        judge_model=resolved_judge_model,
+        core_retrieval_mode=core_retrieval_mode,
+        core_answer_method=core_answer_method,
+        core_answer_provider=core_answer_provider,
+        core_answer_model=core_answer_model,
+        core_entity_provider=core_entity_provider,
+        core_entity_model=core_entity_model,
+        core_embedding_provider=core_embedding_provider,
+        core_embedding_model=core_embedding_model,
+        core_vector_dimensions=core_vector_dimensions,
+        core_budget_tokens=core_budget_tokens,
+    )
+    deterministic_providers = deterministic_provider_names(
+        judge_provider=judge_provider_for_label,
+        judge_model=resolved_judge_model,
+    )
 
     runs.append(
         run_case(
@@ -113,11 +145,10 @@ def collect_benchmarks(
             runner="quipu_evals.runner",
             storage="fake",
             config={
-                "suite": str(suite_path),
+                **common_config,
                 "baseline": "q0_raw_only_fake",
-                "resultClass": result_class,
-                "externalBenchmark": external_benchmark,
             },
+            providers=deterministic_providers,
             seed=seed,
             verification_status=verification_status,
             reuse_existing=reuse_existing,
@@ -136,11 +167,10 @@ def collect_benchmarks(
                     runner="quipu_evals.runner",
                     storage="deterministic",
                     config={
-                        "suite": str(suite_path),
+                        **common_config,
                         "baseline": baseline_id,
-                        "resultClass": result_class,
-                        "externalBenchmark": external_benchmark,
                     },
+                    providers=deterministic_providers,
                     seed=seed,
                     verification_status=verification_status,
                     reuse_existing=reuse_existing,
@@ -159,7 +189,8 @@ def collect_benchmarks(
                 "embedder": f"openrouter:{openrouter_client.settings.embedding_model}",
                 "reranker": "none",
                 "answer": "deterministic_prompt_match",
-                "judge": "rule_based",
+                "judge": provider_label(judge_provider_for_label, resolved_judge_model, default="rule_based"),
+                "entityResolver": provider_label(core_entity_provider, core_entity_model, default="none"),
             }
             for baseline_id in ("vector_rag", "hybrid_bm25_vector"):
                 baseline_label = f"openrouter_{baseline_id}"
@@ -180,13 +211,11 @@ def collect_benchmarks(
                         runner="quipu_evals.runner",
                         storage="provider",
                         config={
-                            "suite": str(suite_path),
+                            **common_config,
                             "baseline": baseline_id,
                             "baselineLabel": baseline_label,
                             "embeddingProvider": "openrouter",
                             "embeddingModel": openrouter_client.settings.embedding_model,
-                            "resultClass": result_class,
-                            "externalBenchmark": external_benchmark,
                         },
                         providers=openrouter_provider_names,
                         seed=seed,
@@ -207,11 +236,10 @@ def collect_benchmarks(
                     runner="quipu_evals.runner",
                     storage="deterministic",
                     config={
-                        "suite": str(suite_path),
+                        **common_config,
                         "ablation": ablation_id,
-                        "resultClass": result_class,
-                        "externalBenchmark": external_benchmark,
                     },
+                    providers=deterministic_providers,
                     seed=seed,
                     verification_status=verification_status,
                     reuse_existing=reuse_existing,
@@ -225,6 +253,8 @@ def collect_benchmarks(
                 lambda: run_core_suite(
                     suite_path,
                     storage="memory",
+                    scenario_artifact_dir=output_dir / "core_in_memory-scenarios",
+                    reuse_existing=reuse_existing,
                     retrieval_mode=core_retrieval_mode,
                     answer_method=core_answer_method,
                     answer_provider=core_answer_provider,
@@ -248,13 +278,7 @@ def collect_benchmarks(
                 runner="quipu_evals.core_runner",
                 storage="memory",
                 config={
-                    "suite": str(suite_path),
-                    "resultClass": result_class,
-                    "externalBenchmark": external_benchmark,
-                    "retrievalMode": core_retrieval_mode,
-                    "answerMethod": core_answer_method,
-                    "answerProvider": core_answer_provider,
-                    "answerModel": core_answer_model,
+                    **common_config,
                     "entityProvider": core_entity_provider if enable_entity_resolution else None,
                     **(
                         {}
@@ -262,11 +286,7 @@ def collect_benchmarks(
                         else {"entityProviderNote": "async entity resolution disabled for in-memory core storage"}
                     ),
                     "entityModel": core_entity_model if enable_entity_resolution else None,
-                    "embeddingProvider": core_embedding_provider,
-                    "embeddingModel": core_embedding_model,
-                    "vectorDimensions": core_vector_dimensions,
                     "pageSize": core_page_size,
-                    "budgetTokens": core_budget_tokens,
                 },
                 providers=core_provider_names(
                     answer_provider=core_answer_provider,
@@ -275,6 +295,8 @@ def collect_benchmarks(
                     entity_model=core_entity_model if enable_entity_resolution else None,
                     embedding_provider=core_embedding_provider,
                     embedding_model=core_embedding_model,
+                    judge_provider=judge_provider_for_label,
+                    judge_model=resolved_judge_model,
                 ),
                 seed=seed,
                 verification_status=verification_status,
@@ -320,22 +342,12 @@ def collect_benchmarks(
                     runner="quipu_evals.core_runner",
                     storage="lattice",
                     config={
-                        "suite": str(suite_path),
-                        "resultClass": result_class,
-                        "externalBenchmark": external_benchmark,
+                        **common_config,
                         "latticeInclude": lattice_include,
                         "latticeLib": lattice_lib,
-                        "retrievalMode": core_retrieval_mode,
-                        "answerMethod": core_answer_method,
-                        "answerProvider": core_answer_provider,
-                        "answerModel": core_answer_model,
                         "entityProvider": core_entity_provider,
                         "entityModel": core_entity_model,
-                        "embeddingProvider": core_embedding_provider,
-                        "embeddingModel": core_embedding_model,
-                        "vectorDimensions": core_vector_dimensions,
                         "pageSize": core_page_size,
-                        "budgetTokens": core_budget_tokens,
                     },
                     lattice_version=lattice_version(lattice_include, lattice_lib),
                     seed=seed,
@@ -349,12 +361,15 @@ def collect_benchmarks(
                         entity_model=core_entity_model,
                         embedding_provider=core_embedding_provider,
                         embedding_model=core_embedding_model,
+                        judge_provider=judge_provider_for_label,
+                        judge_model=resolved_judge_model,
                     ),
                 )
             )
     elif include_lattice and not core_available:
         skipped_runs.append({"name": "core_lattice", "reason": "zig is not installed"})
 
+    retrieval_mode_summary = apply_retrieval_mode_assertions(runs, output_dir)
     report_verification = aggregate_verification(runs, verification_status)
     report = {
         "schemaVersion": "quipu.benchmark.report.v1",
@@ -367,6 +382,8 @@ def collect_benchmarks(
         "suite": str(suite_path),
         "latticeRequested": include_lattice,
         "latticeIncluded": any(run.get("storage") == "lattice" for run in runs),
+        "retrievalModePassed": retrieval_mode_summary["passed"],
+        "retrievalModeWarnings": retrieval_mode_summary["warnings"],
         "verification": report_verification,
         "baselineRegistry": registry_json(),
         "ablations": ablation_summaries(runs),
@@ -402,6 +419,97 @@ def ablation_summaries(runs: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return summaries
 
 
+def benchmark_run_config(
+    *,
+    suite_path: Path,
+    result_class: str,
+    external_benchmark: str | None,
+    judge_provider: str,
+    judge_model: str | None,
+    core_retrieval_mode: str | None,
+    core_answer_method: str,
+    core_answer_provider: str | None,
+    core_answer_model: str | None,
+    core_entity_provider: str | None,
+    core_entity_model: str | None,
+    core_embedding_provider: str | None,
+    core_embedding_model: str | None,
+    core_vector_dimensions: int | None,
+    core_budget_tokens: int | None,
+) -> dict[str, Any]:
+    return {
+        "suite": str(suite_path),
+        "resultClass": result_class,
+        "externalBenchmark": external_benchmark,
+        "judgeProvider": judge_provider,
+        "judgeModel": judge_model,
+        "budgetTokens": core_budget_tokens,
+        "answerMethod": core_answer_method,
+        "answerProvider": core_answer_provider,
+        "answerModel": core_answer_model,
+        "embeddingProvider": core_embedding_provider,
+        "embeddingModel": core_embedding_model,
+        "vectorDimensions": core_vector_dimensions,
+        "retrievalMode": core_retrieval_mode,
+        "entityProvider": core_entity_provider,
+        "entityModel": core_entity_model,
+    }
+
+
+def validate_publishable_judge(
+    *,
+    result_class: str,
+    judge_provider: str,
+    judge_model: str | None,
+    allow_weak_judge: bool,
+) -> None:
+    if result_class != "publishable" or allow_weak_judge:
+        return
+    if judge_provider == "none":
+        raise ValueError("Publishable runs require an LLM judge. Pass --judge-provider or --allow-weak-judge.")
+    model = judge_model or "unknown"
+    if is_weak_publishable_judge_model(model):
+        raise ValueError(f"Publishable runs require judge model gpt-4o or stronger, got: {model}")
+
+
+def resolve_judge_model_for_guard(judge_provider: str | None, judge_model: str | None) -> str | None:
+    if judge_model:
+        return judge_model
+    if not judge_provider or judge_provider == "none":
+        return None
+    from .provider_clients import PROVIDER_PROFILES
+
+    profile = PROVIDER_PROFILES.get(judge_provider)
+    prefix = (profile.provider if profile is not None else judge_provider).upper()
+    return (
+        os.environ.get("QUIPU_JUDGE_MODEL")
+        or os.environ.get(f"{prefix}_JUDGE_MODEL")
+        or os.environ.get(f"{prefix}_MODEL")
+        or (profile.judge_model if profile is not None else None)
+    )
+
+
+def is_weak_publishable_judge_model(model: str | None) -> bool:
+    if model is None:
+        return False
+    return "gpt-4o-mini" in model.lower()
+
+
+def deterministic_provider_names(
+    *,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
+) -> dict[str, str]:
+    return {
+        "extractor": "deterministic_fixture",
+        "embedder": "deterministic_fixture",
+        "reranker": "none",
+        "answer": "deterministic_prompt_match",
+        "judge": provider_label(judge_provider, judge_model, default="rule_based"),
+        "entityResolver": "none",
+    }
+
+
 def core_provider_names(
     *,
     answer_provider: str | None = None,
@@ -410,13 +518,15 @@ def core_provider_names(
     entity_model: str | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
 ) -> dict[str, str]:
     return {
         "extractor": "deterministic_fixture",
         "embedder": provider_label(embedding_provider, embedding_model, default="deterministic_fixture"),
         "reranker": "none",
         "answer": provider_label(answer_provider, answer_model, default="deterministic_prompt_match"),
-        "judge": "rule_based",
+        "judge": provider_label(judge_provider, judge_model, default="rule_based"),
         "entityResolver": provider_label(entity_provider, entity_model, default="none"),
     }
 
@@ -488,6 +598,196 @@ def aggregate_verification(runs: list[Mapping[str, Any]], default: str) -> dict[
     return {"status": default}
 
 
+def apply_retrieval_mode_assertions(runs: list[dict[str, Any]], output_dir: Path) -> dict[str, Any]:
+    failing_runs = []
+    for run in runs:
+        assertion = retrieval_mode_assertion(run, output_dir)
+        run["retrievalModeAssertion"] = assertion
+        if not assertion.get("passed", False):
+            failing_runs.append(str(run.get("name") or run.get("baseline") or "unknown"))
+    return {"passed": not failing_runs, "warnings": failing_runs}
+
+
+def retrieval_mode_assertion(run: Mapping[str, Any], output_dir: Path) -> dict[str, Any]:
+    run_name = str(run.get("name") or run.get("baseline") or "unknown")
+    if run.get("storage") not in {"memory", "lattice"}:
+        return {"passed": True, "message": "not applicable: non-core run"}
+
+    config = run_manifest_config(run, output_dir)
+    mode = str(config.get("retrievalMode") or "").lower()
+    if mode not in {"graph", "hybrid"}:
+        mode_label = mode or "default"
+        return {"passed": True, "message": f"not applicable: retrievalMode is {mode_label}"}
+
+    stats = inspect_retrieval_traces(run, output_dir)
+    inspected = stats["inspected"]
+    classified = stats["classified"]
+    fts_only = stats["fts_only"]
+    if inspected == 0:
+        return {
+            "passed": False,
+            "message": f"retrievalMode {mode} could not be verified for {run_name}: no trace-bearing artifacts found",
+        }
+    if classified == 0:
+        return {
+            "passed": False,
+            "message": (
+                f"retrievalMode {mode} could not be verified for {run_name}: "
+                f"{inspected} inspected trace(s) had no candidateSources"
+            ),
+        }
+    if fts_only == classified:
+        return {
+            "passed": False,
+            "message": (
+                f"retrievalMode {mode} failed for {run_name}: "
+                f"all {classified} classified trace(s) were FTS-only"
+            ),
+        }
+    return {
+        "passed": True,
+        "message": (
+            f"retrievalMode {mode} verified for {run_name}: "
+            f"{classified - fts_only}/{classified} classified trace(s) were not FTS-only"
+        ),
+    }
+
+
+def run_manifest_config(run: Mapping[str, Any], output_dir: Path) -> dict[str, Any]:
+    run_config = run.get("config")
+    config_payload = dict(run_config) if isinstance(run_config, Mapping) else {}
+    artifacts = run.get("artifacts", {})
+    if isinstance(artifacts, Mapping):
+        manifest_ref = artifacts.get("manifest")
+        if isinstance(manifest_ref, str):
+            manifest_path = artifact_path(manifest_ref, output_dir)
+            if manifest_path.exists():
+                try:
+                    manifest = json.loads(manifest_path.read_text())
+                except json.JSONDecodeError:
+                    manifest = {}
+                config = manifest.get("config") if isinstance(manifest, Mapping) else None
+                if isinstance(config, Mapping):
+                    config_payload.update(dict(config))
+                    return config_payload
+    return config_payload
+
+
+def inspect_retrieval_traces(run: Mapping[str, Any], output_dir: Path) -> dict[str, int]:
+    stats = {"inspected": 0, "classified": 0, "fts_only": 0}
+    for payload in retrieval_trace_payloads(run, output_dir):
+        for trace in traces_from_payload(payload):
+            stats["inspected"] += 1
+            sources = trace.get("candidateSources")
+            if not isinstance(sources, Mapping):
+                continue
+            stats["classified"] += 1
+            if is_fts_only_trace_sources(sources):
+                stats["fts_only"] += 1
+    return stats
+
+
+def retrieval_trace_payloads(run: Mapping[str, Any], output_dir: Path) -> list[Mapping[str, Any]]:
+    payloads: list[Mapping[str, Any]] = []
+    for directory in scenario_artifact_dirs(run, output_dir):
+        if not directory.exists() or not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.json")):
+            payload = load_json_mapping(path)
+            if payload is not None:
+                payloads.append(payload)
+        if payloads:
+            return payloads
+
+    artifacts = run.get("artifacts", {})
+    if isinstance(artifacts, Mapping):
+        for key in ("results", "traces"):
+            value = artifacts.get(key)
+            if not isinstance(value, str):
+                continue
+            payload = load_json_mapping(artifact_path(value, output_dir))
+            if payload is not None:
+                payloads.append(payload)
+            if payloads:
+                return payloads
+    return payloads
+
+
+def scenario_artifact_dirs(run: Mapping[str, Any], output_dir: Path) -> list[Path]:
+    directories = []
+    run_name = str(run.get("name") or "")
+    if run_name:
+        directories.append(output_dir / f"{run_name}-scenarios")
+
+    artifacts = run.get("artifacts", {})
+    if isinstance(artifacts, Mapping):
+        for key in ("scenarioArtifacts", "scenarioArtifactsDir", "scenarios"):
+            value = artifacts.get(key)
+            if isinstance(value, str):
+                directories.append(artifact_path(value, output_dir))
+
+    if run_name == "core_lattice":
+        directories.append(output_dir / "scenarios")
+    return dedupe_paths(directories)
+
+
+def traces_from_payload(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    traces = []
+    for query in payload.get("queries", []):
+        if not isinstance(query, Mapping):
+            continue
+        trace = query.get("trace")
+        if isinstance(trace, Mapping):
+            traces.append(trace)
+    for item in payload.get("traces", []):
+        if not isinstance(item, Mapping):
+            continue
+        trace = item.get("trace")
+        if isinstance(trace, Mapping):
+            traces.append(trace)
+    return traces
+
+
+def is_fts_only_trace_sources(sources: Mapping[str, Any]) -> bool:
+    return (
+        int(sources.get("fts") or 0) > 0
+        and int(sources.get("vector") or 0) == 0
+        and int(sources.get("graph") or 0) == 0
+    )
+
+
+def load_json_mapping(path: Path) -> Mapping[str, Any] | None:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, Mapping) else None
+
+
+def artifact_path(value: str, output_dir: Path) -> Path:
+    path = Path(value)
+    if path.is_absolute() or path.exists():
+        return path
+    root_path = ROOT / path
+    if root_path.exists():
+        return root_path
+    return output_dir / path.name
+
+
+def dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen = set()
+    result = []
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
+
+
 def run_case(
     slug: str,
     fn: Callable[[], Any],
@@ -514,6 +814,7 @@ def run_case(
             results_path=results_path,
             manifest_path=manifest_path,
             storage=storage,
+            config=config,
         )
     started = time.perf_counter()
     run = fn()
@@ -550,6 +851,8 @@ def run_case(
         "storage": storage,
         "passed": run_json.get("passed"),
         "metrics": run_json.get("metrics", {}),
+        "config": dict(config),
+        "providers": dict(providers or {}),
         "durationMs": round(duration_ms, 3),
         "latticeVersion": lattice_version,
         "verification": run_json.get("verification", {"status": case_verification_status}),
@@ -567,12 +870,18 @@ def load_existing_case(
     results_path: Path,
     manifest_path: Path,
     storage: str,
+    config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     run_json = json.loads(results_path.read_text())
     manifest = json.loads(manifest_path.read_text())
     artifacts = manifest.get("artifacts", {})
     if not isinstance(artifacts, Mapping):
         artifacts = {}
+    manifest_config = manifest.get("config")
+    config_payload = dict(config or {})
+    if isinstance(manifest_config, Mapping):
+        config_payload.update(dict(manifest_config))
+    manifest_providers = manifest.get("providers")
     artifact_payload = {
         "results": str(results_path),
         "manifest": str(manifest_path),
@@ -584,6 +893,8 @@ def load_existing_case(
         "storage": str(manifest.get("storage") or storage),
         "passed": run_json.get("passed"),
         "metrics": run_json.get("metrics", {}),
+        "config": config_payload,
+        "providers": dict(manifest_providers) if isinstance(manifest_providers, Mapping) else {},
         "durationMs": float(manifest.get("durationMs") or 0.0),
         "latticeVersion": manifest.get("latticeVersion"),
         "verification": run_json.get("verification", {"status": manifest.get("verification", {}).get("status", "not_run")}),
@@ -657,10 +968,17 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         f"- Dataset: `{_mapping_get(dataset, 'datasetName', 'unknown')}` `{_mapping_get(dataset, 'datasetVersion', 'unknown')}`",
         f"- Suite: `{report.get('suite')}`",
         f"- Lattice included: `{str(report.get('latticeIncluded')).lower()}`",
-        "",
+    ]
+    methodology_lines = _render_methodology(report) if external_benchmark else []
+    if methodology_lines:
+        lines.extend(["", "## Methodology", "", *methodology_lines])
+    lines.extend(
+        [
+            "",
         "| Baseline | Storage | Pass | Queries | Forget Ops | Duration | LatticeDB |",
         "| --- | --- | ---: | ---: | ---: | ---: | --- |",
-    ]
+        ]
+    )
     for run in report.get("runs", []):
         metrics = run.get("metrics", {})
         queries = f"{metrics.get('queriesPassed', 0)}/{metrics.get('queriesTotal', 0)}"
@@ -671,6 +989,9 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         lines.append(
             f"| `{run.get('baseline')}` | `{run.get('storage')}` | {passed} | {queries} | {forget} | {duration} | `{lattice}` |"
         )
+    retrieval_assertion_lines = _render_retrieval_mode_assertions(report)
+    if retrieval_assertion_lines:
+        lines.extend(["", *retrieval_assertion_lines])
     skipped = report.get("skippedRuns", [])
     if skipped:
         lines.extend(["", "Skipped runs:"])
@@ -712,6 +1033,103 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _render_methodology(report: Mapping[str, Any]) -> list[str]:
+    config = _methodology_config(report)
+    if not config:
+        return []
+    retrieval_mode = _display_value(config.get("retrievalMode"), default="default")
+    budget = _display_value(config.get("budgetTokens"))
+    dimensions = _display_value(config.get("vectorDimensions"))
+    lines = [
+        f"- Retrieval mode / budget: `{retrieval_mode}` / `{budget}`",
+        (
+            "- Answer method / provider / model: "
+            f"`{_display_value(config.get('answerMethod'))}` / "
+            f"`{_display_value(config.get('answerProvider'))}` / "
+            f"`{_display_value(config.get('answerModel'))}`"
+        ),
+        (
+            "- Judge provider / model: "
+            f"`{_display_value(config.get('judgeProvider'), default='none')}` / "
+            f"`{_display_value(config.get('judgeModel'))}`"
+        ),
+        (
+            "- Embedding provider / model / dimensions: "
+            f"`{_display_value(config.get('embeddingProvider'))}` / "
+            f"`{_display_value(config.get('embeddingModel'))}` / "
+            f"`{dimensions}`"
+        ),
+    ]
+    entity_provider = config.get("entityProvider")
+    if entity_provider:
+        lines.append(f"- Entity provider: `{entity_provider}`")
+    return lines
+
+
+def _methodology_config(report: Mapping[str, Any]) -> dict[str, Any]:
+    configs = []
+    core_configs = []
+    for run in report.get("runs", []):
+        if not isinstance(run, Mapping):
+            continue
+        config = run.get("config")
+        if not isinstance(config, Mapping):
+            continue
+        config_dict = dict(config)
+        configs.append(config_dict)
+        if run.get("storage") in {"memory", "lattice"}:
+            core_configs.append(config_dict)
+    for config in core_configs:
+        if config.get("entityProvider"):
+            return config
+    if core_configs:
+        return core_configs[0]
+    return configs[0] if configs else {}
+
+
+def _render_retrieval_mode_assertions(report: Mapping[str, Any]) -> list[str]:
+    if "retrievalModePassed" not in report:
+        return []
+    passed = bool(report.get("retrievalModePassed"))
+    warnings = [str(item) for item in report.get("retrievalModeWarnings", []) if isinstance(item, str)]
+    lines = [
+        "## Retrieval Mode Assertions",
+        "",
+        f"Status: `{'passed' if passed else 'failed'}`",
+    ]
+    if not warnings:
+        lines.append("")
+        lines.append("No retrieval-mode warnings.")
+        return lines
+
+    lines.extend(
+        [
+            "",
+            f"Failing runs: {', '.join(f'`{item}`' for item in warnings)}",
+            "",
+            "| Run | Message |",
+            "| --- | --- |",
+        ]
+    )
+    warning_set = set(warnings)
+    for run in report.get("runs", []):
+        if not isinstance(run, Mapping):
+            continue
+        name = str(run.get("name") or run.get("baseline") or "unknown")
+        if name not in warning_set:
+            continue
+        assertion = run.get("retrievalModeAssertion")
+        message = assertion.get("message") if isinstance(assertion, Mapping) else ""
+        lines.append(f"| `{name}` | {_table_cell(message)} |")
+    return lines
+
+
+def _display_value(value: object, *, default: str = "-") -> str:
+    if value is None or value == "":
+        return default
+    return str(value)
 
 
 def _render_published_comparisons(comparisons: object) -> list[str]:
@@ -889,6 +1307,7 @@ def main() -> int:
     parser.add_argument("--core-budget-tokens", type=int, default=None)
     parser.add_argument("--judge-provider", choices=["none", *supported_llm_provider_ids()], default=os.environ.get("QUIPU_JUDGE_PROVIDER", "none"))
     parser.add_argument("--judge-model", default=os.environ.get("QUIPU_JUDGE_MODEL"))
+    parser.add_argument("--allow-weak-judge", action="store_true", default=False)
     parser.add_argument(
         "--provider-embedding-cache",
         type=Path,
@@ -969,6 +1388,7 @@ def main() -> int:
         core_budget_tokens=args.core_budget_tokens,
         judge_provider=args.judge_provider,
         judge_model=args.judge_model,
+        allow_weak_judge=args.allow_weak_judge,
         reuse_existing=args.reuse_existing,
         locomo_options={
             "max_conversations": args.locomo_max_conversations,
