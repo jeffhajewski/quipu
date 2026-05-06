@@ -1,0 +1,560 @@
+{
+  "baseline": "core_in_memory",
+  "forgetOps": [
+    {
+      "deletedRoots": 1,
+      "forgetId": "f_pkg_1",
+      "grade": {
+        "details": {
+          "leaks": []
+        },
+        "name": "deletion_leakage",
+        "passed": true
+      },
+      "invalidatedFacts": 1,
+      "passed": true,
+      "scenarioId": "scenario_package_manager_update"
+    }
+  ],
+  "metrics": {
+    "answer": {
+      "exactMatch": 1.0
+    },
+    "forgetOpsPassed": 1,
+    "forgetOpsTotal": 1,
+    "forgetting": {
+      "deletedStringLeakRate": 0.0
+    },
+    "grades": {
+      "deletion_leakage": {
+        "passed": 1,
+        "total": 1
+      },
+      "evidence_ids": {
+        "passed": 5,
+        "total": 5
+      },
+      "exact_answer": {
+        "passed": 5,
+        "total": 5
+      },
+      "forbidden_evidence": {
+        "passed": 5,
+        "total": 5
+      },
+      "llm_judge": {
+        "passed": 5,
+        "total": 5
+      }
+    },
+    "queriesPassed": 5,
+    "queriesTotal": 5,
+    "retrieval": {
+      "evidencePrecision": 1.0,
+      "evidenceRecall": 1.0,
+      "recallAtK": 1.0,
+      "staleMemoryRate": 0.0
+    },
+    "runtime": {}
+  },
+  "passed": true,
+  "queries": [
+    {
+      "actualAnswer": "pnpm",
+      "category": "knowledge_update",
+      "evidenceEventIds": [
+        "e_pkg_2"
+      ],
+      "grades": [
+        {
+          "details": {
+            "actual": "pnpm",
+            "expected": "pnpm"
+          },
+          "name": "exact_answer",
+          "passed": true
+        },
+        {
+          "details": {
+            "actual": [
+              "e_pkg_2"
+            ],
+            "expected": [
+              "e_pkg_2"
+            ],
+            "missing": []
+          },
+          "name": "evidence_ids",
+          "passed": true
+        },
+        {
+          "details": {
+            "actual": [
+              "e_pkg_2"
+            ],
+            "forbidden": [
+              "e_pkg_1"
+            ],
+            "usedForbidden": []
+          },
+          "name": "forbidden_evidence",
+          "passed": true
+        },
+        {
+          "details": {
+            "model": "openai/gpt-4o-mini",
+            "reason": "The candidate answer matches the ground truth answer exactly.",
+            "score": 1.0
+          },
+          "name": "llm_judge",
+          "passed": true
+        }
+      ],
+      "passed": true,
+      "queryId": "q_pkg_current",
+      "scenarioId": "scenario_package_manager_update",
+      "trace": {
+        "budgetTokens": 1200,
+        "candidateCount": 11,
+        "candidateSources": {
+          "core": 0,
+          "fts": 11,
+          "graph": 0,
+          "hybrid": 0,
+          "vector": 0
+        },
+        "droppedForBudget": 0,
+        "droppedForNeeds": 0,
+        "droppedItemReasons": [],
+        "keptCount": 1,
+        "query": "What package manager should I use?",
+        "requestedNeedsCount": 0,
+        "scoreBreakdowns": [
+          {
+            "confidence": 1,
+            "lexical": 0.75,
+            "qid": "q_fact_13",
+            "recency": 0.75,
+            "scope": 1,
+            "score": 3,
+            "temporal": 1,
+            "type": "fact"
+          }
+        ],
+        "scoringDetails": [
+          {
+            "confidence": 1,
+            "finalScore": 3,
+            "formula": "lexical + temporal + scope + confidence + recency",
+            "lexical": 0.75,
+            "qid": "q_fact_13",
+            "recency": 0.75,
+            "scope": 1,
+            "temporal": 1,
+            "type": "fact"
+          }
+        ],
+        "tokenEstimate": 23,
+        "validAt": "2026-03-01T10:00:00Z"
+      }
+    },
+    {
+      "actualAnswer": "npm",
+      "category": "temporal",
+      "evidenceEventIds": [
+        "e_pkg_1"
+      ],
+      "grades": [
+        {
+          "details": {
+            "actual": "npm",
+            "expected": "npm"
+          },
+          "name": "exact_answer",
+          "passed": true
+        },
+        {
+          "details": {
+            "actual": [
+              "e_pkg_1"
+            ],
+            "expected": [
+              "e_pkg_1"
+            ],
+            "missing": []
+          },
+          "name": "evidence_ids",
+          "passed": true
+        },
+        {
+          "details": {
+            "actual": [
+              "e_pkg_1"
+            ],
+            "forbidden": [],
+            "usedForbidden": []
+          },
+          "name": "forbidden_evidence",
+          "passed": true
+        },
+        {
+          "details": {
+            "model": "openai/gpt-4o-mini",
+            "reason": "The candidate answer matches the ground truth answer exactly.",
+            "score": 1.0
+          },
+          "name": "llm_judge",
+          "passed": true
+        }
+      ],
+      "passed": true,
+      "queryId": "q_pkg_historical",
+      "scenarioId": "scenario_package_manager_update",
+      "trace": {
+        "budgetTokens": 1200,
+        "candidateCount": 11,
+        "candidateSources": {
+          "core": 0,
+          "fts": 11,
+          "graph": 0,
+          "hybrid": 0,
+          "vector": 0
+        },
+        "droppedForBudget": 0,
+        "droppedForNeeds": 0,
+        "droppedItemReasons": [],
+        "keptCount": 1,
+        "query": "What package manager did we use in mid January?",
+        "requestedNeedsCount": 0,
+        "scoreBreakdowns": [
+          {
+            "confidence": 1,
+            "lexical": 0.800000011920929,
+            "qid": "q_fact_6",
+            "recency": 0.75,
+            "scope": 1,
+            "score": 4,
+            "temporal": 0.5,
+            "type": "fact"
+          }
+        ],
+        "scoringDetails": [
+          {
+            "confidence": 1,
+            "finalScore": 4,
+            "formula": "lexical + temporal + scope + confidence + recency",
+            "lexical": 0.800000011920929,
+            "qid": "q_fact_6",
+            "recency": 0.75,
+            "scope": 1,
+            "temporal": 0.5,
+            "type": "fact"
+          }
+        ],
+        "tokenEstimate": 22,
+        "validAt": "2026-01-15T10:00:00Z"
+      }
+    },
+    {
+      "actualAnswer": "just test",
+      "category": "cross_scope",
+      "evidenceEventIds": [
+        "e_scope_a"
+      ],
+      "grades": [
+        {
+          "details": {
+            "actual": "just test",
+            "expected": "just test"
+          },
+          "name": "exact_answer",
+          "passed": true
+        },
+        {
+          "details": {
+            "actual": [
+              "e_scope_a"
+            ],
+            "expected": [
+              "e_scope_a"
+            ],
+            "missing": []
+          },
+          "name": "evidence_ids",
+          "passed": true
+        },
+        {
+          "details": {
+            "actual": [
+              "e_scope_a"
+            ],
+            "forbidden": [
+              "e_scope_b"
+            ],
+            "usedForbidden": []
+          },
+          "name": "forbidden_evidence",
+          "passed": true
+        },
+        {
+          "details": {
+            "model": "openai/gpt-4o-mini",
+            "reason": "The candidate answer matches the ground truth answer exactly.",
+            "score": 1.0
+          },
+          "name": "llm_judge",
+          "passed": true
+        }
+      ],
+      "passed": true,
+      "queryId": "q_scope_alpha",
+      "scenarioId": "scenario_cross_scope_tools",
+      "trace": {
+        "budgetTokens": 1200,
+        "candidateCount": 4,
+        "candidateSources": {
+          "core": 0,
+          "fts": 4,
+          "graph": 0,
+          "hybrid": 0,
+          "vector": 0
+        },
+        "droppedForBudget": 0,
+        "droppedForNeeds": 0,
+        "droppedItemReasons": [],
+        "keptCount": 1,
+        "query": "What test command should I run before committing?",
+        "requestedNeedsCount": 0,
+        "scoreBreakdowns": [
+          {
+            "confidence": 1,
+            "lexical": 0.8333333134651184,
+            "qid": "q_proc_6",
+            "recency": 0.75,
+            "scope": 1,
+            "score": 5,
+            "temporal": 1,
+            "type": "procedure"
+          }
+        ],
+        "scoringDetails": [
+          {
+            "confidence": 1,
+            "finalScore": 5,
+            "formula": "lexical + temporal + scope + confidence + recency",
+            "lexical": 0.8333333134651184,
+            "qid": "q_proc_6",
+            "recency": 0.75,
+            "scope": 1,
+            "temporal": 1,
+            "type": "procedure"
+          }
+        ],
+        "tokenEstimate": 22,
+        "validAt": "2026-04-02T10:00:00Z"
+      }
+    },
+    {
+      "actualAnswer": "detailed",
+      "category": "preference_update",
+      "evidenceEventIds": [
+        "e_pref_2"
+      ],
+      "grades": [
+        {
+          "details": {
+            "actual": "detailed",
+            "expected": "detailed"
+          },
+          "name": "exact_answer",
+          "passed": true
+        },
+        {
+          "details": {
+            "actual": [
+              "e_pref_2"
+            ],
+            "expected": [
+              "e_pref_2"
+            ],
+            "missing": []
+          },
+          "name": "evidence_ids",
+          "passed": true
+        },
+        {
+          "details": {
+            "actual": [
+              "e_pref_2"
+            ],
+            "forbidden": [
+              "e_pref_1"
+            ],
+            "usedForbidden": []
+          },
+          "name": "forbidden_evidence",
+          "passed": true
+        },
+        {
+          "details": {
+            "model": "openai/gpt-4o-mini",
+            "reason": "The candidate answer matches the ground truth answer exactly.",
+            "score": 1.0
+          },
+          "name": "llm_judge",
+          "passed": true
+        }
+      ],
+      "passed": true,
+      "queryId": "q_pref_current",
+      "scenarioId": "scenario_response_style_update",
+      "trace": {
+        "budgetTokens": 1200,
+        "candidateCount": 11,
+        "candidateSources": {
+          "core": 0,
+          "fts": 11,
+          "graph": 0,
+          "hybrid": 0,
+          "vector": 0
+        },
+        "droppedForBudget": 0,
+        "droppedForNeeds": 0,
+        "droppedItemReasons": [],
+        "keptCount": 1,
+        "query": "What response style should you use?",
+        "requestedNeedsCount": 0,
+        "scoreBreakdowns": [
+          {
+            "confidence": 1,
+            "lexical": 0.75,
+            "qid": "q_pref_13",
+            "recency": 0.75,
+            "scope": 1,
+            "score": 3,
+            "temporal": 1,
+            "type": "preference"
+          }
+        ],
+        "scoringDetails": [
+          {
+            "confidence": 1,
+            "finalScore": 3,
+            "formula": "lexical + temporal + scope + confidence + recency",
+            "lexical": 0.75,
+            "qid": "q_pref_13",
+            "recency": 0.75,
+            "scope": 1,
+            "temporal": 1,
+            "type": "preference"
+          }
+        ],
+        "tokenEstimate": 24,
+        "validAt": "2026-06-15T10:00:00Z"
+      }
+    },
+    {
+      "actualAnswer": "concise",
+      "category": "temporal",
+      "evidenceEventIds": [
+        "e_pref_1"
+      ],
+      "grades": [
+        {
+          "details": {
+            "actual": "concise",
+            "expected": "concise"
+          },
+          "name": "exact_answer",
+          "passed": true
+        },
+        {
+          "details": {
+            "actual": [
+              "e_pref_1"
+            ],
+            "expected": [
+              "e_pref_1"
+            ],
+            "missing": []
+          },
+          "name": "evidence_ids",
+          "passed": true
+        },
+        {
+          "details": {
+            "actual": [
+              "e_pref_1"
+            ],
+            "forbidden": [],
+            "usedForbidden": []
+          },
+          "name": "forbidden_evidence",
+          "passed": true
+        },
+        {
+          "details": {
+            "model": "openai/gpt-4o-mini",
+            "reason": "The candidate answer matches the ground truth answer exactly.",
+            "score": 1.0
+          },
+          "name": "llm_judge",
+          "passed": true
+        }
+      ],
+      "passed": true,
+      "queryId": "q_pref_historical",
+      "scenarioId": "scenario_response_style_update",
+      "trace": {
+        "budgetTokens": 1200,
+        "candidateCount": 11,
+        "candidateSources": {
+          "core": 0,
+          "fts": 11,
+          "graph": 0,
+          "hybrid": 0,
+          "vector": 0
+        },
+        "droppedForBudget": 0,
+        "droppedForNeeds": 0,
+        "droppedItemReasons": [],
+        "keptCount": 1,
+        "query": "What response style did the user prefer in mid May?",
+        "requestedNeedsCount": 0,
+        "scoreBreakdowns": [
+          {
+            "confidence": 1,
+            "lexical": 0.8571428656578064,
+            "qid": "q_pref_6",
+            "recency": 0.75,
+            "scope": 1,
+            "score": 6,
+            "temporal": 0.5,
+            "type": "preference"
+          }
+        ],
+        "scoringDetails": [
+          {
+            "confidence": 1,
+            "finalScore": 6,
+            "formula": "lexical + temporal + scope + confidence + recency",
+            "lexical": 0.8571428656578064,
+            "qid": "q_pref_6",
+            "recency": 0.75,
+            "scope": 1,
+            "temporal": 0.5,
+            "type": "preference"
+          }
+        ],
+        "tokenEstimate": 24,
+        "validAt": "2026-05-15T10:00:00Z"
+      }
+    }
+  ],
+  "suiteName": "quipu_synthetic",
+  "suiteVersion": "0.1.0",
+  "verification": {
+    "runs": [],
+    "status": "not_run"
+  }
+}

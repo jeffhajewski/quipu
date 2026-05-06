@@ -1,0 +1,389 @@
+{
+  "ablations": [],
+  "baselineRegistry": {
+    "ablations": [
+      {
+        "description": "Raw scenario replay with scoped lexical retrieval.",
+        "id": "Q0",
+        "name": "Raw-only no extraction",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Retrieve only memory-card nodes.",
+        "id": "Q1",
+        "name": "Memory cards only",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Retrieve only fact/preference nodes.",
+        "id": "Q2",
+        "name": "Facts only",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Use vector retrieval only.",
+        "id": "Q3",
+        "name": "Vector only",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Use lexical retrieval only.",
+        "id": "Q4",
+        "name": "BM25 only",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Hybrid lexical/vector retrieval.",
+        "id": "Q5",
+        "name": "Vector + BM25",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Add graph neighborhood expansion.",
+        "id": "Q6",
+        "name": "+ graph expansion",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Add activation scoring over graph neighborhoods.",
+        "id": "Q7",
+        "name": "+ graph activation",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Use valid-at filtering for current and historical facts.",
+        "id": "Q8",
+        "name": "+ temporal validity",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Suppress stale or contradicted active answers.",
+        "id": "Q9",
+        "name": "+ contradiction suppression",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Rerank retrieved evidence before budget assembly.",
+        "id": "Q10",
+        "name": "+ evidence reranking",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Update utility scores from feedback and traces.",
+        "id": "Q11",
+        "name": "+ utility learning",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Include user-managed core memory blocks and summaries.",
+        "id": "Q12",
+        "name": "+ summaries/core memory",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Propagate forget operations through derived memories.",
+        "id": "Q13",
+        "name": "+ forgetting propagation",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "All deterministic retrieval, consolidation, and verification stages enabled.",
+        "id": "full_quipu",
+        "name": "Full Quipu",
+        "status": "implemented_deterministic"
+      }
+    ],
+    "baselines": [
+      {
+        "description": "Replay all eligible raw context within the answer budget.",
+        "id": "full_context",
+        "name": "Full context",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Use the most recent scoped messages only.",
+        "id": "recent_only",
+        "name": "Recent only",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Lexical search baseline over scoped raw messages.",
+        "id": "bm25",
+        "name": "BM25",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Vector-only retrieval over scoped raw messages.",
+        "id": "vector_rag",
+        "name": "Vector RAG",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Combine lexical and vector scores.",
+        "id": "hybrid_bm25_vector",
+        "name": "Hybrid BM25/vector",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Answer from generated summaries without raw evidence retrieval.",
+        "id": "summary_only",
+        "name": "Summary only",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Use memory cards without raw-message fallback.",
+        "id": "memory_cards_only",
+        "name": "Memory cards only",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Use graph expansion without lexical/vector ranking.",
+        "id": "graph_only",
+        "name": "Graph only",
+        "status": "implemented_deterministic"
+      },
+      {
+        "description": "Deterministic raw-only smoke baseline.",
+        "id": "q0_raw_only_fake",
+        "name": "Q0 raw-only fake",
+        "status": "implemented"
+      },
+      {
+        "description": "Zig core runtime over in-memory storage.",
+        "id": "core_in_memory",
+        "name": "Core in-memory",
+        "status": "implemented"
+      },
+      {
+        "description": "Zig core runtime over LatticeDB when configured.",
+        "id": "core_lattice",
+        "name": "Core LatticeDB",
+        "status": "implemented_optional"
+      }
+    ]
+  },
+  "benchmarkReadiness": {
+    "missing": [
+      "external_dataset_adapter",
+      "full_dataset",
+      "lattice_storage",
+      "baselines",
+      "ablations",
+      "verification"
+    ],
+    "requirements": [
+      {
+        "id": "external_dataset_adapter",
+        "name": "External dataset adapter",
+        "passed": false
+      },
+      {
+        "id": "full_dataset",
+        "name": "Full external dataset",
+        "passed": false
+      },
+      {
+        "id": "replay_into_daemon",
+        "name": "Replay into daemon",
+        "passed": true
+      },
+      {
+        "id": "lattice_storage",
+        "name": "Lattice-backed storage",
+        "passed": false
+      },
+      {
+        "id": "retrieval_traces",
+        "name": "Retrieval traces",
+        "passed": true
+      },
+      {
+        "id": "answer_generation",
+        "name": "Answer generation",
+        "passed": true
+      },
+      {
+        "id": "grading",
+        "name": "Grading",
+        "passed": true
+      },
+      {
+        "id": "baselines",
+        "name": "Required baselines",
+        "passed": false
+      },
+      {
+        "id": "ablations",
+        "name": "Quipu ablations",
+        "passed": false
+      },
+      {
+        "id": "verification",
+        "name": "Verification pass",
+        "passed": false
+      },
+      {
+        "id": "reproducible_report",
+        "name": "Reproducible report and manifests",
+        "passed": true
+      }
+    ],
+    "status": "not_ready"
+  },
+  "dataset": {
+    "benchmark": "synthetic",
+    "datasetName": "quipu_synthetic",
+    "datasetVersion": "0.1.0",
+    "format": "quipu.synthetic.scenario.v1",
+    "license": "MIT",
+    "source": "quipu",
+    "tasks": [
+      "temporal_truth",
+      "selective_forgetting",
+      "cross_scope_contamination",
+      "procedural_learning",
+      "preference_learning",
+      "entity_resolution",
+      "evidence_faithfulness",
+      "adversarial_memory"
+    ]
+  },
+  "externalBenchmark": null,
+  "generatedAt": "2026-05-06T04:56:44.504137Z",
+  "gitCommit": "804fe53+dirty",
+  "latticeIncluded": false,
+  "latticeRequested": false,
+  "publishedComparisons": [],
+  "quipuVersion": "0.1.0",
+  "resultClass": "synthetic_smoke",
+  "runs": [
+    {
+      "artifacts": {
+        "manifest": "artifacts/benchmarks/llm-synthetic/q0_raw_only_fake-manifest.json",
+        "results": "artifacts/benchmarks/llm-synthetic/q0_raw_only_fake-results.json"
+      },
+      "baseline": "q0_raw_only_fake",
+      "durationMs": 4496.887,
+      "latticeVersion": null,
+      "metrics": {
+        "answer": {
+          "exactMatch": 1.0
+        },
+        "forgetOpsPassed": 1,
+        "forgetOpsTotal": 1,
+        "forgetting": {
+          "deletedStringLeakRate": 0.0
+        },
+        "grades": {
+          "deletion_leakage": {
+            "passed": 1,
+            "total": 1
+          },
+          "evidence_ids": {
+            "passed": 5,
+            "total": 5
+          },
+          "exact_answer": {
+            "passed": 5,
+            "total": 5
+          },
+          "forbidden_evidence": {
+            "passed": 5,
+            "total": 5
+          },
+          "llm_judge": {
+            "passed": 5,
+            "total": 5
+          },
+          "scope_leakage": {
+            "passed": 5,
+            "total": 5
+          }
+        },
+        "queriesPassed": 5,
+        "queriesTotal": 5,
+        "retrieval": {
+          "evidencePrecision": 1.0,
+          "evidenceRecall": 1.0,
+          "recallAtK": 1.0,
+          "scopePrecision": 1.0,
+          "staleMemoryRate": 0.0
+        },
+        "runtime": {}
+      },
+      "name": "q0_raw_only_fake",
+      "passed": true,
+      "storage": "fake",
+      "verification": {
+        "status": "not_run"
+      }
+    },
+    {
+      "artifacts": {
+        "manifest": "artifacts/benchmarks/llm-synthetic/core_in_memory-manifest.json",
+        "results": "artifacts/benchmarks/llm-synthetic/core_in_memory-results.json",
+        "traces": "artifacts/benchmarks/llm-synthetic/core_in_memory-traces.json"
+      },
+      "baseline": "core_in_memory",
+      "durationMs": 5188.448,
+      "latticeVersion": null,
+      "metrics": {
+        "answer": {
+          "exactMatch": 1.0
+        },
+        "forgetOpsPassed": 1,
+        "forgetOpsTotal": 1,
+        "forgetting": {
+          "deletedStringLeakRate": 0.0
+        },
+        "grades": {
+          "deletion_leakage": {
+            "passed": 1,
+            "total": 1
+          },
+          "evidence_ids": {
+            "passed": 5,
+            "total": 5
+          },
+          "exact_answer": {
+            "passed": 5,
+            "total": 5
+          },
+          "forbidden_evidence": {
+            "passed": 5,
+            "total": 5
+          },
+          "llm_judge": {
+            "passed": 5,
+            "total": 5
+          }
+        },
+        "queriesPassed": 5,
+        "queriesTotal": 5,
+        "retrieval": {
+          "evidencePrecision": 1.0,
+          "evidenceRecall": 1.0,
+          "recallAtK": 1.0,
+          "staleMemoryRate": 0.0
+        },
+        "runtime": {}
+      },
+      "name": "core_in_memory",
+      "passed": true,
+      "storage": "memory",
+      "verification": {
+        "runs": [],
+        "status": "not_run"
+      }
+    }
+  ],
+  "schemaVersion": "quipu.benchmark.report.v1",
+  "skippedRuns": [],
+  "suite": "evals/suites/quipu_synthetic.yaml",
+  "traceArtifacts": [
+    "artifacts/benchmarks/llm-synthetic/core_in_memory-traces.json"
+  ],
+  "verification": {
+    "status": "not_run"
+  }
+}

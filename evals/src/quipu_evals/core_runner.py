@@ -19,6 +19,7 @@ from .graders import (
     grade_evidence_ids,
     grade_exact_answer,
     grade_forbidden_evidence,
+    grade_llm_judge,
 )
 from .metrics import grade_counts, metric_groups
 from .provider_clients import supported_llm_provider_ids

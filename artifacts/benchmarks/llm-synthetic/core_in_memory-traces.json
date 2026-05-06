@@ -1,0 +1,246 @@
+{
+  "baseline": "core_in_memory",
+  "schemaVersion": "quipu.retrieval_traces.v1",
+  "traces": [
+    {
+      "queryId": "q_pkg_current",
+      "scenarioId": "scenario_package_manager_update",
+      "trace": {
+        "budgetTokens": 1200,
+        "candidateCount": 11,
+        "candidateSources": {
+          "core": 0,
+          "fts": 11,
+          "graph": 0,
+          "hybrid": 0,
+          "vector": 0
+        },
+        "droppedForBudget": 0,
+        "droppedForNeeds": 0,
+        "droppedItemReasons": [],
+        "keptCount": 1,
+        "query": "What package manager should I use?",
+        "requestedNeedsCount": 0,
+        "scoreBreakdowns": [
+          {
+            "confidence": 1,
+            "lexical": 0.75,
+            "qid": "q_fact_13",
+            "recency": 0.75,
+            "scope": 1,
+            "score": 3,
+            "temporal": 1,
+            "type": "fact"
+          }
+        ],
+        "scoringDetails": [
+          {
+            "confidence": 1,
+            "finalScore": 3,
+            "formula": "lexical + temporal + scope + confidence + recency",
+            "lexical": 0.75,
+            "qid": "q_fact_13",
+            "recency": 0.75,
+            "scope": 1,
+            "temporal": 1,
+            "type": "fact"
+          }
+        ],
+        "tokenEstimate": 23,
+        "validAt": "2026-03-01T10:00:00Z"
+      }
+    },
+    {
+      "queryId": "q_pkg_historical",
+      "scenarioId": "scenario_package_manager_update",
+      "trace": {
+        "budgetTokens": 1200,
+        "candidateCount": 11,
+        "candidateSources": {
+          "core": 0,
+          "fts": 11,
+          "graph": 0,
+          "hybrid": 0,
+          "vector": 0
+        },
+        "droppedForBudget": 0,
+        "droppedForNeeds": 0,
+        "droppedItemReasons": [],
+        "keptCount": 1,
+        "query": "What package manager did we use in mid January?",
+        "requestedNeedsCount": 0,
+        "scoreBreakdowns": [
+          {
+            "confidence": 1,
+            "lexical": 0.800000011920929,
+            "qid": "q_fact_6",
+            "recency": 0.75,
+            "scope": 1,
+            "score": 4,
+            "temporal": 0.5,
+            "type": "fact"
+          }
+        ],
+        "scoringDetails": [
+          {
+            "confidence": 1,
+            "finalScore": 4,
+            "formula": "lexical + temporal + scope + confidence + recency",
+            "lexical": 0.800000011920929,
+            "qid": "q_fact_6",
+            "recency": 0.75,
+            "scope": 1,
+            "temporal": 0.5,
+            "type": "fact"
+          }
+        ],
+        "tokenEstimate": 22,
+        "validAt": "2026-01-15T10:00:00Z"
+      }
+    },
+    {
+      "queryId": "q_scope_alpha",
+      "scenarioId": "scenario_cross_scope_tools",
+      "trace": {
+        "budgetTokens": 1200,
+        "candidateCount": 4,
+        "candidateSources": {
+          "core": 0,
+          "fts": 4,
+          "graph": 0,
+          "hybrid": 0,
+          "vector": 0
+        },
+        "droppedForBudget": 0,
+        "droppedForNeeds": 0,
+        "droppedItemReasons": [],
+        "keptCount": 1,
+        "query": "What test command should I run before committing?",
+        "requestedNeedsCount": 0,
+        "scoreBreakdowns": [
+          {
+            "confidence": 1,
+            "lexical": 0.8333333134651184,
+            "qid": "q_proc_6",
+            "recency": 0.75,
+            "scope": 1,
+            "score": 5,
+            "temporal": 1,
+            "type": "procedure"
+          }
+        ],
+        "scoringDetails": [
+          {
+            "confidence": 1,
+            "finalScore": 5,
+            "formula": "lexical + temporal + scope + confidence + recency",
+            "lexical": 0.8333333134651184,
+            "qid": "q_proc_6",
+            "recency": 0.75,
+            "scope": 1,
+            "temporal": 1,
+            "type": "procedure"
+          }
+        ],
+        "tokenEstimate": 22,
+        "validAt": "2026-04-02T10:00:00Z"
+      }
+    },
+    {
+      "queryId": "q_pref_current",
+      "scenarioId": "scenario_response_style_update",
+      "trace": {
+        "budgetTokens": 1200,
+        "candidateCount": 11,
+        "candidateSources": {
+          "core": 0,
+          "fts": 11,
+          "graph": 0,
+          "hybrid": 0,
+          "vector": 0
+        },
+        "droppedForBudget": 0,
+        "droppedForNeeds": 0,
+        "droppedItemReasons": [],
+        "keptCount": 1,
+        "query": "What response style should you use?",
+        "requestedNeedsCount": 0,
+        "scoreBreakdowns": [
+          {
+            "confidence": 1,
+            "lexical": 0.75,
+            "qid": "q_pref_13",
+            "recency": 0.75,
+            "scope": 1,
+            "score": 3,
+            "temporal": 1,
+            "type": "preference"
+          }
+        ],
+        "scoringDetails": [
+          {
+            "confidence": 1,
+            "finalScore": 3,
+            "formula": "lexical + temporal + scope + confidence + recency",
+            "lexical": 0.75,
+            "qid": "q_pref_13",
+            "recency": 0.75,
+            "scope": 1,
+            "temporal": 1,
+            "type": "preference"
+          }
+        ],
+        "tokenEstimate": 24,
+        "validAt": "2026-06-15T10:00:00Z"
+      }
+    },
+    {
+      "queryId": "q_pref_historical",
+      "scenarioId": "scenario_response_style_update",
+      "trace": {
+        "budgetTokens": 1200,
+        "candidateCount": 11,
+        "candidateSources": {
+          "core": 0,
+          "fts": 11,
+          "graph": 0,
+          "hybrid": 0,
+          "vector": 0
+        },
+        "droppedForBudget": 0,
+        "droppedForNeeds": 0,
+        "droppedItemReasons": [],
+        "keptCount": 1,
+        "query": "What response style did the user prefer in mid May?",
+        "requestedNeedsCount": 0,
+        "scoreBreakdowns": [
+          {
+            "confidence": 1,
+            "lexical": 0.8571428656578064,
+            "qid": "q_pref_6",
+            "recency": 0.75,
+            "scope": 1,
+            "score": 6,
+            "temporal": 0.5,
+            "type": "preference"
+          }
+        ],
+        "scoringDetails": [
+          {
+            "confidence": 1,
+            "finalScore": 6,
+            "formula": "lexical + temporal + scope + confidence + recency",
+            "lexical": 0.8571428656578064,
+            "qid": "q_pref_6",
+            "recency": 0.75,
+            "scope": 1,
+            "temporal": 0.5,
+            "type": "preference"
+          }
+        ],
+        "tokenEstimate": 24,
+        "validAt": "2026-05-15T10:00:00Z"
+      }
+    }
+  ]
+}

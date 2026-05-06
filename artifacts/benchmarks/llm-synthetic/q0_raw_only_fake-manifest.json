@@ -1,0 +1,96 @@
+{
+  "artifacts": {
+    "results": "artifacts/benchmarks/llm-synthetic/q0_raw_only_fake-results.json"
+  },
+  "baseline": "q0_raw_only_fake",
+  "config": {
+    "baseline": "q0_raw_only_fake",
+    "externalBenchmark": null,
+    "resultClass": "synthetic_smoke",
+    "suite": "evals/suites/quipu_synthetic.yaml"
+  },
+  "configHash": "81a18d61088bb509f9feb775c7f6b1cfac76aeb73c348fde25966457573f1c99",
+  "dataset": {
+    "name": "quipu_synthetic",
+    "version": "0.1.0"
+  },
+  "durationMs": 4496.887,
+  "generatedAt": "2026-05-06T04:56:44.504137Z",
+  "gitCommit": "804fe53+dirty",
+  "hardware": {
+    "machine": "arm64",
+    "processor": "arm",
+    "python": "3.9.6",
+    "release": "25.3.0",
+    "system": "Darwin"
+  },
+  "latticeVersion": null,
+  "metrics": {
+    "answer": {
+      "exactMatch": 1.0
+    },
+    "forgetOpsPassed": 1,
+    "forgetOpsTotal": 1,
+    "forgetting": {
+      "deletedStringLeakRate": 0.0
+    },
+    "grades": {
+      "deletion_leakage": {
+        "passed": 1,
+        "total": 1
+      },
+      "evidence_ids": {
+        "passed": 5,
+        "total": 5
+      },
+      "exact_answer": {
+        "passed": 5,
+        "total": 5
+      },
+      "forbidden_evidence": {
+        "passed": 5,
+        "total": 5
+      },
+      "llm_judge": {
+        "passed": 5,
+        "total": 5
+      },
+      "scope_leakage": {
+        "passed": 5,
+        "total": 5
+      }
+    },
+    "queriesPassed": 5,
+    "queriesTotal": 5,
+    "retrieval": {
+      "evidencePrecision": 1.0,
+      "evidenceRecall": 1.0,
+      "recallAtK": 1.0,
+      "scopePrecision": 1.0,
+      "staleMemoryRate": 0.0
+    },
+    "runtime": {}
+  },
+  "passed": true,
+  "providers": {
+    "answer": "deterministic_prompt_match",
+    "embedder": "deterministic_fixture",
+    "extractor": "deterministic_fixture",
+    "judge": "rule_based",
+    "reranker": "none"
+  },
+  "quipuVersion": "0.1.0",
+  "randomSeed": 0,
+  "runId": "run_4aefaf78914b5c40",
+  "runner": "quipu_evals.runner",
+  "schemaVersion": "quipu.eval.run.v1",
+  "storage": "fake",
+  "suite": {
+    "name": "quipu_synthetic",
+    "path": "evals/suites/quipu_synthetic.yaml",
+    "version": "0.1.0"
+  },
+  "verification": {
+    "status": "not_run"
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "artifacts": {
+    "results": "artifacts/benchmarks/llm-synthetic/core_in_memory-results.json",
+    "traces": "artifacts/benchmarks/llm-synthetic/core_in_memory-traces.json"
+  },
+  "baseline": "core_in_memory",
+  "config": {
+    "answerMethod": "retrieve",
+    "answerModel": "openai/gpt-4o-mini",
+    "answerProvider": "openrouter",
+    "embeddingModel": null,
+    "embeddingProvider": null,
+    "entityProvider": null,
+    "entityProviderNote": "async entity resolution requires persistent core storage",
+    "externalBenchmark": null,
+    "pageSize": null,
+    "resultClass": "synthetic_smoke",
+    "retrievalMode": null,
+    "suite": "evals/suites/quipu_synthetic.yaml",
+    "vectorDimensions": null
+  },
+  "configHash": "e3bd92f4c72bd5532001f0912f01709ea109a47a58edf3812b1a88ddcfe659b9",
+  "dataset": {
+    "name": "quipu_synthetic",
+    "version": "0.1.0"
+  },
+  "durationMs": 5188.448,
+  "generatedAt": "2026-05-06T04:56:44.504137Z",
+  "gitCommit": "804fe53+dirty",
+  "hardware": {
+    "machine": "arm64",
+    "processor": "arm",
+    "python": "3.9.6",
+    "release": "25.3.0",
+    "system": "Darwin"
+  },
+  "latticeVersion": null,
+  "metrics": {
+    "answer": {
+      "exactMatch": 1.0
+    },
+    "forgetOpsPassed": 1,
+    "forgetOpsTotal": 1,
+    "forgetting": {
+      "deletedStringLeakRate": 0.0
+    },
+    "grades": {
+      "deletion_leakage": {
+        "passed": 1,
+        "total": 1
+      },
+      "evidence_ids": {
+        "passed": 5,
+        "total": 5
+      },
+      "exact_answer": {
+        "passed": 5,
+        "total": 5
+      },
+      "forbidden_evidence": {
+        "passed": 5,
+        "total": 5
+      },
+      "llm_judge": {
+        "passed": 5,
+        "total": 5
+      }
+    },
+    "queriesPassed": 5,
+    "queriesTotal": 5,
+    "retrieval": {
+      "evidencePrecision": 1.0,
+      "evidenceRecall": 1.0,
+      "recallAtK": 1.0,
+      "staleMemoryRate": 0.0
+    },
+    "runtime": {}
+  },
+  "passed": true,
+  "providers": {
+    "answer": "openrouter:openai/gpt-4o-mini",
+    "embedder": "deterministic_fixture",
+    "entityResolver": "none",
+    "extractor": "deterministic_fixture",
+    "judge": "rule_based",
+    "reranker": "none"
+  },
+  "quipuVersion": "0.1.0",
+  "randomSeed": 0,
+  "runId": "run_5d6dc309a528d447",
+  "runner": "quipu_evals.core_runner",
+  "schemaVersion": "quipu.eval.run.v1",
+  "storage": "memory",
+  "suite": {
+    "name": "quipu_synthetic",
+    "path": "evals/suites/quipu_synthetic.yaml",
+    "version": "0.1.0"
+  },
+  "verification": {
+    "status": "not_run"
+  }
+}
