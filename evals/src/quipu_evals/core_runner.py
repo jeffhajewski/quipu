@@ -575,15 +575,38 @@ def run_query(
         params["needs"] = retrieval_needs
     if retrieval_mode is not None:
         params["mode"] = retrieval_mode
-    if answer_method == "answer":
-        retrieved = client.call("memory.answer", params)
-        context = retrieved.get("context")
-        prompt = context_prompt(context)
-        actual_answer = str(retrieved.get("answer") or "")
-    else:
-        retrieved = client.call("memory.retrieve", params)
-        prompt = str(retrieved["prompt"])
-        actual_answer = answer_from_prompt(prompt, query.expected_answer)
+    try:
+        if answer_method == "answer":
+            retrieved = client.call("memory.answer", params)
+            context = retrieved.get("context")
+            prompt = context_prompt(context)
+            actual_answer = str(retrieved.get("answer") or "")
+        else:
+            retrieved = client.call("memory.retrieve", params)
+            prompt = str(retrieved["prompt"])
+            actual_answer = answer_from_prompt(prompt, query.expected_answer)
+    except RuntimeError as exc:
+        actual_answer = ""
+        evidence_event_ids: list[str] = []
+        grades = [
+            grade_exact_answer(actual_answer, query.expected_answer),
+            grade_evidence_ids(evidence_event_ids, query.expected_evidence_event_ids),
+            grade_forbidden_evidence(evidence_event_ids, query.must_not_use_event_ids),
+            GradeResult(name="runtime_error", passed=False, details={"error": str(exc)}),
+        ]
+        if judge_provider is not None:
+            judge_model = str(getattr(getattr(judge_provider, "settings", None), "judge_model", "unknown"))
+            grades.append(grade_llm_judge(False, 0.0, f"core query failed: {exc}", judge_model))
+        return CoreQueryRun(
+            scenario_id=scenario_id,
+            query_id=query.query_id,
+            category=query.category,
+            prompt=f"Core query failed: {exc}",
+            actual_answer=actual_answer,
+            evidence_event_ids=evidence_event_ids,
+            grades=grades,
+            trace=None,
+        )
     evidence_event_ids = event_ids_from_items(retrieved.get("items", []), event_to_message_qids)
     grades = [
         grade_exact_answer(actual_answer, query.expected_answer),
