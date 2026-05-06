@@ -21,7 +21,7 @@ from quipu_evals.comparisons import published_results  # noqa: E402
 from quipu_evals.external import load_external_suite  # noqa: E402
 from quipu_evals.locomo import load_locomo_suite, write_suite  # noqa: E402
 from quipu_evals.longmemeval import load_longmemeval_suite  # noqa: E402
-from quipu_evals.provider_clients import CachedEmbeddingProvider, LlmJudgeResult  # noqa: E402
+from quipu_evals.provider_clients import CachedEmbeddingProvider, LlmClient, LlmJudgeResult  # noqa: E402
 from quipu_evals.readiness import evaluate_readiness  # noqa: E402
 from quipu_evals.baselines import DETERMINISTIC_ABLATIONS, DETERMINISTIC_REQUIRED_BASELINES  # noqa: E402
 from quipu_evals import load_suite, run_suite  # noqa: E402
@@ -83,6 +83,46 @@ class SyntheticEvalTests(unittest.TestCase):
 
         self.assertEqual(first[0], second[0])
         self.assertEqual(client.calls, 1)
+
+    def test_llm_judge_cache_reuses_disk_entries(self):
+        class StubJudgeClient(LlmClient):
+            def __init__(self, cache_path):
+                self.calls = 0
+                super().__init__("ollama", judge_model="stub-judge", judge_cache_path=cache_path)
+
+            def _post(self, url, payload):
+                self.calls += 1
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {"correct": True, "score": 1.0, "reason": "cached judgment"}
+                                )
+                            }
+                        }
+                    ]
+                }
+
+        with tempfile.TemporaryDirectory(prefix="quipu-judge-cache-") as directory:
+            cache_path = Path(directory) / "judge.jsonl"
+            first_client = StubJudgeClient(cache_path)
+
+            first = first_client.judge_answer("Question?\n", "Expected answer", "Actual answer")
+            second = first_client.judge_answer("Question?", "Expected answer", "Actual answer")
+            second_client = StubJudgeClient(cache_path)
+            third = second_client.judge_answer("Question?", "Expected answer", "Actual answer")
+            entries = [json.loads(line) for line in cache_path.read_text().splitlines()]
+
+        self.assertTrue(first.passed)
+        self.assertEqual(second.reason, "cached judgment")
+        self.assertEqual(third.score, 1.0)
+        self.assertEqual(first_client.calls, 1)
+        self.assertEqual(second_client.calls, 0)
+        self.assertEqual(len(entries), 1)
+        self.assertIn("query_hash", entries[0])
+        self.assertEqual(entries[0]["judge_model"], "stub-judge")
+        self.assertTrue(entries[0]["result"]["passed"])
 
     def test_runner_can_use_provider_backed_vector_baseline(self):
         class StubEmbeddingProvider:

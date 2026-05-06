@@ -65,10 +65,12 @@ def collect_benchmarks(
     core_budget_tokens: int | None = None,
     judge_provider: str | None = None,
     judge_model: str | None = None,
+    judge_cache_path: str | Path | None = None,
     reuse_existing: bool = False,
     allow_weak_judge: bool = False,
 ) -> dict[str, Any]:
     suite_path = Path(suite_path)
+    output_dir = Path(output_dir)
     suite_path, suite = prepare_suite(
         suite_path,
         output_dir,
@@ -85,7 +87,6 @@ def collect_benchmarks(
         "license": "MIT",
         "tasks": list(suite.suites),
     }
-    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if require_lattice and not include_lattice:
         raise RuntimeError("publishable LatticeDB run requires --include-lattice")
@@ -98,6 +99,13 @@ def collect_benchmarks(
     runs: list[dict[str, Any]] = []
     skipped_runs: list[dict[str, str]] = []
     provider_options = provider_options or {}
+    resolved_judge_cache_path = (
+        Path(judge_cache_path)
+        if judge_cache_path is not None
+        else None
+        if os.environ.get("QUIPU_DISABLE_JUDGE_CACHE")
+        else output_dir / ".judge_cache.jsonl"
+    )
     judge_client = None
     resolved_judge_provider = judge_provider or "none"
     resolved_judge_model = resolve_judge_model_for_guard(judge_provider, judge_model)
@@ -109,7 +117,7 @@ def collect_benchmarks(
     )
     if judge_provider and judge_provider != "none":
         from .provider_clients import LlmClient
-        judge_client = LlmClient(judge_provider, judge_model=judge_model)
+        judge_client = LlmClient(judge_provider, judge_model=judge_model, judge_cache_path=resolved_judge_cache_path)
         resolved_judge_model = str(judge_client.settings.judge_model)
     judge_provider_for_label = resolved_judge_provider if judge_client is not None else None
     common_config = benchmark_run_config(
@@ -1307,6 +1315,11 @@ def main() -> int:
     parser.add_argument("--core-budget-tokens", type=int, default=None)
     parser.add_argument("--judge-provider", choices=["none", *supported_llm_provider_ids()], default=os.environ.get("QUIPU_JUDGE_PROVIDER", "none"))
     parser.add_argument("--judge-model", default=os.environ.get("QUIPU_JUDGE_MODEL"))
+    parser.add_argument(
+        "--judge-cache",
+        type=Path,
+        help="JSONL cache for LLM judge results (default: <output-dir>/.judge_cache.jsonl)",
+    )
     parser.add_argument("--allow-weak-judge", action="store_true", default=False)
     parser.add_argument(
         "--provider-embedding-cache",
@@ -1388,6 +1401,7 @@ def main() -> int:
         core_budget_tokens=args.core_budget_tokens,
         judge_provider=args.judge_provider,
         judge_model=args.judge_model,
+        judge_cache_path=args.judge_cache,
         allow_weak_judge=args.allow_weak_judge,
         reuse_existing=args.reuse_existing,
         locomo_options={

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import threading
 from typing import Any, Mapping, Sequence
 import urllib.error
 import urllib.request
@@ -258,6 +264,7 @@ class LlmClient:
         base_url: str | None = None,
         judge_model: str | None = None,
         embedding_model: str | None = None,
+        judge_cache_path: str | Path | None = None,
         settings: LlmSettings | None = None,
     ) -> None:
         profile = _profile(provider)
@@ -291,8 +298,9 @@ class LlmClient:
                 app_url=env_settings.app_url,
             )
         self.settings = settings
-        self._judge_cache_path = _judge_cache_path(self.settings)
-        self._judge_cache = _load_judge_cache(self._judge_cache_path)
+        self._judge_cache_path = _judge_cache_path(judge_cache_path)
+        self._judge_cache_lock = threading.Lock()
+        self._judge_cache = self._load_cache()
 
     def chat_completion(
         self,
@@ -353,9 +361,11 @@ class LlmClient:
         )
 
     def judge_answer(self, question: str, expected_answer: str, actual_answer: str) -> LlmJudgeResult:
-        cache_key = _judge_cache_key(self.settings, question, expected_answer, actual_answer)
-        if cache_key in self._judge_cache:
-            return self._judge_cache[cache_key]
+        cache_key, cached = self._get_cached_judgment(question, expected_answer, actual_answer)
+        if cached is not None:
+            _log_judge_cache("hit", self._judge_cache_path, cache_key, self.settings.judge_model)
+            return cached
+        _log_judge_cache("miss", self._judge_cache_path, cache_key, self.settings.judge_model)
         payload = self._chat_payload(
             "You are grading a memory benchmark answer. Return only JSON with keys "
             "correct (boolean), score (number from 0 to 1), and reason (short string).",
@@ -372,9 +382,49 @@ class LlmClient:
             reason=str(parsed.get("reason", "")),
             model=self.settings.judge_model,
         )
-        self._judge_cache[cache_key] = result
-        _append_judge_cache(self._judge_cache_path, cache_key, result)
+        with self._judge_cache_lock:
+            self._judge_cache[cache_key] = result
+        self._save_cache_entry(cache_key, expected_answer, actual_answer, result)
         return result
+
+    def _load_cache(self) -> dict[str, LlmJudgeResult]:
+        return _load_judge_cache(self._judge_cache_path)
+
+    def _get_cached_judgment(
+        self,
+        question: str,
+        expected_answer: str,
+        actual_answer: str,
+    ) -> tuple[str, LlmJudgeResult | None]:
+        cache_key = _judge_cache_key(self.settings.judge_model, question, expected_answer, actual_answer)
+        legacy_key = _legacy_judge_cache_key(self.settings, question, expected_answer, actual_answer)
+        with self._judge_cache_lock:
+            return cache_key, self._judge_cache.get(cache_key) or self._judge_cache.get(legacy_key)
+
+    def _save_cache_entry(
+        self,
+        cache_key: str,
+        expected_answer: str,
+        actual_answer: str,
+        result: LlmJudgeResult,
+    ) -> None:
+        if self._judge_cache_path is None:
+            return
+        _append_judge_cache(
+            self._judge_cache_path,
+            {
+                "query_hash": cache_key,
+                "expected_answer": _truncate_cache_text(expected_answer),
+                "actual_answer": _truncate_cache_text(actual_answer),
+                "judge_model": self.settings.judge_model,
+                "result": {
+                    "passed": result.passed,
+                    "score": result.score,
+                    "reason": result.reason,
+                },
+                "timestamp": _now_iso(),
+            },
+        )
 
     def _chat_payload(self, system: str, user: str, model: str, temperature: float, json_mode: bool) -> Mapping[str, Any]:
         if self.profile.format == "anthropic_messages":
@@ -444,11 +494,16 @@ class LlmClient:
 
 
 class OpenRouterClient(LlmClient):
-    def __init__(self, settings: OpenRouterSettings | None = None) -> None:
+    def __init__(
+        self,
+        settings: OpenRouterSettings | None = None,
+        judge_cache_path: str | Path | None = None,
+    ) -> None:
         if settings is None:
             settings = OpenRouterSettings.from_env()
         super().__init__(
             "openrouter",
+            judge_cache_path=judge_cache_path,
             settings=LlmSettings(
                 provider="openrouter",
                 api_key=settings.api_key,
@@ -464,37 +519,71 @@ class OpenRouterClient(LlmClient):
         )
 
 
-def _judge_cache_path(settings: LlmSettings) -> Path | None:
+def _judge_cache_path(judge_cache_path: str | Path | None = None) -> Path | None:
+    if judge_cache_path is not None:
+        return Path(judge_cache_path).expanduser()
     explicit = os.environ.get("QUIPU_JUDGE_CACHE")
     if explicit:
-        return Path(explicit)
+        return Path(explicit).expanduser()
     if os.environ.get("QUIPU_DISABLE_JUDGE_CACHE"):
         return None
-    model_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", settings.judge_model).strip("_") or "model"
-    return Path("artifacts/provider-cache") / f"{settings.provider}-{model_slug}-judge.jsonl"
+    return Path.home() / ".cache" / "quipu" / "judge_cache.jsonl"
 
 
 def _load_judge_cache(path: Path | None) -> dict[str, LlmJudgeResult]:
     if path is None or not path.exists():
         return {}
     cache: dict[str, LlmJudgeResult] = {}
-    with path.open() as handle:
-        for line in handle:
-            try:
-                item = json.loads(line)
-                key = str(item["key"])
-                cache[key] = LlmJudgeResult(
-                    passed=bool(item["passed"]),
-                    score=float(item["score"]),
-                    reason=str(item.get("reason", "")),
-                    model=str(item["model"]),
-                )
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                continue
+    with path.open(encoding="utf-8") as handle:
+        _lock_cache_file(handle, exclusive=False)
+        try:
+            for line in handle:
+                try:
+                    item = json.loads(line)
+                    parsed = _parse_judge_cache_item(item)
+                    if parsed is not None:
+                        key, result = parsed
+                        cache[key] = result
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+        finally:
+            _unlock_cache_file(handle)
     return cache
 
 
-def _judge_cache_key(settings: LlmSettings, question: str, expected_answer: str, actual_answer: str) -> str:
+def _parse_judge_cache_item(item: Mapping[str, Any]) -> tuple[str, LlmJudgeResult] | None:
+    key = item.get("query_hash") or item.get("key")
+    if not isinstance(key, str):
+        return None
+    result_payload = item.get("result")
+    if not isinstance(result_payload, Mapping):
+        result_payload = item
+    passed = result_payload.get("passed")
+    if passed is None:
+        passed = result_payload.get("correct")
+    score = result_payload.get("score", 1.0 if passed else 0.0)
+    return (
+        key,
+        LlmJudgeResult(
+            passed=bool(passed),
+            score=float(score),
+            reason=str(result_payload.get("reason", "")),
+            model=str(item.get("judge_model") or item.get("model") or result_payload.get("model") or ""),
+        ),
+    )
+
+
+def _judge_cache_key(judge_model: str, question: str, expected_answer: str, actual_answer: str) -> str:
+    payload = {
+        "actual_answer": _normalize_cache_text(actual_answer),
+        "expected_answer": _normalize_cache_text(expected_answer),
+        "judge_model": _normalize_cache_text(judge_model),
+        "query_text": _normalize_cache_text(question),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _legacy_judge_cache_key(settings: LlmSettings, question: str, expected_answer: str, actual_answer: str) -> str:
     payload = {
         "provider": settings.provider,
         "model": settings.judge_model,
@@ -505,24 +594,47 @@ def _judge_cache_key(settings: LlmSettings, question: str, expected_answer: str,
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def _append_judge_cache(path: Path | None, key: str, result: LlmJudgeResult) -> None:
+def _normalize_cache_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def _truncate_cache_text(value: str, limit: int = 200) -> str:
+    return str(value)[:limit]
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _append_judge_cache(path: Path | None, entry: Mapping[str, Any]) -> None:
     if path is None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as handle:
-        handle.write(
-            json.dumps(
-                {
-                    "key": key,
-                    "passed": result.passed,
-                    "score": result.score,
-                    "reason": result.reason,
-                    "model": result.model,
-                },
-                separators=(",", ":"),
-            )
-            + "\n"
-        )
+    with path.open("a", encoding="utf-8") as handle:
+        _lock_cache_file(handle, exclusive=True)
+        try:
+            handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+            handle.flush()
+        finally:
+            _unlock_cache_file(handle)
+
+
+def _lock_cache_file(handle: Any, *, exclusive: bool) -> None:
+    if fcntl is None:
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+
+
+def _unlock_cache_file(handle: Any) -> None:
+    if fcntl is None:
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _log_judge_cache(status: str, path: Path | None, cache_key: str, judge_model: str) -> None:
+    if path is None:
+        return
+    print(f"judge cache {status}: {cache_key[:12]} model={judge_model} path={path}", flush=True)
 
 
 class CachedEmbeddingProvider:
