@@ -187,6 +187,16 @@ LatticeDB enabled, deterministic baselines/ablations, provider configuration,
 verification status, and generated trace artifacts. Full LongMemEval runs use
 the same readiness requirements. MemoryAgentBench remains a planned adapter.
 
+The deterministic baseline and ablation matrix does not call an answer model.
+It grades exact answers found in the retrieved prompt, which is useful for
+synthetic fixtures but can under-score real datasets whose answers require
+reasoning or synthesis. To verify core-based answering on real-style fixtures,
+run the core path with `--core-answer-method answer --core-answer-provider
+openrouter`, or run `quipu_evals.core_runner` with `--answer-method answer
+--answer-provider openrouter`. This provider-backed path requires
+`OPENROUTER_API_KEY`; without that key, skipped or absent LLM-answer runs are
+expected.
+
 For full runs, `--skip-core` omits the redundant in-memory core pass while
 still allowing the LatticeDB core pass when `--include-lattice` is set.
 `--reuse-existing` resumes from completed per-run result/manifest artifacts in
