@@ -291,6 +291,8 @@ class LlmClient:
                 app_url=env_settings.app_url,
             )
         self.settings = settings
+        self._judge_cache_path = _judge_cache_path(self.settings)
+        self._judge_cache = _load_judge_cache(self._judge_cache_path)
 
     def chat_completion(
         self,
@@ -351,6 +353,9 @@ class LlmClient:
         )
 
     def judge_answer(self, question: str, expected_answer: str, actual_answer: str) -> LlmJudgeResult:
+        cache_key = _judge_cache_key(self.settings, question, expected_answer, actual_answer)
+        if cache_key in self._judge_cache:
+            return self._judge_cache[cache_key]
         payload = self._chat_payload(
             "You are grading a memory benchmark answer. Return only JSON with keys "
             "correct (boolean), score (number from 0 to 1), and reason (short string).",
@@ -361,12 +366,15 @@ class LlmClient:
         )
         response = self._post(_chat_path(self.profile, self.settings.base_url, self.settings.judge_model), payload)
         parsed = _parse_json_object(_parse_chat_content(self.profile.format, response))
-        return LlmJudgeResult(
+        result = LlmJudgeResult(
             passed=bool(parsed.get("correct")),
             score=float(parsed.get("score", 1.0 if parsed.get("correct") else 0.0)),
             reason=str(parsed.get("reason", "")),
             model=self.settings.judge_model,
         )
+        self._judge_cache[cache_key] = result
+        _append_judge_cache(self._judge_cache_path, cache_key, result)
+        return result
 
     def _chat_payload(self, system: str, user: str, model: str, temperature: float, json_mode: bool) -> Mapping[str, Any]:
         if self.profile.format == "anthropic_messages":
@@ -453,6 +461,67 @@ class OpenRouterClient(LlmClient):
                 app_title=settings.app_title,
                 app_url=settings.app_url,
             ),
+        )
+
+
+def _judge_cache_path(settings: LlmSettings) -> Path | None:
+    explicit = os.environ.get("QUIPU_JUDGE_CACHE")
+    if explicit:
+        return Path(explicit)
+    if os.environ.get("QUIPU_DISABLE_JUDGE_CACHE"):
+        return None
+    model_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", settings.judge_model).strip("_") or "model"
+    return Path("artifacts/provider-cache") / f"{settings.provider}-{model_slug}-judge.jsonl"
+
+
+def _load_judge_cache(path: Path | None) -> dict[str, LlmJudgeResult]:
+    if path is None or not path.exists():
+        return {}
+    cache: dict[str, LlmJudgeResult] = {}
+    with path.open() as handle:
+        for line in handle:
+            try:
+                item = json.loads(line)
+                key = str(item["key"])
+                cache[key] = LlmJudgeResult(
+                    passed=bool(item["passed"]),
+                    score=float(item["score"]),
+                    reason=str(item.get("reason", "")),
+                    model=str(item["model"]),
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+    return cache
+
+
+def _judge_cache_key(settings: LlmSettings, question: str, expected_answer: str, actual_answer: str) -> str:
+    payload = {
+        "provider": settings.provider,
+        "model": settings.judge_model,
+        "question": question,
+        "expectedAnswer": expected_answer,
+        "actualAnswer": actual_answer,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _append_judge_cache(path: Path | None, key: str, result: LlmJudgeResult) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "key": key,
+                    "passed": result.passed,
+                    "score": result.score,
+                    "reason": result.reason,
+                    "model": result.model,
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
         )
 
 
