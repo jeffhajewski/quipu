@@ -837,7 +837,16 @@ pub const Runtime = struct {
         else
             self.options.answer_provider;
         const answer = providers.generateAnswer(allocator, self.options.io, endpoint, query, prompt) catch |err| {
-            const message = try std.fmt.allocPrint(allocator, "answer provider failed: {s}", .{@errorName(err)});
+            const message = if (err == error.MissingProviderApiKey)
+                try std.fmt.allocPrint(
+                    allocator,
+                    "answer provider '{s}' is missing an API key; set {s} or QUIPU_LLM_API_KEY",
+                    .{ endpoint.name, providers.apiKeyEnvName(endpoint.name) orelse "QUIPU_LLM_API_KEY" },
+                )
+            else if (err == error.InvalidProviderConfig)
+                try std.fmt.allocPrint(allocator, "answer provider '{s}' is not fully configured; set --llm-provider, --llm-model, and --llm-base-url as needed", .{endpoint.name})
+            else
+                try std.fmt.allocPrint(allocator, "answer provider '{s}' failed: {s}", .{ endpoint.name, @errorName(err) });
             defer allocator.free(message);
             return errorResponse(allocator, id, "provider_error", message);
         };

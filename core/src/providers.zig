@@ -287,6 +287,18 @@ fn chatCompletion(
 
 fn providerChatUrl(allocator: std.mem.Allocator, endpoint: ProviderEndpoint, model: []const u8) ![]u8 {
     const raw_url = endpoint.url orelse return error.InvalidProviderConfig;
+    if (endpoint.format == .openai_compatible) {
+        if (std.mem.indexOf(u8, raw_url, "chat/completions") != null) return allocator.dupe(u8, raw_url);
+        if (isProviderName(endpoint.name, "azure")) return allocator.dupe(u8, raw_url);
+        const trimmed = std.mem.trim(u8, raw_url, "/");
+        if (isProviderName(endpoint.name, "ollama") and !std.mem.endsWith(u8, trimmed, "/v1")) {
+            return std.fmt.allocPrint(allocator, "{s}/v1/chat/completions", .{trimmed});
+        }
+        if (std.mem.endsWith(u8, trimmed, "/v1")) {
+            return std.fmt.allocPrint(allocator, "{s}/chat/completions", .{trimmed});
+        }
+        return allocator.dupe(u8, raw_url);
+    }
     if (endpoint.format != .google_gemini) return allocator.dupe(u8, raw_url);
     if (std.mem.indexOf(u8, raw_url, ":generateContent") != null) return allocator.dupe(u8, raw_url);
     const trimmed = std.mem.trim(u8, raw_url, "/");

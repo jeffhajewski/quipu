@@ -19,9 +19,16 @@ const default_openrouter_lattice_dimensions: u16 = 768;
 
 const RuntimeConfig = struct {
     command_index: usize = 1,
+    config_path: ?[]const u8 = null,
     db_path: ?[]const u8 = null,
     page_size: ?u32 = null,
     vector_dimensions: ?u16 = null,
+    llm_provider: ?[]const u8 = null,
+    llm_url: ?[]const u8 = null,
+    llm_model: ?[]const u8 = null,
+    llm_api_key: ?[]const u8 = null,
+    llm_temperature: ?f32 = null,
+    llm_max_tokens: ?u32 = null,
     embedding_provider: ?[]const u8 = null,
     embedding_url: ?[]const u8 = null,
     embedding_model: ?[]const u8 = null,
@@ -31,6 +38,27 @@ const RuntimeConfig = struct {
     entity_provider: ?[]const u8 = null,
     entity_url: ?[]const u8 = null,
     entity_model: ?[]const u8 = null,
+};
+
+const FileConfig = struct {
+    llm_provider: ?[]const u8 = null,
+    llm_url: ?[]const u8 = null,
+    llm_model: ?[]const u8 = null,
+    llm_api_key: ?[]const u8 = null,
+    llm_temperature: ?f32 = null,
+    llm_max_tokens: ?u32 = null,
+    embedding_provider: ?[]const u8 = null,
+    embedding_url: ?[]const u8 = null,
+    embedding_model: ?[]const u8 = null,
+};
+
+const ProviderDefaults = struct {
+    name: []const u8,
+    format: providers.ProviderFormat = .openai_compatible,
+    url: ?[]const u8,
+    model: []const u8,
+    api_key_env: ?[]const u8,
+    capabilities: providers.ProviderCapabilities = .{},
 };
 
 const MaterializeCliArgs = struct {
@@ -140,6 +168,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var config = parseRuntimeConfig(args);
+    const file_config = try loadFileConfig(init.io, init.arena.allocator(), init.environ_map, config.config_path);
 
     if (config.db_path == null and build_options.enable_lattice) {
         config.db_path = init.environ_map.get("QUIPU_DB_PATH");
@@ -153,8 +182,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (build_options.enable_lattice and config.db_path != null) {
-        const lattice_options = try latticeOptionsFromConfig(init.io, init.environ_map, config);
-        const runtime_options = runtimeOptionsFromConfig(init.io, init.environ_map, config);
+        const lattice_options = try latticeOptionsFromConfig(init.io, init.environ_map, config, file_config);
+        const runtime_options = runtimeOptionsFromConfig(init.io, allocator, init.environ_map, config, file_config);
         var adapter_state = try lattice_storage.LatticeAdapter.open(allocator, config.db_path.?, lattice_options);
         defer adapter_state.deinit();
         try schema.ensure(allocator, adapter_state.adapter());
@@ -169,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
 
     var adapter_state = in_memory_storage.InMemoryAdapter.init(allocator);
     defer adapter_state.deinit();
-    const runtime_options = runtimeOptionsFromConfig(init.io, init.environ_map, config);
+    const runtime_options = runtimeOptionsFromConfig(init.io, allocator, init.environ_map, config, file_config);
     var runtime = runtime_mod.Runtime.initWithOptions(adapter_state.adapter(), protocol.Health.default(), runtime_options);
     defer runtime.deinit();
     try runCommand(init.io, allocator, args, config.command_index, &runtime, adapter_state.adapter());
@@ -182,6 +211,69 @@ fn parseRuntimeConfig(args: []const [:0]const u8) RuntimeConfig {
         if (std.mem.eql(u8, arg, "--db")) {
             if (config.command_index + 1 < args.len) {
                 config.db_path = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--config")) {
+            if (config.command_index + 1 < args.len) {
+                config.config_path = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--llm-provider")) {
+            if (config.command_index + 1 < args.len) {
+                config.llm_provider = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--llm-url") or std.mem.eql(u8, arg, "--llm-base-url")) {
+            if (config.command_index + 1 < args.len) {
+                config.llm_url = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--llm-model")) {
+            if (config.command_index + 1 < args.len) {
+                config.llm_model = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--llm-api-key")) {
+            if (config.command_index + 1 < args.len) {
+                config.llm_api_key = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--llm-temperature")) {
+            if (config.command_index + 1 < args.len) {
+                config.llm_temperature = std.fmt.parseFloat(f32, args[config.command_index + 1]) catch null;
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--llm-max-tokens")) {
+            if (config.command_index + 1 < args.len) {
+                config.llm_max_tokens = std.fmt.parseInt(u32, args[config.command_index + 1], 10) catch null;
                 config.command_index += 2;
                 continue;
             }
@@ -292,11 +384,98 @@ fn parseRuntimeConfig(args: []const [:0]const u8) RuntimeConfig {
     return config;
 }
 
-fn latticeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, config: RuntimeConfig) !LatticeOptions {
+fn loadFileConfig(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    environ_map: *std.process.Environ.Map,
+    explicit_path: ?[]const u8,
+) !FileConfig {
+    if (explicit_path) |path| {
+        const content = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024));
+        return parseFileConfig(allocator, environ_map, content);
+    }
+
+    if (std.Io.Dir.cwd().readFileAlloc(io, "quipu.yaml", allocator, .limited(64 * 1024))) |content| {
+        return parseFileConfig(allocator, environ_map, content);
+    } else |_| {}
+
+    if (environ_map.get("HOME")) |home| {
+        const path = try std.fmt.allocPrint(allocator, "{s}/.quipu/config.yaml", .{home});
+        if (std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024))) |content| {
+            return parseFileConfig(allocator, environ_map, content);
+        } else |_| {}
+    }
+    return .{};
+}
+
+fn parseFileConfig(
+    allocator: std.mem.Allocator,
+    environ_map: *std.process.Environ.Map,
+    content: []const u8,
+) !FileConfig {
+    var config = FileConfig{};
+    var section: []const u8 = "";
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |raw_line| {
+        const line_no_cr = std.mem.trimEnd(u8, raw_line, "\r");
+        const trimmed = std.mem.trim(u8, line_no_cr, " \t");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        const indent = line_no_cr.len - std.mem.trimStart(u8, line_no_cr, " ").len;
+        const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse continue;
+        const key = std.mem.trim(u8, trimmed[0..colon], " \t\"'");
+        const raw_value = std.mem.trim(u8, trimmed[colon + 1 ..], " \t");
+        if (raw_value.len == 0) {
+            if (indent == 0) {
+                section = key;
+            } else if (std.mem.eql(u8, section, "providers") and indent == 2 and
+                (std.mem.eql(u8, key, "primary") or std.mem.eql(u8, key, "default")))
+            {
+                section = "providers.primary";
+            }
+            continue;
+        }
+        const value = try yamlScalar(allocator, environ_map, raw_value);
+        if (value == null) continue;
+        if ((std.mem.eql(u8, section, "llm") and indent >= 2) or
+            (std.mem.eql(u8, section, "providers.primary") and indent >= 4))
+        {
+            if (std.mem.eql(u8, key, "provider") or std.mem.eql(u8, key, "service")) config.llm_provider = value.?;
+            if (std.mem.eql(u8, key, "model")) config.llm_model = value.?;
+            if (std.mem.eql(u8, key, "api_key") or std.mem.eql(u8, key, "apiKey")) config.llm_api_key = value.?;
+            if (std.mem.eql(u8, key, "base_url") or std.mem.eql(u8, key, "baseUrl") or std.mem.eql(u8, key, "url")) config.llm_url = value.?;
+            if (std.mem.eql(u8, key, "temperature")) config.llm_temperature = std.fmt.parseFloat(f32, value.?) catch null;
+            if (std.mem.eql(u8, key, "max_tokens") or std.mem.eql(u8, key, "maxTokens")) config.llm_max_tokens = std.fmt.parseInt(u32, value.?, 10) catch null;
+        } else if (std.mem.eql(u8, section, "embedding") and indent >= 2) {
+            if (std.mem.eql(u8, key, "provider") or std.mem.eql(u8, key, "service")) config.embedding_provider = value.?;
+            if (std.mem.eql(u8, key, "model")) config.embedding_model = value.?;
+            if (std.mem.eql(u8, key, "base_url") or std.mem.eql(u8, key, "baseUrl") or std.mem.eql(u8, key, "url")) config.embedding_url = value.?;
+        }
+    }
+    return config;
+}
+
+fn yamlScalar(allocator: std.mem.Allocator, environ_map: *std.process.Environ.Map, raw_value: []const u8) !?[]const u8 {
+    var value = std.mem.trim(u8, raw_value, " \t");
+    if (std.mem.indexOf(u8, value, " #")) |comment_start| {
+        value = std.mem.trim(u8, value[0..comment_start], " \t");
+    }
+    if ((std.mem.startsWith(u8, value, "\"") and std.mem.endsWith(u8, value, "\"")) or
+        (std.mem.startsWith(u8, value, "'") and std.mem.endsWith(u8, value, "'")))
+    {
+        value = value[1 .. value.len - 1];
+    }
+    if (std.mem.startsWith(u8, value, "${") and std.mem.endsWith(u8, value, "}")) {
+        const env_key = value[2 .. value.len - 1];
+        return environ_map.get(env_key);
+    }
+    return try allocator.dupe(u8, value);
+}
+
+fn latticeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, config: RuntimeConfig, file_config: FileConfig) !LatticeOptions {
     if (comptime !build_options.enable_lattice) {
         return .{};
     }
-    const provider_name = config.embedding_provider orelse environ_map.get("QUIPU_EMBEDDING_PROVIDER") orelse "hash";
+    const provider_name = config.embedding_provider orelse environ_map.get("QUIPU_EMBEDDING_PROVIDER") orelse file_config.embedding_provider orelse "hash";
     const provider = try parseEmbeddingProvider(provider_name);
     const vector_dimensions = config.vector_dimensions orelse
         envU16(environ_map, "QUIPU_VECTOR_DIMENSIONS") orelse
@@ -309,6 +488,7 @@ fn latticeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, c
     const embedding_model = config.embedding_model orelse
         environ_map.get("QUIPU_EMBEDDING_MODEL") orelse
         environ_map.get("OPENROUTER_EMBEDDING_MODEL") orelse
+        file_config.embedding_model orelse
         if (provider == .openai_compatible and isProviderName(provider_name, "openrouter"))
             "openai/text-embedding-3-small"
         else
@@ -316,6 +496,7 @@ fn latticeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, c
     const embedding_url = config.embedding_url orelse
         environ_map.get("QUIPU_EMBEDDING_URL") orelse
         environ_map.get("OPENROUTER_EMBEDDING_URL") orelse
+        file_config.embedding_url orelse
         "https://openrouter.ai/api/v1/embeddings";
     const embedding_api_key = environ_map.get("QUIPU_EMBEDDING_API_KEY") orelse environ_map.get("OPENROUTER_API_KEY");
     if (provider == .openai_compatible and isProviderName(provider_name, "openrouter") and embedding_api_key == null) {
@@ -335,14 +516,24 @@ fn latticeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, c
     };
 }
 
-fn runtimeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, config: RuntimeConfig) runtime_mod.RuntimeOptions {
+fn runtimeOptionsFromConfig(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    environ_map: *std.process.Environ.Map,
+    config: RuntimeConfig,
+    file_config: FileConfig,
+) runtime_mod.RuntimeOptions {
     return .{
         .io = io,
         .answer_provider = providerEndpointFromConfig(
+            allocator,
+            io,
             environ_map,
             config.answer_provider,
             config.answer_url,
             config.answer_model,
+            config,
+            file_config,
             "QUIPU_ANSWER_PROVIDER",
             "QUIPU_ANSWER_URL",
             "QUIPU_ANSWER_MODEL",
@@ -350,10 +541,14 @@ fn runtimeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, c
             "openai/gpt-4o",
         ),
         .entity_provider = providerEndpointFromConfig(
+            allocator,
+            io,
             environ_map,
             config.entity_provider,
             config.entity_url,
             config.entity_model,
+            config,
+            file_config,
             "QUIPU_ENTITY_PROVIDER",
             "QUIPU_ENTITY_URL",
             "QUIPU_ENTITY_MODEL",
@@ -364,41 +559,224 @@ fn runtimeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, c
 }
 
 fn providerEndpointFromConfig(
+    allocator: std.mem.Allocator,
+    io: std.Io,
     environ_map: *std.process.Environ.Map,
     cli_provider: ?[]const u8,
     cli_url: ?[]const u8,
     cli_model: ?[]const u8,
+    config: RuntimeConfig,
+    file_config: FileConfig,
     provider_env: []const u8,
     url_env: []const u8,
     model_env: []const u8,
     openrouter_model_env: []const u8,
     default_model: []const u8,
 ) providers.ProviderEndpoint {
-    const provider_name = cli_provider orelse environ_map.get(provider_env) orelse "none";
+    const provider_name = cli_provider orelse
+        config.llm_provider orelse
+        environ_map.get(provider_env) orelse
+        environ_map.get("QUIPU_LLM_PROVIDER") orelse
+        file_config.llm_provider orelse
+        detectProviderFromEnv(environ_map) orelse
+        if (ollamaAvailable(allocator, io)) "ollama" else "none";
     if (isProviderName(provider_name, "none") or isProviderName(provider_name, "off") or isProviderName(provider_name, "disabled")) {
         return .{ .kind = .none, .name = "none" };
     }
     if (isProviderName(provider_name, "deterministic") or isProviderName(provider_name, "fixture")) {
         return .{ .kind = .deterministic, .name = "deterministic" };
     }
+    const defaults = providerDefaults(provider_name, default_model);
     const url = cli_url orelse
+        config.llm_url orelse
         environ_map.get(url_env) orelse
-        environ_map.get("OPENROUTER_CHAT_URL") orelse
-        "https://openrouter.ai/api/v1/chat/completions";
+        environ_map.get("QUIPU_LLM_URL") orelse
+        environ_map.get("QUIPU_LLM_BASE_URL") orelse
+        providerSpecificUrlEnv(environ_map, provider_name) orelse
+        file_config.llm_url orelse
+        defaults.url;
     const model = cli_model orelse
+        config.llm_model orelse
         environ_map.get(model_env) orelse
+        environ_map.get("QUIPU_LLM_MODEL") orelse
         environ_map.get(openrouter_model_env) orelse
-        default_model;
-    const api_key = environ_map.get("QUIPU_MODEL_API_KEY") orelse
+        providerSpecificModelEnv(environ_map, provider_name) orelse
+        file_config.llm_model orelse
+        defaults.model;
+    const api_key = config.llm_api_key orelse
+        environ_map.get("QUIPU_LLM_API_KEY") orelse
+        environ_map.get("QUIPU_MODEL_API_KEY") orelse
         environ_map.get("QUIPU_OPENROUTER_API_KEY") orelse
-        environ_map.get("OPENROUTER_API_KEY");
+        if (defaults.api_key_env) |key| environ_map.get(key) else null orelse
+        file_config.llm_api_key;
     return .{
         .kind = .http,
-        .name = provider_name,
+        .name = defaults.name,
+        .format = defaults.format,
         .url = url,
         .model = model,
         .api_key = api_key,
+        .temperature = config.llm_temperature orelse envF32(environ_map, "QUIPU_LLM_TEMPERATURE") orelse file_config.llm_temperature orelse 0,
+        .max_tokens = config.llm_max_tokens orelse envU32(environ_map, "QUIPU_LLM_MAX_TOKENS") orelse file_config.llm_max_tokens,
+        .capabilities = defaults.capabilities,
     };
+}
+
+fn providerDefaults(provider_name: []const u8, fallback_model: []const u8) ProviderDefaults {
+    if (isProviderName(provider_name, "openai")) return .{
+        .name = "openai",
+        .url = "https://api.openai.com/v1/chat/completions",
+        .model = "gpt-4o",
+        .api_key_env = "OPENAI_API_KEY",
+        .capabilities = .{ .supports_vision = true, .supports_json_mode = true, .supports_streaming = true, .supports_tools = true, .max_context_length = 128000 },
+    };
+    if (isProviderName(provider_name, "anthropic")) return .{
+        .name = "anthropic",
+        .format = .anthropic_messages,
+        .url = "https://api.anthropic.com/v1/messages",
+        .model = "claude-sonnet-4-20250514",
+        .api_key_env = "ANTHROPIC_API_KEY",
+        .capabilities = .{ .supports_vision = true, .supports_json_mode = true, .supports_streaming = true, .supports_tools = true, .max_context_length = 200000 },
+    };
+    if (isProviderName(provider_name, "google") or isProviderName(provider_name, "gemini")) return .{
+        .name = "google",
+        .format = .google_gemini,
+        .url = "https://generativelanguage.googleapis.com/v1beta",
+        .model = "gemini-2.0-flash",
+        .api_key_env = "GOOGLE_API_KEY",
+        .capabilities = .{ .supports_vision = true, .supports_json_mode = true, .supports_streaming = true, .supports_tools = true, .max_context_length = 1000000 },
+    };
+    if (isProviderName(provider_name, "openrouter")) return .{
+        .name = "openrouter",
+        .url = "https://openrouter.ai/api/v1/chat/completions",
+        .model = fallback_model,
+        .api_key_env = "OPENROUTER_API_KEY",
+        .capabilities = .{ .supports_vision = true, .supports_json_mode = true, .supports_streaming = true, .supports_tools = true },
+    };
+    if (isProviderName(provider_name, "azure") or isProviderName(provider_name, "azure-openai")) return .{
+        .name = "azure",
+        .url = null,
+        .model = fallback_model,
+        .api_key_env = "AZURE_OPENAI_API_KEY",
+        .capabilities = .{ .supports_vision = true, .supports_json_mode = true, .supports_streaming = true, .supports_tools = true },
+    };
+    if (isProviderName(provider_name, "groq")) return .{
+        .name = "groq",
+        .url = "https://api.groq.com/openai/v1/chat/completions",
+        .model = "llama-3.3-70b-versatile",
+        .api_key_env = "GROQ_API_KEY",
+        .capabilities = .{ .supports_json_mode = true, .supports_streaming = true, .supports_tools = true },
+    };
+    if (isProviderName(provider_name, "ollama")) return .{
+        .name = "ollama",
+        .url = "http://localhost:11434/v1/chat/completions",
+        .model = "llama3.3",
+        .api_key_env = null,
+        .capabilities = .{ .supports_streaming = true },
+    };
+    if (isProviderName(provider_name, "together")) return .{
+        .name = "together",
+        .url = "https://api.together.xyz/v1/chat/completions",
+        .model = "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        .api_key_env = "TOGETHER_API_KEY",
+        .capabilities = .{ .supports_json_mode = true, .supports_streaming = true },
+    };
+    if (isProviderName(provider_name, "mistral")) return .{
+        .name = "mistral",
+        .url = "https://api.mistral.ai/v1/chat/completions",
+        .model = "mistral-large-latest",
+        .api_key_env = "MISTRAL_API_KEY",
+        .capabilities = .{ .supports_json_mode = true, .supports_streaming = true, .supports_tools = true },
+    };
+    if (isProviderName(provider_name, "deepseek")) return .{
+        .name = "deepseek",
+        .url = "https://api.deepseek.com/chat/completions",
+        .model = "deepseek-chat",
+        .api_key_env = "DEEPSEEK_API_KEY",
+        .capabilities = .{ .supports_json_mode = true, .supports_streaming = true },
+    };
+    if (isProviderName(provider_name, "kimi") or isProviderName(provider_name, "moonshot")) return .{
+        .name = "kimi",
+        .url = "https://api.moonshot.ai/v1/chat/completions",
+        .model = "kimi-latest",
+        .api_key_env = "MOONSHOT_API_KEY",
+        .capabilities = .{ .supports_json_mode = true, .supports_streaming = true },
+    };
+    if (isProviderName(provider_name, "cohere")) return .{
+        .name = "cohere",
+        .format = .cohere_chat,
+        .url = "https://api.cohere.com/v2/chat",
+        .model = "command-a-03-2025",
+        .api_key_env = "COHERE_API_KEY",
+        .capabilities = .{ .supports_json_mode = true, .supports_streaming = true, .supports_tools = true },
+    };
+    return .{
+        .name = provider_name,
+        .url = null,
+        .model = fallback_model,
+        .api_key_env = "QUIPU_MODEL_API_KEY",
+        .capabilities = .{ .supports_json_mode = true, .supports_streaming = true },
+    };
+}
+
+fn detectProviderFromEnv(environ_map: *std.process.Environ.Map) ?[]const u8 {
+    if (environ_map.get("OPENAI_API_KEY") != null) return "openai";
+    if (environ_map.get("ANTHROPIC_API_KEY") != null) return "anthropic";
+    if (environ_map.get("GOOGLE_API_KEY") != null or environ_map.get("GEMINI_API_KEY") != null) return "google";
+    if (environ_map.get("OPENROUTER_API_KEY") != null) return "openrouter";
+    if (environ_map.get("AZURE_OPENAI_API_KEY") != null) return "azure";
+    if (environ_map.get("GROQ_API_KEY") != null) return "groq";
+    if (environ_map.get("MISTRAL_API_KEY") != null) return "mistral";
+    if (environ_map.get("DEEPSEEK_API_KEY") != null) return "deepseek";
+    if (environ_map.get("MOONSHOT_API_KEY") != null) return "kimi";
+    if (environ_map.get("COHERE_API_KEY") != null) return "cohere";
+    return null;
+}
+
+fn providerSpecificUrlEnv(environ_map: *std.process.Environ.Map, provider_name: []const u8) ?[]const u8 {
+    if (isProviderName(provider_name, "openai")) return environ_map.get("OPENAI_CHAT_URL") orelse environ_map.get("OPENAI_BASE_URL");
+    if (isProviderName(provider_name, "anthropic")) return environ_map.get("ANTHROPIC_MESSAGES_URL") orelse environ_map.get("ANTHROPIC_BASE_URL");
+    if (isProviderName(provider_name, "google") or isProviderName(provider_name, "gemini")) return environ_map.get("GOOGLE_GENERATE_CONTENT_URL") orelse environ_map.get("GOOGLE_BASE_URL") orelse environ_map.get("GEMINI_BASE_URL");
+    if (isProviderName(provider_name, "openrouter")) return environ_map.get("OPENROUTER_CHAT_URL") orelse environ_map.get("OPENROUTER_BASE_URL");
+    if (isProviderName(provider_name, "azure") or isProviderName(provider_name, "azure-openai")) return environ_map.get("AZURE_OPENAI_CHAT_URL") orelse environ_map.get("AZURE_OPENAI_ENDPOINT");
+    if (isProviderName(provider_name, "groq")) return environ_map.get("GROQ_CHAT_URL") orelse environ_map.get("GROQ_BASE_URL");
+    if (isProviderName(provider_name, "ollama")) return environ_map.get("OLLAMA_CHAT_URL") orelse environ_map.get("OLLAMA_BASE_URL");
+    if (isProviderName(provider_name, "together")) return environ_map.get("TOGETHER_CHAT_URL") orelse environ_map.get("TOGETHER_BASE_URL");
+    if (isProviderName(provider_name, "mistral")) return environ_map.get("MISTRAL_CHAT_URL") orelse environ_map.get("MISTRAL_BASE_URL");
+    if (isProviderName(provider_name, "deepseek")) return environ_map.get("DEEPSEEK_CHAT_URL") orelse environ_map.get("DEEPSEEK_BASE_URL");
+    if (isProviderName(provider_name, "kimi") or isProviderName(provider_name, "moonshot")) return environ_map.get("MOONSHOT_CHAT_URL") orelse environ_map.get("MOONSHOT_BASE_URL");
+    if (isProviderName(provider_name, "cohere")) return environ_map.get("COHERE_CHAT_URL") orelse environ_map.get("COHERE_BASE_URL");
+    return environ_map.get("QUIPU_LLM_BASE_URL");
+}
+
+fn providerSpecificModelEnv(environ_map: *std.process.Environ.Map, provider_name: []const u8) ?[]const u8 {
+    if (isProviderName(provider_name, "openai")) return environ_map.get("OPENAI_ANSWER_MODEL") orelse environ_map.get("OPENAI_MODEL");
+    if (isProviderName(provider_name, "anthropic")) return environ_map.get("ANTHROPIC_ANSWER_MODEL") orelse environ_map.get("ANTHROPIC_MODEL");
+    if (isProviderName(provider_name, "google") or isProviderName(provider_name, "gemini")) return environ_map.get("GOOGLE_ANSWER_MODEL") orelse environ_map.get("GOOGLE_MODEL") orelse environ_map.get("GEMINI_MODEL");
+    if (isProviderName(provider_name, "openrouter")) return environ_map.get("OPENROUTER_ANSWER_MODEL") orelse environ_map.get("OPENROUTER_MODEL");
+    if (isProviderName(provider_name, "azure") or isProviderName(provider_name, "azure-openai")) return environ_map.get("AZURE_OPENAI_ANSWER_MODEL") orelse environ_map.get("AZURE_OPENAI_DEPLOYMENT");
+    if (isProviderName(provider_name, "groq")) return environ_map.get("GROQ_ANSWER_MODEL") orelse environ_map.get("GROQ_MODEL");
+    if (isProviderName(provider_name, "ollama")) return environ_map.get("OLLAMA_ANSWER_MODEL") orelse environ_map.get("OLLAMA_MODEL");
+    if (isProviderName(provider_name, "together")) return environ_map.get("TOGETHER_ANSWER_MODEL") orelse environ_map.get("TOGETHER_MODEL");
+    if (isProviderName(provider_name, "mistral")) return environ_map.get("MISTRAL_ANSWER_MODEL") orelse environ_map.get("MISTRAL_MODEL");
+    if (isProviderName(provider_name, "deepseek")) return environ_map.get("DEEPSEEK_ANSWER_MODEL") orelse environ_map.get("DEEPSEEK_MODEL");
+    if (isProviderName(provider_name, "kimi") or isProviderName(provider_name, "moonshot")) return environ_map.get("MOONSHOT_ANSWER_MODEL") orelse environ_map.get("MOONSHOT_MODEL");
+    if (isProviderName(provider_name, "cohere")) return environ_map.get("COHERE_ANSWER_MODEL") orelse environ_map.get("COHERE_MODEL");
+    return null;
+}
+
+fn ollamaAvailable(allocator: std.mem.Allocator, io: std.Io) bool {
+    var client = std.http.Client{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    var response_body: std.Io.Writer.Allocating = .init(allocator);
+    defer response_body.deinit();
+    const result = client.fetch(.{
+        .location = .{ .url = "http://localhost:11434/api/tags" },
+        .method = .GET,
+        .response_writer = &response_body.writer,
+        .headers = .{ .user_agent = .{ .override = "quipu/0.1.0" } },
+    }) catch return false;
+    return result.status.class() == .success;
 }
 
 fn parseEmbeddingProvider(provider: []const u8) !LatticeEmbeddingProviderKind {
@@ -425,6 +803,11 @@ fn envU16(environ_map: *std.process.Environ.Map, key: []const u8) ?u16 {
 fn envU32(environ_map: *std.process.Environ.Map, key: []const u8) ?u32 {
     const value = environ_map.get(key) orelse return null;
     return std.fmt.parseInt(u32, value, 10) catch null;
+}
+
+fn envF32(environ_map: *std.process.Environ.Map, key: []const u8) ?f32 {
+    const value = environ_map.get(key) orelse return null;
+    return std.fmt.parseFloat(f32, value) catch null;
 }
 
 fn envBool(environ_map: *std.process.Environ.Map, key: []const u8) bool {
@@ -513,6 +896,38 @@ fn runCommand(
             allocator,
             "{\"jsonrpc\":\"2.0\",\"id\":\"cli_health\",\"method\":\"system.health\",\"params\":{}}",
         );
+        defer allocator.free(response);
+        try stdout.print("{s}\n", .{response});
+        return;
+    }
+
+    if (args.len > command_index and (std.mem.eql(u8, args[command_index], "llm-check") or std.mem.eql(u8, args[command_index], "provider-check"))) {
+        const endpoint = if (runtime.options.answer_provider.kind == .none)
+            providers.ProviderEndpoint{ .kind = .deterministic, .name = "deterministic" }
+        else
+            runtime.options.answer_provider;
+        const probe = providers.generateAnswer(allocator, runtime.options.io, endpoint, "Reply with OK.", "") catch |err| {
+            const message = try providerErrorMessage(allocator, endpoint, err);
+            defer allocator.free(message);
+            const response = try stringifyAlloc(allocator, .{
+                .status = "error",
+                .provider = endpoint.name,
+                .model = endpoint.model,
+                .message = message,
+            });
+            defer allocator.free(response);
+            try stdout.print("{s}\n", .{response});
+            return;
+        };
+        defer allocator.free(probe);
+        const response = try stringifyAlloc(allocator, .{
+            .status = "ok",
+            .provider = endpoint.name,
+            .model = endpoint.model,
+            .url = endpoint.url,
+            .capabilities = endpoint.capabilities,
+            .sample = probe,
+        });
         defer allocator.free(response);
         try stdout.print("{s}\n", .{response});
         return;
@@ -883,6 +1298,24 @@ fn dispatchAndPrint(stdout: *std.Io.Writer, allocator: std.mem.Allocator, runtim
     const response = try runtime.dispatch(allocator, request);
     defer allocator.free(response);
     try stdout.print("{s}\n", .{response});
+}
+
+fn providerErrorMessage(allocator: std.mem.Allocator, endpoint: providers.ProviderEndpoint, err: anyerror) ![]u8 {
+    if (err == error.MissingProviderApiKey) {
+        return std.fmt.allocPrint(
+            allocator,
+            "provider '{s}' is missing an API key; set {s} or QUIPU_LLM_API_KEY",
+            .{ endpoint.name, providers.apiKeyEnvName(endpoint.name) orelse "QUIPU_LLM_API_KEY" },
+        );
+    }
+    if (err == error.InvalidProviderConfig) {
+        return std.fmt.allocPrint(
+            allocator,
+            "provider '{s}' is not fully configured; set --llm-provider, --llm-model, and --llm-base-url as needed",
+            .{endpoint.name},
+        );
+    }
+    return std.fmt.allocPrint(allocator, "provider '{s}' failed: {s}", .{ endpoint.name, @errorName(err) });
 }
 
 fn dispatchCoreConsolidate(
