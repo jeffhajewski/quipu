@@ -790,7 +790,9 @@ fn runCommand(
         var stdin_buffer: [4096]u8 = undefined;
         var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
         while (true) {
-            const line = stdin_file_reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+            var line_writer: std.Io.Writer.Allocating = .init(allocator);
+            defer line_writer.deinit();
+            _ = stdin_file_reader.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(1024 * 1024)) catch |err| switch (err) {
                 error.StreamTooLong => {
                     const response = try runtime.dispatch(
                         allocator,
@@ -803,7 +805,19 @@ fn runCommand(
                 },
                 else => |e| return e,
             };
-            const raw = line orelse break;
+            const saw_delimiter = blk: {
+                const next = stdin_file_reader.interface.peekByte() catch |err| switch (err) {
+                    error.EndOfStream => break :blk false,
+                    else => |e| return e,
+                };
+                if (next == '\n') {
+                    _ = try stdin_file_reader.interface.takeByte();
+                    break :blk true;
+                }
+                break :blk false;
+            };
+            const raw = line_writer.written();
+            if (raw.len == 0 and !saw_delimiter) break;
             const request = std.mem.trim(u8, raw, " \t\r");
             if (request.len == 0) continue;
             const response = try runtime.dispatch(allocator, request);
