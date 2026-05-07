@@ -568,7 +568,8 @@ pub const LatticeAdapter = struct {
         try self.setStringProperty(tx, @intCast(node_id), "toQid", edge.to_qid);
         try self.setStringProperty(tx, @intCast(node_id), "edgeType", edge.edge_type);
         try self.setStringProperty(tx, @intCast(node_id), "propertiesJson", edge.properties_json);
-        const index_text = try self.indexText(self.allocator, edge_marker, edge.qid, edge.edge_type, edge.properties_json);
+        const searchable_properties = if (edge.properties_json.len > 2048) edge.properties_json[0..2048] else edge.properties_json;
+        const index_text = try self.indexText(self.allocator, edge_marker, edge.qid, edge.edge_type, searchable_properties);
         defer self.allocator.free(index_text);
         try check(c.lattice_fts_index(tx, node_id, index_text.ptr, index_text.len));
     }
@@ -1075,6 +1076,7 @@ fn check(rc: c.lattice_error) !void {
         c.LATTICE_ERROR_CHECKSUM => error.ChecksumFailure,
         c.LATTICE_ERROR_OUT_OF_MEMORY => error.OutOfMemory,
         c.LATTICE_ERROR_UNSUPPORTED => error.Unsupported,
+        c.LATTICE_ERROR_VALUE_TOO_LARGE => error.ValueTooLarge,
         else => error.LatticeFailure,
     };
 }

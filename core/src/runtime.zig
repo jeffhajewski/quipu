@@ -18,6 +18,8 @@ const card_keywords_generic = [_][]const u8{"memory-card"};
 const card_tags_fact = [_][]const u8{ "fact", "project" };
 const card_tags_preference = [_][]const u8{ "preference", "user" };
 const card_tags_procedure = [_][]const u8{ "procedure", "project" };
+const property_text_max_bytes = 4096;
+const property_truncation_marker = "…";
 
 const Scope = struct {
     tenant_id: ?[]const u8 = null,
@@ -482,10 +484,12 @@ pub const Runtime = struct {
             const message_qid = try self.nextQid(allocator, "msg");
             try message_qids.append(allocator, message_qid);
 
+            const content_for_props = try clampPropertyText(allocator, content);
+            defer allocator.free(content_for_props);
             const message_props = try stringifyAlloc(allocator, .{
                 .kind = "message",
                 .role = role,
-                .content = content,
+                .content = content_for_props,
                 .createdAt = stringField(&message, "createdAt"),
                 .tenantId = scope.tenant_id,
                 .userId = scope.user_id,
@@ -1457,6 +1461,8 @@ pub const Runtime = struct {
         try self.supersedeCurrentSlot(allocator, scope, candidate.slot_key, created_at);
         const qid = try self.nextQid(allocator, extractor.qidPrefix(candidate.label));
         defer allocator.free(qid);
+        const quote_for_props = try clampPropertyText(allocator, quote);
+        defer allocator.free(quote_for_props);
         const props = try stringifyAlloc(allocator, .{
             .kind = labelType(label),
             .text = candidate.text,
@@ -1466,7 +1472,7 @@ pub const Runtime = struct {
             .validFrom = created_at,
             .validTo = @as(?[]const u8, null),
             .evidenceQid = message_qid,
-            .quote = quote,
+            .quote = quote_for_props,
             .tenantId = scope.tenant_id,
             .userId = scope.user_id,
             .agentId = scope.agent_id,
@@ -1497,6 +1503,8 @@ pub const Runtime = struct {
             for (related_card_qids) |qid| allocator.free(qid);
             allocator.free(related_card_qids);
         }
+        const quote_for_props = try clampPropertyText(allocator, quote);
+        defer allocator.free(quote_for_props);
         const props = try stringifyAlloc(allocator, .{
             .kind = "memory_card",
             .qtype = "memory_card",
@@ -1515,7 +1523,7 @@ pub const Runtime = struct {
             .validFrom = created_at,
             .validTo = @as(?[]const u8, null),
             .evidenceQid = message_qid,
-            .quote = quote,
+            .quote = quote_for_props,
             .tenantId = scope.tenant_id,
             .userId = scope.user_id,
             .agentId = scope.agent_id,
@@ -3468,6 +3476,27 @@ fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     errdefer writer.deinit();
     try std.json.Stringify.value(value, .{}, &writer.writer);
     return writer.toOwnedSlice();
+}
+
+fn clampPropertyText(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    if (value.len <= property_text_max_bytes) return allocator.dupe(u8, value);
+
+    const prefix_limit = property_text_max_bytes - property_truncation_marker.len;
+    const prefix_len = utf8PrefixLen(value, prefix_limit);
+    const clamped = try allocator.alloc(u8, prefix_len + property_truncation_marker.len);
+    @memcpy(clamped[0..prefix_len], value[0..prefix_len]);
+    @memcpy(clamped[prefix_len..], property_truncation_marker);
+    return clamped;
+}
+
+fn utf8PrefixLen(value: []const u8, max_bytes: usize) usize {
+    var index: usize = 0;
+    while (index < value.len and index < max_bytes) {
+        const codepoint_len = std.unicode.utf8ByteSequenceLength(value[index]) catch return index;
+        if (index + codepoint_len > max_bytes or index + codepoint_len > value.len) break;
+        index += codepoint_len;
+    }
+    return index;
 }
 
 fn errorResponse(allocator: std.mem.Allocator, id: ?[]const u8, code: []const u8, message: []const u8) ![]u8 {
