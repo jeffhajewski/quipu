@@ -6,7 +6,7 @@ repo_ref="${QUIPU_REF:-main}"
 prefix="${QUIPU_PREFIX:-$HOME/.quipu}"
 bin_dir="${QUIPU_BIN_DIR:-$prefix/bin}"
 with_lattice="${QUIPU_WITH_LATTICE:-1}"
-lattice_version="${QUIPU_LATTICE_VERSION:-0.6.0}"
+lattice_version="${QUIPU_LATTICE_VERSION:-0.8.4}"
 
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then

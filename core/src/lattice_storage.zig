@@ -88,16 +88,18 @@ pub const LatticeAdapter = struct {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
 
-        var opts = c.lattice_open_options{
+        var opts = c.lattice_open_options_v2{
+            .struct_size = @sizeOf(c.lattice_open_options_v2),
             .create = true,
             .read_only = false,
             .cache_size_mb = 100,
             .page_size = options.page_size,
             .enable_vector = true,
             .vector_dimensions = options.vector_dimensions,
+            .enable_wal = true,
         };
         var db: ?*c.lattice_database = null;
-        try check(c.lattice_open(path_z.ptr, &opts, &db));
+        try check(c.lattice_open_v2(path_z.ptr, &opts, &db));
 
         var self = LatticeAdapter{
             .allocator = allocator,
