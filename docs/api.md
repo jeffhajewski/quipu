@@ -19,9 +19,21 @@ The prompt is assembled from the structured context sections, so callers that ne
 
 `memory.answer` accepts the same retrieval fields, runs the same scoped context
 assembly, and returns `answer`, `provider`, optional `model`, `items`, `context`,
-warnings, and optional trace output. It uses a deterministic local fallback when
-no answer provider is configured, or an OpenRouter-compatible chat model when
-the process is started with `--answer-provider openrouter`.
+warnings, and optional trace output. When `options.includeDebug` or
+`options.logTrace` is true, answer responses also include `answerTrace` with the
+chosen synthesis strategy, answerability, support qids, candidate answers, raw
+provider text when present, normalized answer, and validation status.
+
+`options.abstainIfWeak` is supported on `memory.answer`. The default is
+backward-compatible (`false`). When set to `true`, unsupported or invalidly
+supported answers return exactly `[abstain]`.
+
+Answer providers are asked for strict JSON internally, but `answer` remains the
+public string result. The runtime validates provider support qids against the
+retrieved evidence packet and falls back to conservative heuristic synthesis
+when provider JSON is malformed. It uses a deterministic local fallback when no
+answer provider is configured, or an OpenRouter-compatible chat model when the
+process is started with `--answer-provider openrouter`.
 
 ## Search V0
 

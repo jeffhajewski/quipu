@@ -96,6 +96,22 @@ Run the LongMemEval smoke fixture:
 just benchmark-longmemeval-smoke
 ```
 
+Run the handwritten synthesis lab before full LongMemEval reruns:
+
+```bash
+just benchmark-synthesis-lab-retrieval
+just benchmark-synthesis-lab-answer
+```
+
+Analyze failed answer runs:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.analyze_answer_failures \
+  artifacts/benchmarks/synthesis-lab-answer \
+  --suite evals/suites/external/longmemeval_synthesis_lab.yaml \
+  --markdown-output artifacts/benchmarks/synthesis-lab-answer/failures.md
+```
+
 Or download the official cleaned LongMemEval oracle split from Hugging Face:
 
 ```bash

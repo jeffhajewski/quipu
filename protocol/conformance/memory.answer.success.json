@@ -61,7 +61,26 @@
       "tokenEstimate": 12,
       "confidence": 0.72,
       "warnings": [],
-      "trace": null
+      "trace": null,
+      "answerTrace": {
+        "strategy": "span_extract",
+        "answerable": true,
+        "supportQids": ["q_proc_1"],
+        "candidateAnswers": [
+          {
+            "text": "Run just test before committing.",
+            "supportQids": ["q_proc_1"],
+            "confidence": 0.78,
+            "source": "heuristic"
+          }
+        ],
+        "rawProviderAnswer": null,
+        "normalizedAnswer": "Run just test before committing.",
+        "validation": {
+          "status": "accepted",
+          "warnings": []
+        }
+      }
     }
   }
 }

@@ -147,6 +147,60 @@
         }
       }
     },
+    "answerTrace": {
+      "type": "object",
+      "required": [
+        "strategy",
+        "answerable",
+        "supportQids",
+        "candidateAnswers",
+        "normalizedAnswer",
+        "validation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["span_extract", "preference", "knowledge_update", "temporal", "multi_session", "abstain"]
+        },
+        "answerable": { "type": "boolean" },
+        "supportQids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/qid" }
+        },
+        "candidateAnswers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["text", "supportQids", "confidence", "source"],
+            "additionalProperties": false,
+            "properties": {
+              "text": { "type": "string" },
+              "supportQids": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/qid" }
+              },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+              "source": { "type": "string", "enum": ["heuristic", "provider"] }
+            }
+          }
+        },
+        "rawProviderAnswer": { "type": ["string", "null"] },
+        "normalizedAnswer": { "type": "string" },
+        "validation": {
+          "type": "object",
+          "required": ["status", "warnings"],
+          "additionalProperties": false,
+          "properties": {
+            "status": { "type": "string", "enum": ["accepted", "fallback", "abstained", "parse_error", "invalid_support"] },
+            "warnings": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
     "systemHealthParams": {
       "type": "object",
       "additionalProperties": false,
@@ -429,6 +483,12 @@
         "trace": {
           "anyOf": [
             { "$ref": "#/$defs/retrievalTrace" },
+            { "type": "null" }
+          ]
+        },
+        "answerTrace": {
+          "anyOf": [
+            { "$ref": "#/$defs/answerTrace" },
             { "type": "null" }
           ]
         }

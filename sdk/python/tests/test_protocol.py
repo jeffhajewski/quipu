@@ -67,6 +67,9 @@ class ProtocolFixtureTests(unittest.TestCase):
             "memoryCoreUpdateResult",
         }
         self.assertTrue(expected_defs.issubset(defs))
+        self.assertIn("answerTrace", defs)
+        self.assertIn("answerTrace", defs["memoryAnswerResult"]["properties"])
+        self.assertIn("abstainIfWeak", defs["memoryAnswerParams"]["properties"]["options"]["properties"])
 
     def test_fixtures_cover_public_methods(self):
         success_methods = {
@@ -83,6 +86,14 @@ class ProtocolFixtureTests(unittest.TestCase):
                 if "result" in fixture["response"]:
                     validate_json_rpc_request(fixture["request"])
                     validate_rpc_params(fixture["request"]["method"], fixture["request"]["params"])
+
+    def test_memory_answer_fixture_includes_optional_answer_trace(self):
+        fixture = json.loads((FIXTURE_DIR / "memory.answer.success.json").read_text())
+        result = fixture["response"]["result"]
+
+        self.assertIn("answerTrace", result)
+        self.assertEqual(result["answerTrace"]["strategy"], "span_extract")
+        self.assertEqual(result["answerTrace"]["validation"]["status"], "accepted")
 
     def test_error_fixture_rejects_bad_request(self):
         fixture = json.loads((FIXTURE_DIR / "memory.retrieve.invalid_request.json").read_text())

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,27 @@ const root = path.resolve(__dirname, "../../..");
 const fixtureDir = path.join(root, "protocol", "conformance");
 const coreDir = path.join(root, "core");
 const coreBinary = path.join(coreDir, "zig-out", "bin", "quipu");
+const zigEnv = {
+  ...process.env,
+  ZIG_GLOBAL_CACHE_DIR: "/tmp/quipu-zig-cache",
+  ZIG_LOCAL_CACHE_DIR: "/tmp/quipu-zig-local-cache",
+};
+let coreBuildChecked = false;
+
+function ensureCoreBuilt() {
+  if (coreBuildChecked) return;
+  const build = spawnSync("zig", ["build"], {
+    cwd: coreDir,
+    env: zigEnv,
+    encoding: "utf8",
+  });
+  if (build.status !== 0 && !existsSync(coreBinary)) {
+    process.stderr.write(build.stdout ?? "");
+    process.stderr.write(build.stderr ?? "");
+  }
+  assert.equal(build.status === 0 || existsSync(coreBinary), true);
+  coreBuildChecked = true;
+}
 
 function loadFixtures() {
   return readdirSync(fixtureDir)
@@ -44,6 +65,13 @@ test("success conformance fixtures validate", () => {
       validateRpcParams(fixture.request.method, fixture.request.params);
     }
   }
+});
+
+test("memory.answer fixture includes optional answerTrace", () => {
+  const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.answer.success.json"), "utf8"));
+  assert.equal(fixture.response.result.answerTrace.strategy, "span_extract");
+  assert.equal(fixture.response.result.answerTrace.validation.status, "accepted");
+  assert.equal(fixture.request.params.options.includeDebug, true);
 });
 
 test("invalid request fixture is rejected", () => {
@@ -79,12 +107,7 @@ test("client delegates valid requests to transport", async () => {
 const hasZig = spawnSync("zig", ["version"], { stdio: "ignore" }).status === 0;
 
 test("stdio client calls core process", { skip: !hasZig }, async () => {
-  const build = spawnSync("zig", ["build"], {
-    cwd: coreDir,
-    env: { ...process.env, ZIG_GLOBAL_CACHE_DIR: "/tmp/quipu-zig-cache" },
-    stdio: "inherit",
-  });
-  assert.equal(build.status, 0);
+  ensureCoreBuilt();
 
   const client = Quipu.stdio([coreBinary, "serve-stdio"]);
   try {
@@ -109,12 +132,7 @@ test("stdio client calls core process", { skip: !hasZig }, async () => {
 });
 
 test("local client auto-starts core stdio process", { skip: !hasZig }, async () => {
-  const build = spawnSync("zig", ["build"], {
-    cwd: coreDir,
-    env: { ...process.env, ZIG_GLOBAL_CACHE_DIR: "/tmp/quipu-zig-cache" },
-    stdio: "inherit",
-  });
-  assert.equal(build.status, 0);
+  ensureCoreBuilt();
 
   const client = await Quipu.local({ binary: coreBinary });
   try {

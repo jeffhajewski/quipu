@@ -1,4 +1,5 @@
 const std = @import("std");
+const answer_synthesis = @import("answer_synthesis.zig");
 const extractor = @import("extractor.zig");
 const jobs = @import("jobs.zig");
 const protocol = @import("protocol.zig");
@@ -801,6 +802,7 @@ pub const Runtime = struct {
         const options = objectField(params, "options");
         const include_evidence = if (options) |opts| boolField(&opts, "includeEvidence") orelse true else true;
         const include_trace = if (options) |opts| (boolField(&opts, "includeDebug") orelse false) or (boolField(&opts, "logTrace") orelse false) else false;
+        const abstain_if_weak = if (options) |opts| boolField(&opts, "abstainIfWeak") orelse false else false;
         const log_retrieval = if (options) |opts| boolField(&opts, "logRetrieval") orelse (boolField(&opts, "logTrace") orelse true) else true;
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
@@ -862,21 +864,34 @@ pub const Runtime = struct {
             providers.ProviderEndpoint{ .kind = .deterministic, .name = "deterministic_prompt" }
         else
             self.options.answer_provider;
-        const answer = providers.generateAnswer(allocator, self.options.io, endpoint, query, prompt) catch |err| {
-            const message = if (err == error.MissingProviderApiKey)
-                try std.fmt.allocPrint(
-                    allocator,
-                    "answer provider '{s}' is missing an API key; set {s} or QUIPU_LLM_API_KEY",
-                    .{ endpoint.name, providers.apiKeyEnvName(endpoint.name) orelse "QUIPU_LLM_API_KEY" },
-                )
-            else if (err == error.InvalidProviderConfig)
-                try std.fmt.allocPrint(allocator, "answer provider '{s}' is not fully configured; set --llm-provider, --llm-model, and --llm-base-url as needed", .{endpoint.name})
-            else
-                try std.fmt.allocPrint(allocator, "answer provider '{s}' failed: {s}", .{ endpoint.name, @errorName(err) });
-            defer allocator.free(message);
-            return errorResponse(allocator, id, "provider_error", message);
-        };
-        defer allocator.free(answer);
+        const evidence_packet = try buildAnswerEvidencePacket(allocator, results.items.items);
+        defer freeAnswerEvidencePacket(allocator, evidence_packet);
+        const raw_provider_answer = if (evidence_packet.len == 0 or answer_synthesis.hasStrongHeuristic(query, evidence_packet))
+            null
+        else
+            providers.generateAnswer(allocator, self.options.io, endpoint, query, prompt) catch |err| {
+                const message = if (err == error.MissingProviderApiKey)
+                    try std.fmt.allocPrint(
+                        allocator,
+                        "answer provider '{s}' is missing an API key; set {s} or QUIPU_LLM_API_KEY",
+                        .{ endpoint.name, providers.apiKeyEnvName(endpoint.name) orelse "QUIPU_LLM_API_KEY" },
+                    )
+                else if (err == error.InvalidProviderConfig)
+                    try std.fmt.allocPrint(allocator, "answer provider '{s}' is not fully configured; set --llm-provider, --llm-model, and --llm-base-url as needed", .{endpoint.name})
+                else
+                    try std.fmt.allocPrint(allocator, "answer provider '{s}' failed: {s}", .{ endpoint.name, @errorName(err) });
+                defer allocator.free(message);
+                return errorResponse(allocator, id, "provider_error", message);
+            };
+        defer if (raw_provider_answer) |value| allocator.free(value);
+        var synthesized = try answer_synthesis.synthesize(
+            allocator,
+            query,
+            evidence_packet,
+            raw_provider_answer,
+            abstain_if_weak,
+        );
+        defer synthesized.deinit();
 
         const item_qids = try allocator.alloc([]const u8, results.items.items.len);
         defer allocator.free(item_qids);
@@ -893,6 +908,8 @@ pub const Runtime = struct {
                 .tokenEstimate = token_estimate,
                 .provider = endpoint.name,
                 .model = endpoint.model,
+                .strategy = synthesized.trace.strategy,
+                .answerable = synthesized.trace.answerable,
             });
             defer allocator.free(event_payload);
             if (self.publishEvent(streams.retrieval_logged, event_payload)) |_| {} else |_| {
@@ -907,7 +924,7 @@ pub const Runtime = struct {
             .id = id,
             .result = .{
                 .retrievalId = retrieval_id,
-                .answer = answer,
+                .answer = synthesized.answer,
                 .provider = endpoint.name,
                 .model = endpoint.model,
                 .context = context.view(),
@@ -916,6 +933,7 @@ pub const Runtime = struct {
                 .confidence = if (results.items.items.len > 0) @as(f32, 0.72) else @as(f32, 0.0),
                 .warnings = warnings.items,
                 .trace = if (include_trace) trace else null,
+                .answerTrace = if (include_trace) synthesized.trace else null,
             },
         };
         return stringifyAlloc(allocator, response);
@@ -2321,6 +2339,39 @@ const OwnedItems = struct {
         freeEvidence(self.allocator, item.evidence);
     }
 };
+
+fn buildAnswerEvidencePacket(allocator: std.mem.Allocator, items: []const MessageResult) ![]answer_synthesis.EvidenceItem {
+    const packet = try allocator.alloc(answer_synthesis.EvidenceItem, items.len);
+    errdefer allocator.free(packet);
+    var written: usize = 0;
+    errdefer {
+        for (packet[0..written]) |item| allocator.free(item.evidenceQids);
+    }
+    for (items, 0..) |item, index| {
+        const evidence_qids = try allocator.alloc([]const u8, item.evidence.len);
+        errdefer allocator.free(evidence_qids);
+        for (item.evidence, 0..) |evidence, evidence_index| {
+            evidence_qids[evidence_index] = evidence.qid;
+        }
+        packet[index] = .{
+            .qid = item.qid,
+            .type = item.type,
+            .text = item.text,
+            .score = item.score,
+            .state = item.state,
+            .validFrom = item.validFrom,
+            .validTo = item.validTo,
+            .evidenceQids = evidence_qids,
+        };
+        written += 1;
+    }
+    return packet;
+}
+
+fn freeAnswerEvidencePacket(allocator: std.mem.Allocator, packet: []answer_synthesis.EvidenceItem) void {
+    for (packet) |item| allocator.free(item.evidenceQids);
+    allocator.free(packet);
+}
 
 fn sortItemsByScore(owned: *OwnedItems) void {
     var index: usize = 1;

@@ -54,6 +54,12 @@ benchmark-longmemeval-full dataset:
 benchmark-longmemeval-download:
     PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark longmemeval --download-longmemeval --longmemeval-variant oracle --result-class publishable --include-baselines --include-ablations --include-lattice --require-lattice --core-retrieval-mode graph --core-answer-method answer --core-answer-provider openrouter --core-answer-model openai/gpt-4o --core-entity-provider deterministic --enable-entity-resolution --core-budget-tokens 32768 --reuse-existing --allow-failures --markdown artifacts/benchmarks/longmemeval-full/report.md
 
+benchmark-synthesis-lab-retrieval:
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks evals/suites/external/longmemeval_synthesis_lab.yaml --result-class external_smoke --include-lattice --require-lattice --core-retrieval-mode graph --core-entity-provider deterministic --enable-entity-resolution --core-budget-tokens 32768 --core-page-size 32768 --reuse-existing --allow-failures --output-dir artifacts/benchmarks/synthesis-lab-retrieval --report artifacts/benchmarks/synthesis-lab-retrieval/report.json --markdown artifacts/benchmarks/synthesis-lab-retrieval/report.md
+
+benchmark-synthesis-lab-answer:
+    PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks evals/suites/external/longmemeval_synthesis_lab.yaml --result-class external_smoke --include-lattice --require-lattice --core-retrieval-mode graph --core-answer-method answer --core-answer-provider openrouter --core-answer-model openai/gpt-4o --core-answer-abstain-if-weak --core-entity-provider deterministic --enable-entity-resolution --core-budget-tokens 32768 --core-page-size 32768 --reuse-existing --allow-failures --output-dir artifacts/benchmarks/synthesis-lab-answer --report artifacts/benchmarks/synthesis-lab-answer/report.json --markdown artifacts/benchmarks/synthesis-lab-answer/report.md
+
 benchmark-external-all: benchmark-locomo-smoke benchmark-locomo-graph-smoke benchmark-longmemeval-smoke
 
 ci:

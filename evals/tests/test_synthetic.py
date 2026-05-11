@@ -24,12 +24,14 @@ from quipu_evals.longmemeval import load_longmemeval_suite  # noqa: E402
 from quipu_evals.provider_clients import CachedEmbeddingProvider, LlmClient, LlmJudgeResult  # noqa: E402
 from quipu_evals.readiness import evaluate_readiness  # noqa: E402
 from quipu_evals.baselines import DETERMINISTIC_ABLATIONS, DETERMINISTIC_REQUIRED_BASELINES  # noqa: E402
+from quipu_evals.analyze_answer_failures import analyze as analyze_answer_failures, render_markdown as render_failure_markdown  # noqa: E402
 from quipu_evals import load_suite, run_suite  # noqa: E402
 
 
 SUITE_PATH = ROOT / "evals" / "suites" / "quipu_synthetic.yaml"
 LOCOMO_MINI_PATH = ROOT / "evals" / "suites" / "external" / "locomo_mini.yaml"
 LONGMEMEVAL_MINI_PATH = ROOT / "evals" / "suites" / "external" / "longmemeval_mini.yaml"
+LONGMEMEVAL_SYNTHESIS_LAB_PATH = ROOT / "evals" / "suites" / "external" / "longmemeval_synthesis_lab.yaml"
 CORE_DIR = ROOT / "core"
 CORE_BINARY = CORE_DIR / "zig-out" / "bin" / "quipu"
 LATTICE_INCLUDE = os.environ.get("LATTICE_INCLUDE")
@@ -348,6 +350,109 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertGreater(len(report["publishedComparisons"]), 0)
         self.assertIn("External Smoke Benchmark Results", markdown)
         self.assertIn("LongMemEval", markdown)
+
+    def test_loads_longmemeval_synthesis_lab(self):
+        suite = load_suite(LONGMEMEVAL_SYNTHESIS_LAB_PATH)
+        queries = [query for scenario in suite.scenarios for query in scenario.queries]
+        category_counts = {}
+        for query in queries:
+            category_counts[query.category] = category_counts.get(query.category, 0) + 1
+
+        self.assertEqual(len(suite.scenarios), 8)
+        self.assertEqual(len(queries), 48)
+        self.assertEqual(
+            category_counts,
+            {
+                "abstention": 8,
+                "single-session-preference": 8,
+                "temporal-reasoning": 10,
+                "multi-session": 10,
+                "knowledge-update": 6,
+                "single-session-user": 3,
+                "single-session-assistant": 3,
+            },
+        )
+        self.assertTrue(all(query.expected_evidence_event_ids for query in queries))
+        self.assertTrue(all(len(query.expected_answer) <= 64 for query in queries))
+
+    def test_answer_failure_analyzer_buckets_fake_result(self):
+        with tempfile.TemporaryDirectory(prefix="quipu-answer-analysis-") as directory:
+            result_path = Path(directory) / "core_lattice-results.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "suiteName": "fake",
+                        "suiteVersion": "0",
+                        "baseline": "core_lattice",
+                        "passed": False,
+                        "queries": [
+                            {
+                                "scenarioId": "lab",
+                                "queryId": "trip_q_current_hotel",
+                                "category": "knowledge-update",
+                                "passed": False,
+                                "actualAnswer": "Harbor Inn",
+                                "evidenceEventIds": ["trip_hotel_old"],
+                                "topItemTexts": ["For the Denver conference trip, the hotel is Harbor Inn."],
+                                "grades": [
+                                    {
+                                        "name": "exact_answer",
+                                        "passed": False,
+                                        "details": {"actual": "Harbor Inn", "expected": "Lakeside Suites"},
+                                    },
+                                    {
+                                        "name": "evidence_ids",
+                                        "passed": False,
+                                        "details": {
+                                            "actual": ["trip_hotel_old"],
+                                            "expected": ["trip_hotel_new"],
+                                            "missing": ["trip_hotel_new"],
+                                        },
+                                    },
+                                ],
+                                "trace": {"candidateCount": 2, "keptCount": 1},
+                            },
+                            {
+                                "scenarioId": "lab",
+                                "queryId": "abst_q_car_rental",
+                                "category": "abstention",
+                                "passed": False,
+                                "actualAnswer": "Avis",
+                                "evidenceEventIds": ["abst_flight"],
+                                "topItemTexts": ["I booked a flight to Austin."],
+                                "grades": [
+                                    {
+                                        "name": "exact_answer",
+                                        "passed": False,
+                                        "details": {"actual": "Avis", "expected": "[abstain]"},
+                                    },
+                                    {
+                                        "name": "evidence_ids",
+                                        "passed": True,
+                                        "details": {"actual": ["abst_flight"], "expected": ["abst_flight"], "missing": []},
+                                    },
+                                ],
+                                "answerTrace": {
+                                    "strategy": "span_extract",
+                                    "answerable": True,
+                                    "supportQids": ["q_msg_1"],
+                                    "candidateAnswers": [],
+                                    "validation": {"status": "accepted", "warnings": []},
+                                },
+                            },
+                        ],
+                    }
+                )
+            )
+
+            report = analyze_answer_failures(result_path, suite_path=LONGMEMEVAL_SYNTHESIS_LAB_PATH)
+            markdown = render_failure_markdown(report)
+
+        self.assertEqual(report["failureCount"], 2)
+        self.assertEqual(report["buckets"]["retrieval_miss"], 1)
+        self.assertEqual(report["buckets"]["abstention_miss"], 1)
+        self.assertIn("Answer Failure Report", markdown)
+        self.assertIn("trip_q_current_hotel", markdown)
 
     def test_published_comparisons_include_memory_system_references(self):
         systems = {row["system"] for row in published_results("locomo")}

@@ -1,0 +1,969 @@
+{
+  "name": "longmemeval_synthesis_lab",
+  "version": "0.1.0",
+  "metadata": {
+    "format": "quipu.external.scenario.v1",
+    "benchmark": "longmemeval",
+    "datasetName": "LongMemEval synthesis lab",
+    "datasetVersion": "lab-0.1.0",
+    "source": "handwritten LongMemEval-flavored synthesis regression suite",
+    "license": "MIT",
+    "downloadRequired": false,
+    "tasks": [
+      "abstention",
+      "single-session-preference",
+      "temporal-reasoning",
+      "multi-session",
+      "knowledge-update",
+      "single-session-user",
+      "single-session-assistant"
+    ]
+  },
+  "suites": ["longmemeval", "synthesis_lab"],
+  "scenarios": [
+    {
+      "scenarioId": "lab_trip_updates",
+      "metadata": {"description": "Trip facts with stale and current values"},
+      "actors": [
+        {"id": "user", "type": "user", "name": "User"},
+        {"id": "assistant", "type": "agent", "name": "Assistant"}
+      ],
+      "events": [
+        {
+          "eventId": "trip_hotel_old",
+          "time": "2026-01-05T09:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "For the Denver conference trip, the hotel is Harbor Inn."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:trip"},
+          "groundTruthMemories": ["trip.hotel.old"]
+        },
+        {
+          "eventId": "trip_flight",
+          "time": "2026-01-08T09:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "For the Denver conference trip, my flight leaves at 8:10 AM."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:trip"},
+          "groundTruthMemories": ["trip.flight"]
+        },
+        {
+          "eventId": "trip_hotel_new",
+          "time": "2026-02-01T09:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "Update the Denver conference trip hotel to Lakeside Suites instead of Harbor Inn."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:trip"},
+          "groundTruthMemories": ["trip.hotel.current"]
+        },
+        {
+          "eventId": "trip_dinner",
+          "time": "2026-02-03T09:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "For the Denver trip, the team dinner is at 7 PM."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:trip"},
+          "groundTruthMemories": ["trip.dinner"]
+        }
+      ],
+      "queries": [
+        {
+          "queryId": "trip_q_current_hotel",
+          "time": "2026-02-10T10:00:00Z",
+          "query": "What is my current Denver conference trip hotel?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:trip"},
+          "expectedAnswer": "Lakeside Suites",
+          "expectedEvidenceEventIds": ["trip_hotel_new"],
+          "mustNotUseEventIds": ["trip_hotel_old"],
+          "category": "knowledge-update",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "trip_q_jan20_hotel",
+          "time": "2026-01-20T10:00:00Z",
+          "query": "What was my Denver conference trip hotel on January 20?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:trip"},
+          "expectedAnswer": "Harbor Inn",
+          "expectedEvidenceEventIds": ["trip_hotel_old"],
+          "mustNotUseEventIds": ["trip_hotel_new"],
+          "category": "temporal-reasoning",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "trip_q_after_update",
+          "time": "2026-02-02T10:00:00Z",
+          "query": "After the February update, which Denver hotel should I use?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:trip"},
+          "expectedAnswer": "Lakeside Suites",
+          "expectedEvidenceEventIds": ["trip_hotel_new"],
+          "mustNotUseEventIds": ["trip_hotel_old"],
+          "category": "knowledge-update",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "trip_q_flight_time",
+          "time": "2026-02-10T10:00:00Z",
+          "query": "What flight time was recorded for the Denver trip?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:trip"},
+          "expectedAnswer": "8:10 AM",
+          "expectedEvidenceEventIds": ["trip_flight"],
+          "mustNotUseEventIds": [],
+          "category": "temporal-reasoning",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "trip_q_rental_car",
+          "time": "2026-02-10T10:00:00Z",
+          "query": "What is the Denver trip rental car company?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:trip"},
+          "expectedAnswer": "[abstain]",
+          "expectedEvidenceEventIds": ["trip_flight"],
+          "mustNotUseEventIds": [],
+          "category": "abstention",
+          "shouldAbstain": true
+        },
+        {
+          "queryId": "trip_q_added_details",
+          "time": "2026-02-10T10:00:00Z",
+          "query": "Which two Denver trip details changed or were added across sessions?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:trip"},
+          "expectedAnswer": "hotel and dinner",
+          "expectedEvidenceEventIds": ["trip_hotel_new", "trip_dinner"],
+          "mustNotUseEventIds": [],
+          "category": "multi-session",
+          "shouldAbstain": false
+        }
+      ],
+      "forgetOps": []
+    },
+    {
+      "scenarioId": "lab_preference_changes",
+      "metadata": {"description": "Preference changes and scoped exceptions"},
+      "actors": [
+        {"id": "user", "type": "user", "name": "User"},
+        {"id": "assistant", "type": "agent", "name": "Assistant"}
+      ],
+      "events": [
+        {
+          "eventId": "pref_email_brief",
+          "time": "2026-01-04T12:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "I prefer brief email drafts."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "userId": "lab:user-pref"},
+          "groundTruthMemories": ["pref.email.brief"]
+        },
+        {
+          "eventId": "pref_email_detailed",
+          "time": "2026-02-04T12:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "I prefer detailed email drafts now."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "userId": "lab:user-pref"},
+          "groundTruthMemories": ["pref.email.detailed"]
+        },
+        {
+          "eventId": "pref_code_concise",
+          "time": "2026-02-10T12:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "For code reviews, keep comments concise."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "userId": "lab:user-pref"},
+          "groundTruthMemories": ["pref.code.concise"]
+        },
+        {
+          "eventId": "pref_security_exception",
+          "time": "2026-03-01T12:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "Exception: for security reviews, I prefer detailed comments."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "userId": "lab:user-pref"},
+          "groundTruthMemories": ["pref.security.detailed"]
+        },
+        {
+          "eventId": "pref_workspace_theme",
+          "time": "2026-03-03T12:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "My current workspace theme is solarized dark."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "userId": "lab:user-pref"},
+          "groundTruthMemories": ["workspace.theme"]
+        }
+      ],
+      "queries": [
+        {
+          "queryId": "pref_q_email_current",
+          "time": "2026-03-10T12:00:00Z",
+          "query": "What email draft style do I currently prefer?",
+          "scope": {"tenantId": "benchmark:longmemeval", "userId": "lab:user-pref"},
+          "expectedAnswer": "detailed",
+          "expectedEvidenceEventIds": ["pref_email_detailed"],
+          "mustNotUseEventIds": ["pref_email_brief"],
+          "category": "single-session-preference",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "pref_q_email_before_change",
+          "time": "2026-01-20T12:00:00Z",
+          "query": "Before February, what email draft style did I prefer?",
+          "scope": {"tenantId": "benchmark:longmemeval", "userId": "lab:user-pref"},
+          "expectedAnswer": "brief",
+          "expectedEvidenceEventIds": ["pref_email_brief"],
+          "mustNotUseEventIds": ["pref_email_detailed"],
+          "category": "single-session-preference",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "pref_q_code_reviews",
+          "time": "2026-03-10T12:00:00Z",
+          "query": "How should code review comments be styled?",
+          "scope": {"tenantId": "benchmark:longmemeval", "userId": "lab:user-pref"},
+          "expectedAnswer": "concise",
+          "expectedEvidenceEventIds": ["pref_code_concise"],
+          "mustNotUseEventIds": ["pref_security_exception"],
+          "category": "single-session-preference",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "pref_q_security_reviews",
+          "time": "2026-03-10T12:00:00Z",
+          "query": "How should security review comments be styled?",
+          "scope": {"tenantId": "benchmark:longmemeval", "userId": "lab:user-pref"},
+          "expectedAnswer": "detailed",
+          "expectedEvidenceEventIds": ["pref_security_exception"],
+          "mustNotUseEventIds": ["pref_code_concise"],
+          "category": "single-session-preference",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "pref_q_theme",
+          "time": "2026-03-10T12:00:00Z",
+          "query": "What is my current workspace theme?",
+          "scope": {"tenantId": "benchmark:longmemeval", "userId": "lab:user-pref"},
+          "expectedAnswer": "solarized dark",
+          "expectedEvidenceEventIds": ["pref_workspace_theme"],
+          "mustNotUseEventIds": [],
+          "category": "knowledge-update",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "pref_q_legal_summary",
+          "time": "2026-03-10T12:00:00Z",
+          "query": "Do I prefer one-page legal summaries?",
+          "scope": {"tenantId": "benchmark:longmemeval", "userId": "lab:user-pref"},
+          "expectedAnswer": "[abstain]",
+          "expectedEvidenceEventIds": ["pref_email_brief"],
+          "mustNotUseEventIds": [],
+          "category": "abstention",
+          "shouldAbstain": true
+        }
+      ],
+      "forgetOps": []
+    },
+    {
+      "scenarioId": "lab_temporal_intervals",
+      "metadata": {"description": "Intervals and before-after questions"},
+      "actors": [
+        {"id": "user", "type": "user", "name": "User"},
+        {"id": "assistant", "type": "agent", "name": "Assistant"}
+      ],
+      "events": [
+        {
+          "eventId": "temp_gym_jan",
+          "time": "2026-01-01T08:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "My gym membership is active from January 1 through March 31."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:temporal"},
+          "groundTruthMemories": ["gym.active.interval"]
+        },
+        {
+          "eventId": "temp_gym_apr",
+          "time": "2026-04-01T08:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "Starting April 1, my gym membership moved to FlexFit."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:temporal"},
+          "groundTruthMemories": ["gym.flexfit"]
+        },
+        {
+          "eventId": "temp_parking_feb",
+          "time": "2026-02-01T08:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "The office parking pass is valid from February 1 through February 28."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:temporal"},
+          "groundTruthMemories": ["parking.valid"]
+        },
+        {
+          "eventId": "temp_parking_mar",
+          "time": "2026-03-01T08:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "On March 1, the office parking pass expired."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:temporal"},
+          "groundTruthMemories": ["parking.expired"]
+        },
+        {
+          "eventId": "temp_badge",
+          "time": "2026-02-05T08:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "My visitor badge appointment is on February 12."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:temporal"},
+          "groundTruthMemories": ["badge.appointment"]
+        }
+      ],
+      "queries": [
+        {
+          "queryId": "temp_q_gym_feb",
+          "time": "2026-02-15T10:00:00Z",
+          "query": "What was the gym membership status on February 15?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:temporal"},
+          "expectedAnswer": "active",
+          "expectedEvidenceEventIds": ["temp_gym_jan"],
+          "mustNotUseEventIds": ["temp_gym_apr"],
+          "category": "temporal-reasoning",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "temp_q_gym_apr",
+          "time": "2026-04-10T10:00:00Z",
+          "query": "After April 1, where did my gym membership move?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:temporal"},
+          "expectedAnswer": "FlexFit",
+          "expectedEvidenceEventIds": ["temp_gym_apr"],
+          "mustNotUseEventIds": ["temp_gym_jan"],
+          "category": "temporal-reasoning",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "temp_q_parking_feb",
+          "time": "2026-02-20T10:00:00Z",
+          "query": "Was the office parking pass valid on February 20?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:temporal"},
+          "expectedAnswer": "valid",
+          "expectedEvidenceEventIds": ["temp_parking_feb"],
+          "mustNotUseEventIds": ["temp_parking_mar"],
+          "category": "temporal-reasoning",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "temp_q_parking_mar",
+          "time": "2026-03-10T10:00:00Z",
+          "query": "What happened to the office parking pass after March 1?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:temporal"},
+          "expectedAnswer": "expired",
+          "expectedEvidenceEventIds": ["temp_parking_mar"],
+          "mustNotUseEventIds": ["temp_parking_feb"],
+          "category": "temporal-reasoning",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "temp_q_time_bound_count",
+          "time": "2026-04-10T10:00:00Z",
+          "query": "How many time-bound items did I mention?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:temporal"},
+          "expectedAnswer": "3",
+          "expectedEvidenceEventIds": ["temp_gym_jan", "temp_parking_feb", "temp_badge"],
+          "mustNotUseEventIds": [],
+          "category": "multi-session",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "temp_q_cafeteria",
+          "time": "2026-04-10T10:00:00Z",
+          "query": "What is the company cafeteria reservation date?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:temporal"},
+          "expectedAnswer": "[abstain]",
+          "expectedEvidenceEventIds": ["temp_badge"],
+          "mustNotUseEventIds": [],
+          "category": "abstention",
+          "shouldAbstain": true
+        }
+      ],
+      "forgetOps": []
+    },
+    {
+      "scenarioId": "lab_counts_totals",
+      "metadata": {"description": "Counts, totals, and multi-session aggregation"},
+      "actors": [
+        {"id": "user", "type": "user", "name": "User"},
+        {"id": "assistant", "type": "agent", "name": "Assistant"}
+      ],
+      "events": [
+        {
+          "eventId": "count_tickets_1",
+          "time": "2026-02-01T15:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "I bought 2 train tickets for the retreat."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:counts"},
+          "groundTruthMemories": ["tickets.first"]
+        },
+        {
+          "eventId": "count_tickets_2",
+          "time": "2026-02-04T15:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "I bought 3 more train tickets for the retreat."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:counts"},
+          "groundTruthMemories": ["tickets.second"]
+        },
+        {
+          "eventId": "count_lunch",
+          "time": "2026-02-06T15:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "Retreat lunch cost $42."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:counts"},
+          "groundTruthMemories": ["expense.lunch"]
+        },
+        {
+          "eventId": "count_snacks",
+          "time": "2026-02-07T15:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "Retreat snacks cost $18."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:counts"},
+          "groundTruthMemories": ["expense.snacks"]
+        },
+        {
+          "eventId": "count_call_date",
+          "time": "2026-02-08T15:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "The retreat planning call was on March 5."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:counts"},
+          "groundTruthMemories": ["call.date"]
+        }
+      ],
+      "queries": [
+        {
+          "queryId": "count_q_total_tickets",
+          "time": "2026-02-10T10:00:00Z",
+          "query": "How many train tickets did I buy for the retreat in total?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:counts"},
+          "expectedAnswer": "5",
+          "expectedEvidenceEventIds": ["count_tickets_1", "count_tickets_2"],
+          "mustNotUseEventIds": [],
+          "category": "multi-session",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "count_q_ticket_sessions",
+          "time": "2026-02-10T10:00:00Z",
+          "query": "How many purchase sessions mention train tickets?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:counts"},
+          "expectedAnswer": "2",
+          "expectedEvidenceEventIds": ["count_tickets_1", "count_tickets_2"],
+          "mustNotUseEventIds": [],
+          "category": "multi-session",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "count_q_food_total",
+          "time": "2026-02-10T10:00:00Z",
+          "query": "How much did the retreat food cost in total?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:counts"},
+          "expectedAnswer": "$60",
+          "expectedEvidenceEventIds": ["count_lunch", "count_snacks"],
+          "mustNotUseEventIds": [],
+          "category": "multi-session",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "count_q_expense_entries",
+          "time": "2026-02-10T10:00:00Z",
+          "query": "How many retreat expense entries are there?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:counts"},
+          "expectedAnswer": "2",
+          "expectedEvidenceEventIds": ["count_lunch", "count_snacks"],
+          "mustNotUseEventIds": [],
+          "category": "multi-session",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "count_q_call_date",
+          "time": "2026-02-10T10:00:00Z",
+          "query": "What date was the retreat planning call?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:counts"},
+          "expectedAnswer": "March 5",
+          "expectedEvidenceEventIds": ["count_call_date"],
+          "mustNotUseEventIds": [],
+          "category": "temporal-reasoning",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "count_q_hotel_rooms",
+          "time": "2026-02-10T10:00:00Z",
+          "query": "How many hotel rooms did I reserve for the retreat?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:counts"},
+          "expectedAnswer": "[abstain]",
+          "expectedEvidenceEventIds": ["count_tickets_1"],
+          "mustNotUseEventIds": [],
+          "category": "abstention",
+          "shouldAbstain": true
+        }
+      ],
+      "forgetOps": []
+    },
+    {
+      "scenarioId": "lab_near_miss_abstention",
+      "metadata": {"description": "Near-miss abstention and short direct answers"},
+      "actors": [
+        {"id": "user", "type": "user", "name": "User"},
+        {"id": "assistant", "type": "agent", "name": "Assistant"}
+      ],
+      "events": [
+        {
+          "eventId": "abst_museum",
+          "time": "2026-03-01T11:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "I booked museum tickets for Saturday."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:abstain"},
+          "groundTruthMemories": ["museum.tickets"]
+        },
+        {
+          "eventId": "abst_flight",
+          "time": "2026-03-02T11:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "I booked a flight to Austin."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:abstain"},
+          "groundTruthMemories": ["austin.flight"]
+        },
+        {
+          "eventId": "abst_allergy",
+          "time": "2026-03-03T11:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "I am allergic to walnuts."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:abstain"},
+          "groundTruthMemories": ["allergy.walnuts"]
+        },
+        {
+          "eventId": "abst_archive",
+          "time": "2026-03-04T11:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "My archive code is KILO-22."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:abstain"},
+          "groundTruthMemories": ["archive.code"]
+        },
+        {
+          "eventId": "abst_assistant_branch",
+          "time": "2026-03-05T11:00:00Z",
+          "type": "message",
+          "messages": [{"role": "assistant", "content": "I checked the repo and the default branch is main."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:abstain"},
+          "groundTruthMemories": ["repo.branch"]
+        }
+      ],
+      "queries": [
+        {
+          "queryId": "abst_q_museum",
+          "time": "2026-03-10T10:00:00Z",
+          "query": "What tickets did I book for Saturday?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:abstain"},
+          "expectedAnswer": "museum tickets",
+          "expectedEvidenceEventIds": ["abst_museum"],
+          "mustNotUseEventIds": [],
+          "category": "single-session-user",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "abst_q_branch",
+          "time": "2026-03-10T10:00:00Z",
+          "query": "What default branch did the assistant find?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:abstain"},
+          "expectedAnswer": "main",
+          "expectedEvidenceEventIds": ["abst_assistant_branch"],
+          "mustNotUseEventIds": [],
+          "category": "single-session-assistant",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "abst_q_car_rental",
+          "time": "2026-03-10T10:00:00Z",
+          "query": "What car rental company did I book in Austin?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:abstain"},
+          "expectedAnswer": "[abstain]",
+          "expectedEvidenceEventIds": ["abst_flight"],
+          "mustNotUseEventIds": [],
+          "category": "abstention",
+          "shouldAbstain": true
+        },
+        {
+          "queryId": "abst_q_hotel",
+          "time": "2026-03-10T10:00:00Z",
+          "query": "Which Austin hotel did I book?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:abstain"},
+          "expectedAnswer": "[abstain]",
+          "expectedEvidenceEventIds": ["abst_flight"],
+          "mustNotUseEventIds": [],
+          "category": "abstention",
+          "shouldAbstain": true
+        },
+        {
+          "queryId": "abst_q_almonds",
+          "time": "2026-03-10T10:00:00Z",
+          "query": "Am I allergic to almonds?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:abstain"},
+          "expectedAnswer": "[abstain]",
+          "expectedEvidenceEventIds": ["abst_allergy"],
+          "mustNotUseEventIds": [],
+          "category": "abstention",
+          "shouldAbstain": true
+        },
+        {
+          "queryId": "abst_q_archive_code",
+          "time": "2026-03-10T10:00:00Z",
+          "query": "What is my archive code?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:abstain"},
+          "expectedAnswer": "KILO-22",
+          "expectedEvidenceEventIds": ["abst_archive"],
+          "mustNotUseEventIds": [],
+          "category": "knowledge-update",
+          "shouldAbstain": false
+        }
+      ],
+      "forgetOps": []
+    },
+    {
+      "scenarioId": "lab_assistant_only_evidence",
+      "metadata": {"description": "Assistant-only evidence and mixed provenance"},
+      "actors": [
+        {"id": "user", "type": "user", "name": "User"},
+        {"id": "assistant", "type": "agent", "name": "Assistant"}
+      ],
+      "events": [
+        {
+          "eventId": "asst_formatter_file",
+          "time": "2026-04-01T16:00:00Z",
+          "type": "message",
+          "messages": [{"role": "assistant", "content": "I ran the formatter; the file touched was sdk/typescript/src/index.ts."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:assistant"},
+          "groundTruthMemories": ["assistant.formatter.file"]
+        },
+        {
+          "eventId": "asst_smoke_test",
+          "time": "2026-04-02T16:00:00Z",
+          "type": "message",
+          "messages": [{"role": "assistant", "content": "The last smoke test I ran was just eval-core-smoke."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:assistant"},
+          "groundTruthMemories": ["assistant.smoke.test"]
+        },
+        {
+          "eventId": "asst_user_codename",
+          "time": "2026-04-03T16:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "Remember that the release codename is Quartz."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:assistant"},
+          "groundTruthMemories": ["release.codename"]
+        },
+        {
+          "eventId": "asst_build_path",
+          "time": "2026-04-04T16:00:00Z",
+          "type": "message",
+          "messages": [{"role": "assistant", "content": "I found that the build artifact path is core/zig-out/bin/quipu."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:assistant"},
+          "groundTruthMemories": ["assistant.build.path"]
+        }
+      ],
+      "queries": [
+        {
+          "queryId": "asst_q_formatter_file",
+          "time": "2026-04-10T10:00:00Z",
+          "query": "Which file did the assistant say the formatter touched?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:assistant"},
+          "expectedAnswer": "sdk/typescript/src/index.ts",
+          "expectedEvidenceEventIds": ["asst_formatter_file"],
+          "mustNotUseEventIds": [],
+          "category": "single-session-assistant",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "asst_q_smoke_test",
+          "time": "2026-04-10T10:00:00Z",
+          "query": "What was the last smoke test the assistant ran?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:assistant"},
+          "expectedAnswer": "just eval-core-smoke",
+          "expectedEvidenceEventIds": ["asst_smoke_test"],
+          "mustNotUseEventIds": [],
+          "category": "single-session-assistant",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "asst_q_codename",
+          "time": "2026-04-10T10:00:00Z",
+          "query": "What is the release codename?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:assistant"},
+          "expectedAnswer": "Quartz",
+          "expectedEvidenceEventIds": ["asst_user_codename"],
+          "mustNotUseEventIds": [],
+          "category": "single-session-user",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "asst_q_two_artifacts",
+          "time": "2026-04-10T10:00:00Z",
+          "query": "Which two implementation artifacts did the assistant mention across sessions?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:assistant"},
+          "expectedAnswer": "sdk/typescript/src/index.ts and core/zig-out/bin/quipu",
+          "expectedEvidenceEventIds": ["asst_formatter_file", "asst_build_path"],
+          "mustNotUseEventIds": [],
+          "category": "multi-session",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "asst_q_before_build",
+          "time": "2026-04-03T10:00:00Z",
+          "query": "Before the build artifact note, what smoke test had been run?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:assistant"},
+          "expectedAnswer": "just eval-core-smoke",
+          "expectedEvidenceEventIds": ["asst_smoke_test"],
+          "mustNotUseEventIds": ["asst_build_path"],
+          "category": "temporal-reasoning",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "asst_q_deployment_region",
+          "time": "2026-04-10T10:00:00Z",
+          "query": "What deployment region did the assistant mention?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:assistant"},
+          "expectedAnswer": "[abstain]",
+          "expectedEvidenceEventIds": ["asst_build_path"],
+          "mustNotUseEventIds": [],
+          "category": "abstention",
+          "shouldAbstain": true
+        }
+      ],
+      "forgetOps": []
+    },
+    {
+      "scenarioId": "lab_alias_entities",
+      "metadata": {"description": "Aliases and entities across sessions"},
+      "actors": [
+        {"id": "user", "type": "user", "name": "User"},
+        {"id": "assistant", "type": "agent", "name": "Assistant"}
+      ],
+      "events": [
+        {
+          "eventId": "alias_orion_lead",
+          "time": "2026-05-01T09:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "Maya Chen is leading Project Orion."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:aliases"},
+          "groundTruthMemories": ["orion.lead"]
+        },
+        {
+          "eventId": "alias_orion_pier",
+          "time": "2026-05-02T09:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "M. Chen said Orion's launch venue is Pier 3."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:aliases"},
+          "groundTruthMemories": ["orion.venue.old"]
+        },
+        {
+          "eventId": "alias_orion_hall",
+          "time": "2026-05-03T09:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "The Orion launch venue moved to Hall B."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:aliases"},
+          "groundTruthMemories": ["orion.venue.current"]
+        },
+        {
+          "eventId": "alias_maya_nickname",
+          "time": "2026-05-04T09:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "For Maya Chen, use the nickname MC in notes."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:aliases"},
+          "groundTruthMemories": ["maya.nickname"]
+        },
+        {
+          "eventId": "alias_helios",
+          "time": "2026-05-05T09:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "Project Helios is separate and led by Ravi."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:aliases"},
+          "groundTruthMemories": ["helios.lead"]
+        }
+      ],
+      "queries": [
+        {
+          "queryId": "alias_q_orion_lead",
+          "time": "2026-05-10T10:00:00Z",
+          "query": "Who leads Project Orion?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:aliases"},
+          "expectedAnswer": "Maya Chen",
+          "expectedEvidenceEventIds": ["alias_orion_lead"],
+          "mustNotUseEventIds": ["alias_helios"],
+          "category": "knowledge-update",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "alias_q_current_venue",
+          "time": "2026-05-10T10:00:00Z",
+          "query": "What is Orion's current launch venue?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:aliases"},
+          "expectedAnswer": "Hall B",
+          "expectedEvidenceEventIds": ["alias_orion_hall"],
+          "mustNotUseEventIds": ["alias_orion_pier"],
+          "category": "knowledge-update",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "alias_q_earlier_venue",
+          "time": "2026-05-02T12:00:00Z",
+          "query": "What venue did M. Chen mention earlier for Orion?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:aliases"},
+          "expectedAnswer": "Pier 3",
+          "expectedEvidenceEventIds": ["alias_orion_pier"],
+          "mustNotUseEventIds": ["alias_orion_hall"],
+          "category": "temporal-reasoning",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "alias_q_nickname",
+          "time": "2026-05-10T10:00:00Z",
+          "query": "What nickname should I use for Maya Chen in notes?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:aliases"},
+          "expectedAnswer": "MC",
+          "expectedEvidenceEventIds": ["alias_maya_nickname"],
+          "mustNotUseEventIds": [],
+          "category": "single-session-preference",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "alias_q_person_project",
+          "time": "2026-05-10T10:00:00Z",
+          "query": "Which person and project are linked across the Orion sessions?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:aliases"},
+          "expectedAnswer": "Maya Chen and Project Orion",
+          "expectedEvidenceEventIds": ["alias_orion_lead", "alias_orion_pier"],
+          "mustNotUseEventIds": ["alias_helios"],
+          "category": "multi-session",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "alias_q_projects",
+          "time": "2026-05-10T10:00:00Z",
+          "query": "Which projects were mentioned?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:aliases"},
+          "expectedAnswer": "Orion and Helios",
+          "expectedEvidenceEventIds": ["alias_orion_lead", "alias_helios"],
+          "mustNotUseEventIds": [],
+          "category": "multi-session",
+          "shouldAbstain": false
+        }
+      ],
+      "forgetOps": []
+    },
+    {
+      "scenarioId": "lab_scope_conflicts",
+      "metadata": {"description": "Scope conflict leakage checks"},
+      "actors": [
+        {"id": "user", "type": "user", "name": "User"},
+        {"id": "assistant", "type": "agent", "name": "Assistant"}
+      ],
+      "events": [
+        {
+          "eventId": "scope_alpha_pref",
+          "time": "2026-06-01T10:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "For Alpha, I prefer TypeScript examples."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:alpha"},
+          "groundTruthMemories": ["alpha.pref.examples"]
+        },
+        {
+          "eventId": "scope_alpha_count",
+          "time": "2026-06-02T10:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "Alpha sprint has 4 tasks completed."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:alpha"},
+          "groundTruthMemories": ["alpha.count.tasks"]
+        },
+        {
+          "eventId": "scope_alpha_db",
+          "time": "2026-06-03T10:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "Alpha uses the staging database."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:alpha"},
+          "groundTruthMemories": ["alpha.database"]
+        },
+        {
+          "eventId": "scope_alpha_changelog",
+          "time": "2026-01-15T10:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "For Alpha, I preferred compact changelogs in January."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:alpha"},
+          "groundTruthMemories": ["alpha.changelog.old"]
+        },
+        {
+          "eventId": "scope_beta_pref",
+          "time": "2026-06-01T10:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "For Beta, I prefer Python examples."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:beta"},
+          "groundTruthMemories": ["beta.pref.examples"]
+        },
+        {
+          "eventId": "scope_beta_count",
+          "time": "2026-06-02T10:00:00Z",
+          "type": "message",
+          "messages": [{"role": "user", "content": "Beta sprint has 9 tasks completed."}],
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:beta"},
+          "groundTruthMemories": ["beta.count.tasks"]
+        }
+      ],
+      "queries": [
+        {
+          "queryId": "scope_q_alpha_examples",
+          "time": "2026-06-10T10:00:00Z",
+          "query": "For Alpha, what example language do I prefer?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:alpha"},
+          "expectedAnswer": "TypeScript",
+          "expectedEvidenceEventIds": ["scope_alpha_pref"],
+          "mustNotUseEventIds": ["scope_beta_pref"],
+          "category": "single-session-preference",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "scope_q_alpha_tasks",
+          "time": "2026-06-10T10:00:00Z",
+          "query": "How many Alpha sprint tasks are completed?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:alpha"},
+          "expectedAnswer": "4",
+          "expectedEvidenceEventIds": ["scope_alpha_count"],
+          "mustNotUseEventIds": ["scope_beta_count"],
+          "category": "multi-session",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "scope_q_alpha_db",
+          "time": "2026-06-10T10:00:00Z",
+          "query": "Which database does Alpha use?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:alpha"},
+          "expectedAnswer": "staging database",
+          "expectedEvidenceEventIds": ["scope_alpha_db"],
+          "mustNotUseEventIds": [],
+          "category": "single-session-user",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "scope_q_alpha_changelog_pref",
+          "time": "2026-06-10T10:00:00Z",
+          "query": "For Alpha, what changelog style did I prefer in January?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:alpha"},
+          "expectedAnswer": "compact changelogs",
+          "expectedEvidenceEventIds": ["scope_alpha_changelog"],
+          "mustNotUseEventIds": [],
+          "category": "single-session-preference",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "scope_q_alpha_before_examples",
+          "time": "2026-02-01T10:00:00Z",
+          "query": "Before the TypeScript example preference, what Alpha changelog style was recorded?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:alpha"},
+          "expectedAnswer": "compact changelogs",
+          "expectedEvidenceEventIds": ["scope_alpha_changelog"],
+          "mustNotUseEventIds": ["scope_alpha_pref"],
+          "category": "temporal-reasoning",
+          "shouldAbstain": false
+        },
+        {
+          "queryId": "scope_q_beta_examples",
+          "time": "2026-06-10T10:00:00Z",
+          "query": "For Beta, what example language do I prefer?",
+          "scope": {"tenantId": "benchmark:longmemeval", "projectId": "lab:beta"},
+          "expectedAnswer": "Python",
+          "expectedEvidenceEventIds": ["scope_beta_pref"],
+          "mustNotUseEventIds": ["scope_alpha_pref"],
+          "category": "single-session-preference",
+          "shouldAbstain": false
+        }
+      ],
+      "forgetOps": []
+    }
+  ]
+}

@@ -39,8 +39,10 @@ class CoreQueryRun:
     prompt: str
     actual_answer: str
     evidence_event_ids: list[str]
+    top_item_texts: list[str]
     grades: list[GradeResult]
     trace: Mapping[str, Any] | None = None
+    answer_trace: Mapping[str, Any] | None = None
 
     @property
     def passed(self) -> bool:
@@ -134,6 +136,7 @@ def run_core_suite(
     vector_dimensions: int | None = None,
     page_size: int | None = None,
     budget_tokens: int | None = None,
+    answer_abstain_if_weak: bool = False,
     judge_provider: object | None = None,
 ) -> CoreSuiteRun:
     ensure_core_binary(storage=storage, lattice_include=lattice_include, lattice_lib=lattice_lib)
@@ -188,6 +191,7 @@ def run_core_suite(
                     vector_dimensions=vector_dimensions,
                     page_size=page_size,
                     budget_tokens=budget_tokens,
+                    answer_abstain_if_weak=answer_abstain_if_weak,
                     judge_provider=judge_provider,
                 )
             except RuntimeError as exc:
@@ -257,8 +261,10 @@ def failed_core_query_run(
         prompt=f"Core scenario failed: {error_text}",
         actual_answer=actual_answer,
         evidence_event_ids=evidence_event_ids,
+        top_item_texts=[],
         grades=grades,
         trace=None,
+        answer_trace=None,
     )
 
 
@@ -291,6 +297,7 @@ def run_core_scenario(
     vector_dimensions: int | None = None,
     page_size: int | None = None,
     budget_tokens: int | None = None,
+    answer_abstain_if_weak: bool = False,
     judge_provider: object | None = None,
 ) -> tuple[list[CoreQueryRun], list[CoreForgetRun], Mapping[str, Any] | None]:
     if answer_method not in {"retrieve", "answer"}:
@@ -328,6 +335,7 @@ def run_core_scenario(
                 retrieval_mode=retrieval_mode,
                 answer_method=answer_method,
                 budget_tokens=budget_tokens,
+                answer_abstain_if_weak=answer_abstain_if_weak,
                 judge_provider=judge_provider,
             )
         elif db_path is None:
@@ -343,6 +351,7 @@ def run_core_scenario(
                 retrieval_mode=retrieval_mode,
                 answer_method=answer_method,
                 budget_tokens=budget_tokens,
+                answer_abstain_if_weak=answer_abstain_if_weak,
                 judge_provider=judge_provider,
             )
 
@@ -376,6 +385,7 @@ def run_core_scenario(
             retrieval_mode=retrieval_mode,
             answer_method=answer_method,
             budget_tokens=budget_tokens,
+            answer_abstain_if_weak=answer_abstain_if_weak,
             judge_provider=judge_provider,
         )
 
@@ -542,8 +552,10 @@ def core_query_run_from_json(payload: Mapping[str, Any]) -> CoreQueryRun:
         prompt="",
         actual_answer=str(payload.get("actualAnswer") or ""),
         evidence_event_ids=[str(item) for item in payload.get("evidenceEventIds", []) if isinstance(item, str)],
+        top_item_texts=[str(item) for item in payload.get("topItemTexts", []) if isinstance(item, str)],
         grades=[grade_from_json(item) for item in payload.get("grades", []) if isinstance(item, Mapping)],
         trace=payload.get("trace") if isinstance(payload.get("trace"), Mapping) else None,
+        answer_trace=payload.get("answerTrace") if isinstance(payload.get("answerTrace"), Mapping) else None,
     )
 
 
@@ -595,6 +607,7 @@ def run_core_queries_and_forgets(
     retrieval_mode: str | None = None,
     answer_method: str = "retrieve",
     budget_tokens: int | None = None,
+    answer_abstain_if_weak: bool = False,
     judge_provider: object | None = None,
 ) -> tuple[list[CoreQueryRun], list[CoreForgetRun]]:
     query_runs = [
@@ -608,6 +621,7 @@ def run_core_queries_and_forgets(
             retrieval_mode=retrieval_mode,
             answer_method=answer_method,
             budget_tokens=budget_tokens,
+            answer_abstain_if_weak=answer_abstain_if_weak,
             judge_provider=judge_provider,
         )
         for query in scenario.queries
@@ -658,6 +672,7 @@ def run_query(
     retrieval_mode: str | None = None,
     answer_method: str = "retrieve",
     budget_tokens: int | None = None,
+    answer_abstain_if_weak: bool = False,
     judge_provider: object | None = None,
 ) -> CoreQueryRun:
     params = {
@@ -666,6 +681,8 @@ def run_query(
         "time": {"validAt": query.time},
         "options": {"includeEvidence": True, "includeDebug": True, "logTrace": log_retrieval, "logAudit": log_retrieval},
     }
+    if answer_method == "answer" and answer_abstain_if_weak:
+        params["options"]["abstainIfWeak"] = True
     if retrieval_needs is not None:
         params["needs"] = retrieval_needs
     if retrieval_mode is not None:
@@ -702,10 +719,13 @@ def run_query(
             prompt=f"Core query failed: {error_text}",
             actual_answer=actual_answer,
             evidence_event_ids=evidence_event_ids,
+            top_item_texts=[],
             grades=grades,
             trace=None,
+            answer_trace=None,
         )
     evidence_event_ids = event_ids_from_items(retrieved.get("items", []), event_to_message_qids)
+    top_item_texts = item_texts(retrieved.get("items", []))
     grades = [
         grade_exact_answer(actual_answer, query.expected_answer),
         grade_evidence_ids(evidence_event_ids, query.expected_evidence_event_ids),
@@ -726,8 +746,10 @@ def run_query(
         prompt=prompt,
         actual_answer=actual_answer,
         evidence_event_ids=evidence_event_ids,
+        top_item_texts=top_item_texts,
         grades=grades,
         trace=retrieved.get("trace") if isinstance(retrieved.get("trace"), Mapping) else None,
+        answer_trace=retrieved.get("answerTrace") if isinstance(retrieved.get("answerTrace"), Mapping) else None,
     )
 
 
@@ -775,6 +797,21 @@ def event_ids_from_items(items: object, event_to_message_qids: Mapping[str, list
     return sorted(set(found))
 
 
+def item_texts(items: object, *, limit: int = 5) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    texts: list[str] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        text = item.get("text")
+        if isinstance(text, str):
+            texts.append(text)
+        if len(texts) >= limit:
+            break
+    return texts
+
+
 def answer_from_prompt(prompt: str, expected_answer: str) -> str:
     pattern = r"(?<![a-z0-9])" + re.escape(expected_answer.lower()) + r"(?![a-z0-9])"
     return expected_answer if re.search(pattern, prompt.lower()) else ""
@@ -813,8 +850,10 @@ def query_run_to_json(run: CoreQueryRun) -> dict[str, object]:
         "passed": run.passed,
         "actualAnswer": run.actual_answer,
         "evidenceEventIds": run.evidence_event_ids,
+        "topItemTexts": run.top_item_texts,
         "grades": [asdict(grade) for grade in run.grades],
         "trace": dict(run.trace) if run.trace is not None else None,
+        "answerTrace": dict(run.answer_trace) if run.answer_trace is not None else None,
     }
 
 
@@ -844,6 +883,7 @@ def main() -> int:
     parser.add_argument("--no-extract", action="store_true", help="Replay raw messages without synchronous extraction")
     parser.add_argument("--retrieval-mode", choices=["fts", "vector", "hybrid", "graph"], default=os.environ.get("QUIPU_CORE_RETRIEVAL_MODE"))
     parser.add_argument("--answer-method", choices=["retrieve", "answer"], default=os.environ.get("QUIPU_CORE_ANSWER_METHOD", "retrieve"))
+    parser.add_argument("--answer-abstain-if-weak", action="store_true", help="Pass memory.answer options.abstainIfWeak=true for all answer queries")
     core_llm_provider_choices = ["deterministic", *supported_llm_provider_ids()]
     parser.add_argument("--answer-provider", choices=core_llm_provider_choices, default=os.environ.get("QUIPU_ANSWER_PROVIDER"))
     parser.add_argument("--answer-model", default=os.environ.get("QUIPU_ANSWER_MODEL") or os.environ.get("OPENROUTER_ANSWER_MODEL"))
@@ -885,6 +925,7 @@ def main() -> int:
                 embedding_url=args.embedding_url,
                 vector_dimensions=args.vector_dimensions,
                 page_size=args.page_size,
+                answer_abstain_if_weak=args.answer_abstain_if_weak,
             )
         else:
             with tempfile.TemporaryDirectory(prefix="quipu-lattice-eval-") as directory:
@@ -910,6 +951,7 @@ def main() -> int:
                     embedding_url=args.embedding_url,
                     vector_dimensions=args.vector_dimensions,
                     page_size=args.page_size,
+                    answer_abstain_if_weak=args.answer_abstain_if_weak,
                 )
     else:
         run = run_core_suite(
@@ -927,6 +969,7 @@ def main() -> int:
             embedding_url=args.embedding_url,
             vector_dimensions=args.vector_dimensions,
             page_size=args.page_size,
+            answer_abstain_if_weak=args.answer_abstain_if_weak,
         )
     run_json = run.to_json()
     run_config = {
@@ -940,6 +983,7 @@ def main() -> int:
         "embeddingModel": args.embedding_model,
         "vectorDimensions": args.vector_dimensions,
         "pageSize": args.page_size,
+        "answerAbstainIfWeak": args.answer_abstain_if_weak,
     }
     providers = {
         "extractor": "deterministic_fixture",

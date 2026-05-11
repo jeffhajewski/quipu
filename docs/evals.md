@@ -185,6 +185,26 @@ gate without requiring external model keys. It is not a LoCoMo score.
 `just benchmark-longmemeval-smoke` runs the same path against a small
 LongMemEval-shaped timestamped chat fixture. It is not a LongMemEval score.
 
+The synthesis lab at
+`evals/suites/external/longmemeval_synthesis_lab.yaml` is a larger handwritten
+LongMemEval-flavored regression gate for answer synthesis. It contains 48
+queries over abstention, preferences, temporal reasoning, multi-session
+aggregation, knowledge updates, user-only evidence, assistant-only evidence,
+aliases, and scope conflicts. Use `just benchmark-synthesis-lab-retrieval` to
+check retrieval/evidence cheaply, then `just benchmark-synthesis-lab-answer` to
+exercise LatticeDB graph retrieval with provider-backed answering and
+`abstainIfWeak`.
+
+Failure reports can be generated from a benchmark directory or result JSON:
+
+```bash
+PYTHONPATH=evals/src python3 -m quipu_evals.analyze_answer_failures \
+  artifacts/benchmarks/synthesis-lab-answer \
+  --suite evals/suites/external/longmemeval_synthesis_lab.yaml \
+  --json-output artifacts/benchmarks/synthesis-lab-answer/failures.json \
+  --markdown-output artifacts/benchmarks/synthesis-lab-answer/failures.md
+```
+
 Full LoCoMo runs should use `--result-class publishable`, a real dataset path,
 LatticeDB enabled, deterministic baselines/ablations, provider configuration,
 verification status, and generated trace artifacts. Full LongMemEval runs use

@@ -63,6 +63,7 @@ def collect_benchmarks(
     core_page_size: int | None = None,
     enable_entity_resolution: bool = False,
     core_budget_tokens: int | None = None,
+    core_answer_abstain_if_weak: bool = False,
     judge_provider: str | None = None,
     judge_model: str | None = None,
     judge_cache_path: str | Path | None = None,
@@ -136,6 +137,7 @@ def collect_benchmarks(
         core_embedding_model=core_embedding_model,
         core_vector_dimensions=core_vector_dimensions,
         core_budget_tokens=core_budget_tokens,
+        core_answer_abstain_if_weak=core_answer_abstain_if_weak,
     )
     deterministic_providers = deterministic_provider_names(
         judge_provider=judge_provider_for_label,
@@ -277,6 +279,7 @@ def collect_benchmarks(
                     vector_dimensions=core_vector_dimensions,
                     page_size=core_page_size,
                     budget_tokens=core_budget_tokens,
+                    answer_abstain_if_weak=core_answer_abstain_if_weak,
                     judge_provider=judge_client,
                 ),
                 suite_path=suite_path,
@@ -341,6 +344,7 @@ def collect_benchmarks(
                         vector_dimensions=core_vector_dimensions,
                         page_size=core_page_size,
                         budget_tokens=core_budget_tokens,
+                        answer_abstain_if_weak=core_answer_abstain_if_weak,
                         judge_provider=judge_client,
                     ),
                     suite_path=suite_path,
@@ -444,6 +448,7 @@ def benchmark_run_config(
     core_embedding_model: str | None,
     core_vector_dimensions: int | None,
     core_budget_tokens: int | None,
+    core_answer_abstain_if_weak: bool,
 ) -> dict[str, Any]:
     return {
         "suite": str(suite_path),
@@ -455,6 +460,7 @@ def benchmark_run_config(
         "answerMethod": core_answer_method,
         "answerProvider": core_answer_provider,
         "answerModel": core_answer_model,
+        "answerAbstainIfWeak": core_answer_abstain_if_weak,
         "embeddingProvider": core_embedding_provider,
         "embeddingModel": core_embedding_model,
         "vectorDimensions": core_vector_dimensions,
@@ -1299,6 +1305,7 @@ def main() -> int:
     parser.add_argument("--include-provider-baselines", action="store_true")
     parser.add_argument("--core-retrieval-mode", choices=["fts", "vector", "hybrid", "graph"], default=os.environ.get("QUIPU_CORE_RETRIEVAL_MODE"))
     parser.add_argument("--core-answer-method", choices=["retrieve", "answer"], default=os.environ.get("QUIPU_CORE_ANSWER_METHOD", "retrieve"))
+    parser.add_argument("--core-answer-abstain-if-weak", action="store_true", help="Pass memory.answer options.abstainIfWeak=true for core answer runs")
     core_llm_provider_choices = ["deterministic", *supported_llm_provider_ids()]
     parser.add_argument("--core-answer-provider", choices=core_llm_provider_choices, default=os.environ.get("QUIPU_ANSWER_PROVIDER"))
     parser.add_argument("--core-answer-model", default=os.environ.get("QUIPU_ANSWER_MODEL") or os.environ.get("OPENROUTER_ANSWER_MODEL"))
@@ -1399,6 +1406,7 @@ def main() -> int:
         core_page_size=args.core_page_size,
         enable_entity_resolution=args.enable_entity_resolution,
         core_budget_tokens=args.core_budget_tokens,
+        core_answer_abstain_if_weak=args.core_answer_abstain_if_weak,
         judge_provider=args.judge_provider,
         judge_model=args.judge_model,
         judge_cache_path=args.judge_cache,

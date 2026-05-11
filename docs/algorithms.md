@@ -37,9 +37,20 @@ advertises a non-hash embedding model. Callers can override this with
 
 This gives later provider-embedding, BM25, and reranking work a stable behavioral surface: retrieval must return scoped, evidence-backed, budgeted context packets rather than arbitrary top-k chunks.
 
-`memory.answer` runs the same retrieval path and sends the rendered prompt to a
-configured answer provider. Without a configured provider, it uses the
-deterministic local fallback that returns the first retrieved context item.
+`memory.answer` runs the same retrieval path, builds an evidence packet from
+retrieved qids, and routes the query to a synthesis strategy:
+`span_extract`, `preference`, `knowledge_update`, `temporal`,
+`multi_session`, or `abstain`. The runtime first creates obvious heuristic
+candidates from retrieved preferences, current facts, temporal items, direct
+spans, and simple quantities.
+
+When a configured answer provider is needed, the provider is prompted to return
+strict JSON containing `answer`, `answerable`, `supportQids`, `strategy`, and
+`confidence`. The runtime validates that every support qid exists in the
+evidence packet, normalizes concise answers, and exposes the validation details
+through optional `answerTrace`. If `options.abstainIfWeak` is true and the
+answer is unsupported or invalidly supported, the public answer string is
+exactly `[abstain]`.
 
 ## Entity Resolution V0
 

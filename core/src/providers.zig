@@ -148,7 +148,7 @@ pub fn generateAnswer(
     switch (endpoint.kind) {
         .none => return error.ProviderUnavailable,
         .deterministic => return deterministicAnswer(allocator, context_prompt),
-        .http => return chatCompletion(allocator, io orelse return error.ProviderUnavailable, endpoint, answerSystemPrompt, question, context_prompt),
+        .http => return chatCompletionWithRetries(allocator, io orelse return error.ProviderUnavailable, endpoint, answerSystemPrompt, question, context_prompt),
         .command => return error.UnsupportedProviderKind,
     }
 }
@@ -207,7 +207,9 @@ fn requiresApiKey(endpoint: ProviderEndpoint) bool {
 
 const answerSystemPrompt =
     \\You answer memory benchmark questions using only the supplied memory context.
-    \\Return a concise answer. If the context does not contain the answer, return exactly: I don't know.
+    \\Return only JSON shaped as {"answer":"...","answerable":true,"supportQids":["q_msg_..."],"strategy":"span_extract|preference|knowledge_update|temporal|multi_session|abstain","confidence":0.0}.
+    \\Use only qids present in the supplied context. Prefer raw evidence qids when a retrieved item cites evidence.
+    \\If the context does not contain the answer, set answer to "", answerable to false, supportQids to [], strategy to "abstain", and confidence to 0.
 ;
 
 const entitySystemPrompt =
@@ -283,6 +285,35 @@ fn chatCompletion(
     const response = try response_body.toOwnedSlice();
     defer allocator.free(response);
     return parseChatContent(allocator, endpoint.format, response);
+}
+
+fn chatCompletionWithRetries(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    endpoint: ProviderEndpoint,
+    system_prompt: []const u8,
+    user_text: []const u8,
+    context_prompt: []const u8,
+) ![]u8 {
+    var attempt: usize = 0;
+    while (true) : (attempt += 1) {
+        return chatCompletion(allocator, io, endpoint, system_prompt, user_text, context_prompt) catch |err| {
+            if (attempt >= 2 or !isRetryableProviderError(err)) return err;
+            _ = io.sleep(std.Io.Duration.fromMilliseconds(if (attempt == 0) 150 else 350), .awake) catch {};
+            continue;
+        };
+    }
+}
+
+fn isRetryableProviderError(err: anyerror) bool {
+    const name = @errorName(err);
+    return std.mem.eql(u8, name, "ProviderRequestFailed") or
+        std.mem.eql(u8, name, "ConnectionRefused") or
+        std.mem.eql(u8, name, "ConnectionResetByPeer") or
+        std.mem.eql(u8, name, "ConnectionTimedOut") or
+        std.mem.eql(u8, name, "TemporaryNameServerFailure") or
+        std.mem.eql(u8, name, "NetworkUnreachable") or
+        std.mem.eql(u8, name, "TlsFailure");
 }
 
 fn providerChatUrl(allocator: std.mem.Allocator, endpoint: ProviderEndpoint, model: []const u8) ![]u8 {
