@@ -19,6 +19,21 @@ jobs:
         with:
           node-version: "22"
 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Build system LatticeDB
+        run: |
+          git clone --depth 1 https://github.com/jeffhajewski/latticedb.git "$RUNNER_TEMP/latticedb"
+          cd "$RUNNER_TEMP/latticedb"
+          zig build -Doptimize=ReleaseSafe
+          {
+            echo "LATTICE_INCLUDE=$RUNNER_TEMP/latticedb/zig-out/include"
+            echo "LATTICE_LIB_DIR=$RUNNER_TEMP/latticedb/zig-out/lib"
+            echo "LD_LIBRARY_PATH=$RUNNER_TEMP/latticedb/zig-out/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          } >> "$GITHUB_ENV"
+
       - name: Install TypeScript SDK dependencies
         working-directory: sdk/typescript
         run: npm install
