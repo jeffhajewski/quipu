@@ -1,9 +1,13 @@
 const std = @import("std");
 const answer_synthesis = @import("answer_synthesis.zig");
+const build_options = @import("build_options");
 const extractor = @import("extractor.zig");
+const in_memory_storage = if (build_options.enable_lattice) struct {} else @import("in_memory_storage.zig");
 const jobs = @import("jobs.zig");
+const lattice_storage = if (build_options.enable_lattice) @import("lattice_storage.zig") else struct {};
 const protocol = @import("protocol.zig");
 const providers = @import("providers.zig");
+const schema = @import("schema.zig");
 const storage = @import("storage.zig");
 const streams = @import("streams.zig");
 
@@ -3791,11 +3795,72 @@ fn errorResponse(allocator: std.mem.Allocator, id: ?[]const u8, code: []const u8
     return stringifyAlloc(allocator, response);
 }
 
+var runtime_test_db_counter = std.atomic.Value(u64).init(0);
+
+const RuntimeTestHarness = if (build_options.enable_lattice) struct {
+    allocator: std.mem.Allocator,
+    db_path: []u8,
+    adapter_state: lattice_storage.LatticeAdapter,
+    health_value: protocol.Health,
+
+    fn init(allocator: std.mem.Allocator) !RuntimeTestHarness {
+        const id = runtime_test_db_counter.fetchAdd(1, .monotonic);
+        const db_path = try std.fmt.allocPrint(allocator, "/private/tmp/quipu-runtime-test-{d}.lattice", .{id});
+        errdefer allocator.free(db_path);
+        std.Io.Dir.deleteFileAbsolute(std.testing.io, db_path) catch {};
+
+        var adapter_state = try lattice_storage.LatticeAdapter.open(allocator, db_path, .{ .io = std.testing.io });
+        errdefer adapter_state.deinit();
+        try schema.ensure(allocator, adapter_state.adapter());
+
+        var health_value = protocol.Health.default();
+        health_value.db_path = db_path;
+        health_value.lattice_version = lattice_storage.LatticeAdapter.latticeVersion();
+        return .{
+            .allocator = allocator,
+            .db_path = db_path,
+            .adapter_state = adapter_state,
+            .health_value = health_value,
+        };
+    }
+
+    fn deinit(self: *RuntimeTestHarness) void {
+        self.adapter_state.deinit();
+        std.Io.Dir.deleteFileAbsolute(std.testing.io, self.db_path) catch {};
+        self.allocator.free(self.db_path);
+    }
+
+    fn adapter(self: *RuntimeTestHarness) storage.Adapter {
+        return self.adapter_state.adapter();
+    }
+
+    fn health(self: *RuntimeTestHarness) protocol.Health {
+        return self.health_value;
+    }
+} else struct {
+    adapter_state: in_memory_storage.InMemoryAdapter,
+
+    fn init(allocator: std.mem.Allocator) !RuntimeTestHarness {
+        return .{ .adapter_state = in_memory_storage.InMemoryAdapter.init(allocator) };
+    }
+
+    fn deinit(self: *RuntimeTestHarness) void {
+        self.adapter_state.deinit();
+    }
+
+    fn adapter(self: *RuntimeTestHarness) storage.Adapter {
+        return self.adapter_state.adapter();
+    }
+
+    fn health(_: *RuntimeTestHarness) protocol.Health {
+        return protocol.Health.default();
+    }
+};
+
 test "runtime remembers and searches scoped raw messages" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -3814,10 +3879,9 @@ test "runtime remembers and searches scoped raw messages" {
 }
 
 test "runtime health includes storage capabilities" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const health = try runtime.dispatch(
@@ -3827,16 +3891,21 @@ test "runtime health includes storage capabilities" {
     defer std.testing.allocator.free(health);
 
     try std.testing.expect(std.mem.indexOf(u8, health, "\"storage\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, health, "\"backend\":\"memory\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, health, "\"vector\":false") != null);
+    if (build_options.enable_lattice) {
+        try std.testing.expect(std.mem.indexOf(u8, health, "\"backend\":\"lattice\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, health, "\"durable\":true") != null);
+        try std.testing.expect(std.mem.indexOf(u8, health, "\"vector\":true") != null);
+    } else {
+        try std.testing.expect(std.mem.indexOf(u8, health, "\"backend\":\"memory\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, health, "\"vector\":false") != null);
+    }
 }
 
 test "runtime publishes audit stream entries for mutations" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    const adapter = adapter_state.adapter();
-    var runtime = Runtime.init(adapter, protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    const adapter = harness.adapter();
+    var runtime = Runtime.init(adapter, harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -3860,10 +3929,9 @@ test "runtime publishes audit stream entries for mutations" {
 }
 
 test "runtime stores tool calls observations episodes and memory cards" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -3897,11 +3965,10 @@ test "runtime stores tool calls observations episodes and memory cards" {
 }
 
 test "runtime queues extract jobs from durable stream events" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    const adapter = adapter_state.adapter();
-    var runtime = Runtime.init(adapter, protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    const adapter = harness.adapter();
+    var runtime = Runtime.init(adapter, harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -3926,10 +3993,9 @@ test "runtime queues extract jobs from durable stream events" {
 }
 
 test "runtime logs retrievals and returns inspect audit events" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -3956,10 +4022,9 @@ test "runtime logs retrievals and returns inspect audit events" {
 }
 
 test "runtime forget suppresses retrieval" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -3984,10 +4049,9 @@ test "runtime forget suppresses retrieval" {
 }
 
 test "runtime forget supports query selectors with scope filters" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const alpha = try runtime.dispatch(
@@ -4024,10 +4088,9 @@ test "runtime forget supports query selectors with scope filters" {
 }
 
 test "runtime forget contaminates compiled core summaries" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -4059,10 +4122,9 @@ test "runtime forget contaminates compiled core summaries" {
 }
 
 test "runtime stores and replaces core blocks" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const update = try runtime.dispatch(
@@ -4088,10 +4150,9 @@ test "runtime stores and replaces core blocks" {
 }
 
 test "runtime consolidates derived memory into a core block" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -4117,10 +4178,9 @@ test "runtime consolidates derived memory into a core block" {
 }
 
 test "runtime extracts current package manager facts" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const first = try runtime.dispatch(
@@ -4154,10 +4214,9 @@ test "runtime extracts current package manager facts" {
 }
 
 test "runtime keeps additive facts current for aggregation" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const first = try runtime.dispatch(
@@ -4182,10 +4241,9 @@ test "runtime keeps additive facts current for aggregation" {
 }
 
 test "runtime retrieve assembles categorized context and trace" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -4227,10 +4285,9 @@ test "runtime retrieve assembles categorized context and trace" {
 }
 
 test "runtime retrieve filters event windows and token budgets" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const old = try runtime.dispatch(
@@ -4263,10 +4320,9 @@ test "runtime retrieve filters event windows and token budgets" {
 }
 
 test "runtime validAt excludes future raw messages" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const old = try runtime.dispatch(
@@ -4290,10 +4346,9 @@ test "runtime validAt excludes future raw messages" {
 }
 
 test "runtime graph retrieve expands through resolved entities" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const first = try runtime.dispatch(
@@ -4328,10 +4383,9 @@ test "runtime graph retrieve expands through resolved entities" {
 }
 
 test "runtime answer uses retrieved context with deterministic provider fallback" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -4352,10 +4406,9 @@ test "runtime answer uses retrieved context with deterministic provider fallback
 }
 
 test "runtime raw retrieve indexes message date annotations" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -4374,10 +4427,9 @@ test "runtime raw retrieve indexes message date annotations" {
 }
 
 test "runtime extracts preference memories with temporal supersession" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const concise = try runtime.dispatch(
@@ -4419,10 +4471,9 @@ test "runtime extracts preference memories with temporal supersession" {
 }
 
 test "runtime rejects invalid extractor candidates before writes" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const invalid = extractor.Candidate{
@@ -4445,10 +4496,9 @@ test "runtime rejects invalid extractor candidates before writes" {
 }
 
 test "runtime forgetting raw evidence invalidates derived facts" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -4497,16 +4547,15 @@ test "runtime forgetting raw evidence invalidates derived facts" {
     defer std.testing.allocator.free(retrieve);
     try std.testing.expect(std.mem.indexOf(u8, retrieve, "The repo uses pnpm as its package manager.") == null);
 
-    const issues = try adapter_state.adapter().verify(std.testing.allocator);
+    const issues = try harness.adapter().verify(std.testing.allocator);
     defer freeVerificationIssues(std.testing.allocator, issues);
     try std.testing.expectEqual(@as(usize, 0), issues.len);
 }
 
 test "runtime forget supports redaction state" {
-    const in_memory = @import("in_memory_storage.zig");
-    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
-    defer adapter_state.deinit();
-    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
     defer runtime.deinit();
 
     const remember = try runtime.dispatch(
@@ -4532,7 +4581,7 @@ test "runtime forget supports redaction state" {
     try std.testing.expect(std.mem.indexOf(u8, inspect, "\\\"state\\\":\\\"redacted\\\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, inspect, "Redact this private note.") == null);
 
-    const issues = try adapter_state.adapter().verify(std.testing.allocator);
+    const issues = try harness.adapter().verify(std.testing.allocator);
     defer freeVerificationIssues(std.testing.allocator, issues);
     try std.testing.expectEqual(@as(usize, 0), issues.len);
 }

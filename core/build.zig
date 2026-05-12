@@ -3,9 +3,15 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const enable_lattice = b.option(bool, "enable-lattice", "Enable the LatticeDB-backed storage adapter") orelse false;
-    const lattice_include = b.option([]const u8, "lattice-include", "Directory containing lattice.h") orelse "";
-    const lattice_lib = b.option([]const u8, "lattice-lib", "Directory containing liblattice") orelse "";
+    const enable_lattice = b.option(bool, "enable-lattice", "Enable the LatticeDB-backed storage adapter") orelse true;
+    const lattice_include = b.option([]const u8, "lattice-include", "Directory containing lattice.h") orelse
+        envPath(b, "LATTICE_INCLUDE") orelse
+        envPrefixPath(b, "include") orelse
+        "";
+    const lattice_lib = b.option([]const u8, "lattice-lib", "Directory containing liblattice") orelse
+        envLatticeLibPath(b) orelse
+        envPrefixPath(b, "lib") orelse
+        "";
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_lattice", enable_lattice);
@@ -54,4 +60,19 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run core unit tests");
     test_step.dependOn(&run_unit_tests.step);
+}
+
+fn envPath(b: *std.Build, name: []const u8) ?[]const u8 {
+    return b.graph.environ_map.get(name);
+}
+
+fn envPrefixPath(b: *std.Build, child: []const u8) ?[]const u8 {
+    const prefix = envPath(b, "LATTICE_PREFIX") orelse return null;
+    return b.pathJoin(&.{ prefix, child });
+}
+
+fn envLatticeLibPath(b: *std.Build) ?[]const u8 {
+    if (envPath(b, "LATTICE_LIB_DIR")) |path| return path;
+    if (envPath(b, "LATTICE_LIB_PATH")) |path| return std.fs.path.dirname(path) orelse path;
+    return null;
 }

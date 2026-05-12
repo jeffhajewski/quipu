@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -33,12 +34,20 @@ function ensureCoreBuilt() {
     env: zigEnv,
     encoding: "utf8",
   });
-  if (build.status !== 0 && !existsSync(coreBinary)) {
+  if (build.status !== 0) {
     process.stderr.write(build.stdout ?? "");
     process.stderr.write(build.stderr ?? "");
   }
-  assert.equal(build.status === 0 || existsSync(coreBinary), true);
+  assert.equal(build.status, 0);
   coreBuildChecked = true;
+}
+
+function tempDbPath(name) {
+  const dir = mkdtempSync(path.join(tmpdir(), "quipu-sdk-ts-"));
+  return {
+    dbPath: path.join(dir, `${name}.lattice`),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
 }
 
 function loadFixtures() {
@@ -115,7 +124,8 @@ const hasZig = spawnSync("zig", ["version"], { stdio: "ignore" }).status === 0;
 test("stdio client calls core process", { skip: !hasZig }, async () => {
   ensureCoreBuilt();
 
-  const client = Quipu.stdio([coreBinary, "serve-stdio"]);
+  const temp = tempDbPath("stdio");
+  const client = Quipu.stdio([coreBinary, "--db", temp.dbPath, "serve-stdio"]);
   try {
     const remembered = await client.remember({
       scope: { projectId: "repo:test" },
@@ -134,17 +144,20 @@ test("stdio client calls core process", { skip: !hasZig }, async () => {
     assert.equal(retrieved.trace?.keptCount, 1);
   } finally {
     client.close();
+    temp.cleanup();
   }
 });
 
 test("local client auto-starts core stdio process", { skip: !hasZig }, async () => {
   ensureCoreBuilt();
 
-  const client = await Quipu.local({ binary: coreBinary });
+  const temp = tempDbPath("local");
+  const client = await Quipu.local({ binary: coreBinary, dbPath: temp.dbPath });
   try {
     const health = await client.health();
     assert.equal(health.status, "ok");
   } finally {
     client.close();
+    temp.cleanup();
   }
 });

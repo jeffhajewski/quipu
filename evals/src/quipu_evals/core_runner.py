@@ -113,7 +113,7 @@ def summarize_verification(verification_runs: list[Mapping[str, Any]]) -> dict[s
 def run_core_suite(
     path: str | Path,
     *,
-    storage: str = "memory",
+    storage: str = "lattice",
     db_dir: Path | None = None,
     lattice_include: str | None = None,
     lattice_lib: str | None = None,
@@ -139,6 +139,11 @@ def run_core_suite(
     answer_abstain_if_weak: bool = False,
     judge_provider: object | None = None,
 ) -> CoreSuiteRun:
+    temp_db_dir: tempfile.TemporaryDirectory[str] | None = None
+    if storage == "lattice" and db_dir is None:
+        temp_db_dir = tempfile.TemporaryDirectory(prefix="quipu-lattice-eval-")
+        db_dir = Path(temp_db_dir.name)
+    _ = temp_db_dir
     ensure_core_binary(storage=storage, lattice_include=lattice_include, lattice_lib=lattice_lib)
     suite = load_suite(path)
     query_runs: list[CoreQueryRun] = []
@@ -824,11 +829,11 @@ def ensure_core_binary(*, storage: str = "memory", lattice_include: str | None =
     env["ZIG_GLOBAL_CACHE_DIR"] = "/tmp/quipu-zig-cache"
     command = ["zig", "build"]
     if storage == "lattice":
+        if not lattice_include or not lattice_lib:
+            raise RuntimeError("Lattice storage evals require --lattice-include and --lattice-lib or LATTICE_INCLUDE and LATTICE_LIB_DIR")
         command.append("-Denable-lattice=true")
-        if lattice_include:
-            command.append(f"-Dlattice-include={lattice_include}")
-        if lattice_lib:
-            command.append(f"-Dlattice-lib={lattice_lib}")
+        command.append(f"-Dlattice-include={lattice_include}")
+        command.append(f"-Dlattice-lib={lattice_lib}")
     subprocess.run(command, cwd=str(CORE_DIR), check=True, env=env)
 
 
@@ -871,7 +876,7 @@ def forget_run_to_json(run: CoreForgetRun) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("suite", nargs="?", default=str(ROOT / "evals" / "suites" / "quipu_synthetic.yaml"))
-    parser.add_argument("--storage", choices=["memory", "lattice"], default="memory")
+    parser.add_argument("--storage", choices=["memory", "lattice"], default="lattice")
     parser.add_argument("--db-dir", type=Path, help="Directory for per-scenario LatticeDB files")
     parser.add_argument("--lattice-include", default=os.environ.get("LATTICE_INCLUDE"))
     parser.add_argument("--lattice-lib", default=lattice_lib_from_env())

@@ -232,7 +232,7 @@ pub const LatticeAdapter = struct {
         try self.setStringProperty(tx, node_id, "recordKind", "node");
 
         if (existing == null or !isInternalLabel(node.label)) {
-            const raw_searchable_properties = if (isInternalLabel(node.label) or std.mem.eql(u8, node.label, "Episode")) "" else node.properties_json;
+            const raw_searchable_properties = if (isInternalLabel(node.label)) "" else node.properties_json;
             const searchable_properties = if (raw_searchable_properties.len > 2048) raw_searchable_properties[0..2048] else raw_searchable_properties;
             const index_text = try self.indexText(self.allocator, node_marker, node.qid, node.label, searchable_properties);
             defer self.allocator.free(index_text);

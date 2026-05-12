@@ -6,7 +6,6 @@ repo_ref="${QUIPU_REF:-main}"
 prefix="${QUIPU_PREFIX:-$HOME/.quipu}"
 bin_dir="${QUIPU_BIN_DIR:-$prefix/bin}"
 with_lattice="${QUIPU_WITH_LATTICE:-1}"
-lattice_version="${QUIPU_LATTICE_VERSION:-0.8.4}"
 
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -15,61 +14,50 @@ need() {
   fi
 }
 
-platform() {
-  local os arch
-  os="$(uname -s)"
-  arch="$(uname -m)"
-  case "$os:$arch" in
-    Darwin:arm64) printf 'aarch64-macos' ;;
-    Darwin:x86_64) printf 'x86_64-macos' ;;
-    Linux:aarch64 | Linux:arm64) printf 'aarch64-linux-gnu' ;;
-    Linux:x86_64) printf 'x86_64-linux-gnu' ;;
-    *)
-      printf 'quipu install: unsupported platform %s/%s\n' "$os" "$arch" >&2
-      exit 1
-      ;;
-  esac
-}
-
-sha256_check() {
-  local sums_file="$1"
-  local archive_name="$2"
-  if command -v sha256sum >/dev/null 2>&1; then
-    grep "  $archive_name$" "$sums_file" | sha256sum -c -
-  else
-    grep "  $archive_name$" "$sums_file" | shasum -a 256 -c -
-  fi
-}
-
-install_lattice() {
-  need curl
-  need tar
-
-  local target archive archive_url release_url opt_dir tmp_dir
-  target="$(platform)"
-  archive="latticedb-$lattice_version-$target.tar.gz"
-  release_url="https://github.com/jeffhajewski/latticedb/releases/download/v$lattice_version"
-  archive_url="$release_url/$archive"
-  opt_dir="$prefix/opt"
-  tmp_dir="$(mktemp -d)"
-  trap 'rm -rf "$tmp_dir"' RETURN
-
-  mkdir -p "$opt_dir"
-  if [ -d "$opt_dir/latticedb-$lattice_version" ]; then
-    printf '%s\n' "$opt_dir/latticedb-$lattice_version"
-    return
-  fi
-
-  printf 'Downloading LatticeDB %s (%s)...\n' "$lattice_version" "$target" >&2
-  curl -fsSL "$archive_url" -o "$tmp_dir/$archive"
-  curl -fsSL "$release_url/SHA256SUMS" -o "$tmp_dir/SHA256SUMS"
-  (cd "$tmp_dir" && sha256_check "SHA256SUMS" "$archive" >&2)
-  tar -xzf "$tmp_dir/$archive" -C "$opt_dir"
-  printf '%s\n' "$opt_dir/latticedb-$lattice_version"
-}
-
 need git
 need zig
+
+lattice_include_dir() {
+  if [ -n "${LATTICE_INCLUDE:-}" ] && [ -f "$LATTICE_INCLUDE/lattice.h" ]; then
+    printf '%s\n' "$LATTICE_INCLUDE"
+    return
+  fi
+  if [ -n "${LATTICE_PREFIX:-}" ] && [ -f "$LATTICE_PREFIX/include/lattice.h" ]; then
+    printf '%s\n' "$LATTICE_PREFIX/include"
+    return
+  fi
+  for dir in /usr/local/include /opt/homebrew/include "$HOME/.local/include"; do
+    if [ -f "$dir/lattice.h" ]; then
+      printf '%s\n' "$dir"
+      return
+    fi
+  done
+  printf 'quipu install: could not find system lattice.h; set LATTICE_INCLUDE or LATTICE_PREFIX\n' >&2
+  exit 1
+}
+
+lattice_lib_dir() {
+  if [ -n "${LATTICE_LIB_DIR:-}" ] && ls "$LATTICE_LIB_DIR"/liblattice.* >/dev/null 2>&1; then
+    printf '%s\n' "$LATTICE_LIB_DIR"
+    return
+  fi
+  if [ -n "${LATTICE_LIB_PATH:-}" ] && [ -f "$LATTICE_LIB_PATH" ]; then
+    dirname "$LATTICE_LIB_PATH"
+    return
+  fi
+  if [ -n "${LATTICE_PREFIX:-}" ] && ls "$LATTICE_PREFIX"/lib/liblattice.* >/dev/null 2>&1; then
+    printf '%s\n' "$LATTICE_PREFIX/lib"
+    return
+  fi
+  for dir in /usr/local/lib /opt/homebrew/lib "$HOME/.local/lib"; do
+    if ls "$dir"/liblattice.* >/dev/null 2>&1; then
+      printf '%s\n' "$dir"
+      return
+    fi
+  done
+  printf 'quipu install: could not find system liblattice; set LATTICE_LIB_DIR, LATTICE_LIB_PATH, or LATTICE_PREFIX\n' >&2
+  exit 1
+}
 
 mkdir -p "$bin_dir"
 work_dir="$(mktemp -d)"
@@ -87,12 +75,15 @@ git clone --depth 1 "$repo_url" "$work_dir/quipu" >/dev/null
 
 build_args=(zig build)
 if [ "$with_lattice" != "0" ]; then
-  lattice_home="$(install_lattice)"
+  lattice_include="$(lattice_include_dir)"
+  lattice_lib="$(lattice_lib_dir)"
   build_args+=(
     -Denable-lattice=true
-    "-Dlattice-include=$lattice_home/include"
-    "-Dlattice-lib=$lattice_home/lib"
+    "-Dlattice-include=$lattice_include"
+    "-Dlattice-lib=$lattice_lib"
   )
+else
+  build_args+=(-Denable-lattice=false)
 fi
 
 printf 'Building quipu...\n'

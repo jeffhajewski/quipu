@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -203,7 +205,9 @@ test("tools/call can reach the Quipu core stdio process", { skip: !hasZig }, asy
   });
   assert.equal(build.status, 0);
 
-  const transport = createCoreTransport({ binary: coreBinary });
+  const tempDir = mkdtempSync(path.join(tmpdir(), "quipu-mcp-"));
+  const dbPath = path.join(tempDir, "mcp.lattice");
+  const transport = createCoreTransport({ binary: coreBinary, args: ["--db", dbPath, "serve-stdio"] });
   const server = createMcpServer((request) => transport.send(request));
   try {
     const response = await server.handleMessage({
@@ -220,5 +224,6 @@ test("tools/call can reach the Quipu core stdio process", { skip: !hasZig }, asy
     assert.equal(response.result.structuredContent.protocolVersion, "2026-04-quipu-v1");
   } finally {
     transport.close();
+    rmSync(tempDir, { recursive: true, force: true });
   }
 });

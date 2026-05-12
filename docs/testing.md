@@ -47,7 +47,7 @@ PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks \
   --allow-failures
 ```
 
-Optional LatticeDB-backed eval smoke:
+LatticeDB-backed eval smoke:
 
 ```bash
 PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
@@ -57,7 +57,7 @@ PYTHONPATH=evals/src python3 -m quipu_evals.core_runner \
   --strict
 ```
 
-Set `LATTICE_INCLUDE` and `LATTICE_LIB_DIR` or `LATTICE_LIB_PATH` to enable the
-optional Lattice synthetic eval and vector-search tests in
-`evals/tests/test_synthetic.py`. Use LatticeDB `0.6.0` or newer; the Lattice
-adapter depends on the native stream APIs introduced in that C ABI.
+Set `LATTICE_INCLUDE` and `LATTICE_LIB_DIR` or `LATTICE_LIB_PATH` so test and
+eval runs build against the system LatticeDB installation. Quipu tests should
+exercise LatticeDB by default; the in-memory adapter is reserved for
+adapter-local/no-lattice builds.

@@ -549,50 +549,66 @@ class SyntheticEvalTests(unittest.TestCase):
         self.assertIn("readiness gate", markdown)
         self.assertNotIn("synthetic smoke benchmark results", markdown)
 
-    @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
+    @unittest.skipUnless(
+        shutil.which("zig") and LATTICE_INCLUDE and LATTICE_LIB,
+        "zig, LATTICE_INCLUDE, and LATTICE_LIB_DIR or LATTICE_LIB_PATH are required",
+    )
     def test_core_stdio_remember_retrieve_forget_smoke(self):
         env = os.environ.copy()
         env["ZIG_GLOBAL_CACHE_DIR"] = "/tmp/quipu-zig-cache"
         subprocess.run(["zig", "build"], cwd=str(CORE_DIR), check=True, env=env)
 
-        with CoreStdioClient(CORE_BINARY) as client:
-            remembered = client.call(
-                "memory.remember",
-                {
-                    "scope": {"projectId": "repo:test"},
-                    "messages": [{"role": "user", "content": "Use pnpm for this repo."}],
-                },
-            )
-            retrieved = client.call(
-                "memory.retrieve",
-                {"query": "pnpm", "scope": {"projectId": "repo:test"}},
-            )
+        with tempfile.TemporaryDirectory(prefix="quipu-stdio-test-") as directory:
+            db_path = Path(directory) / "stdio.lattice"
+            with CoreStdioClient(CORE_BINARY, extra_args=["--db", str(db_path)]) as client:
+                remembered = client.call(
+                    "memory.remember",
+                    {
+                        "scope": {"projectId": "repo:test"},
+                        "messages": [{"role": "user", "content": "Use pnpm for this repo."}],
+                    },
+                )
+                retrieved = client.call(
+                    "memory.retrieve",
+                    {"query": "pnpm", "scope": {"projectId": "repo:test"}},
+                )
 
-            self.assertEqual(remembered["status"], "stored")
-            self.assertIn("The repo uses pnpm as its package manager.", retrieved["prompt"])
+                self.assertEqual(remembered["status"], "stored")
+                self.assertIn("The repo uses pnpm as its package manager.", retrieved["prompt"])
 
-            forgotten = client.call(
-                "memory.forget",
-                {
-                    "mode": "hard_delete",
-                    "selector": {"qids": remembered["messageQids"]},
-                    "dryRun": False,
-                    "reason": "test",
-                },
-            )
-            retrieved_after_forget = client.call(
-                "memory.retrieve",
-                {"query": "pnpm", "scope": {"projectId": "repo:test"}},
-            )
+                forgotten = client.call(
+                    "memory.forget",
+                    {
+                        "mode": "hard_delete",
+                        "selector": {"qids": remembered["messageQids"]},
+                        "dryRun": False,
+                        "reason": "test",
+                    },
+                )
+                retrieved_after_forget = client.call(
+                    "memory.retrieve",
+                    {"query": "pnpm", "scope": {"projectId": "repo:test"}},
+                )
 
-            self.assertEqual(forgotten["nodesDeleted"], 1)
-            self.assertNotIn("Use pnpm for this repo.", retrieved_after_forget["prompt"])
+                self.assertEqual(forgotten["nodesDeleted"], 1)
+                self.assertNotIn("Use pnpm for this repo.", retrieved_after_forget["prompt"])
 
-    @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
+    @unittest.skipUnless(
+        shutil.which("zig") and LATTICE_INCLUDE and LATTICE_LIB,
+        "zig, LATTICE_INCLUDE, and LATTICE_LIB_DIR or LATTICE_LIB_PATH are required",
+    )
     def test_core_synthetic_eval_marks_current_capabilities(self):
-        run = run_core_suite(SUITE_PATH)
+        with tempfile.TemporaryDirectory(prefix="quipu-core-test-") as directory:
+            run = run_core_suite(
+                SUITE_PATH,
+                storage="lattice",
+                db_dir=Path(directory),
+                lattice_include=LATTICE_INCLUDE,
+                lattice_lib=LATTICE_LIB,
+            )
         by_query = {query.query_id: query for query in run.query_runs}
 
+        self.assertEqual(run.to_json()["baseline"], "core_lattice")
         self.assertTrue(run.passed)
         self.assertTrue(by_query["q_pkg_current"].passed)
         self.assertTrue(by_query["q_pkg_historical"].passed)

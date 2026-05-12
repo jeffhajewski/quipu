@@ -16,9 +16,10 @@ export PATH="$HOME/.quipu/bin:$PATH"
 quipu --db "$HOME/.quipu/memory.lattice" health
 ```
 
-The installer builds the Zig core and downloads the LatticeDB `0.6.0` native
+The installer builds the Zig core against a system-installed LatticeDB native
 library for durable graph, full-text, vector, and stream storage. You need
-`git`, `curl`, `tar`, and `zig` installed.
+`git`, `zig`, `lattice.h`, and `liblattice` installed; set `LATTICE_INCLUDE`
+and `LATTICE_LIB_DIR` when they are not in standard system paths.
 
 ## Why Quipu
 
@@ -317,7 +318,8 @@ Implemented:
 
 - Contract-first JSON-RPC protocol schemas and conformance fixtures.
 - Zig runtime for the public memory methods.
-- In-memory and LatticeDB `0.6.0` storage adapters.
+- LatticeDB-backed storage adapter for normal runtime and tests, plus an
+  in-memory adapter for adapter-local/no-lattice builds only.
 - Schema metadata, initial migration record, and schema-aware verification.
 - Retrieval, inspection, feedback, core memory blocks, forgetting, and audit
   stream logging.
@@ -388,11 +390,11 @@ just benchmark-locomo-full /path/to/locomo10.json
 just benchmark-locomo-download
 ```
 
-Build with an explicit LatticeDB release:
+Build with an explicit system LatticeDB install:
 
 ```bash
 cd core
-zig build -Denable-lattice=true \
+zig build \
   -Dlattice-include=/path/to/latticedb/include \
   -Dlattice-lib=/path/to/latticedb/lib
 ```

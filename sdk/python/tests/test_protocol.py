@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -159,22 +160,24 @@ class QuipuClientTests(unittest.TestCase):
         env["ZIG_GLOBAL_CACHE_DIR"] = "/tmp/quipu-zig-cache"
         subprocess.run(["zig", "build"], cwd=str(CORE_DIR), check=True, env=env)
 
-        with Quipu.stdio([str(CORE_BINARY), "serve-stdio"]) as client:
-            remembered = client.remember(
-                scope={"projectId": "repo:test"},
-                messages=[{"role": "user", "content": "Use pnpm through the SDK."}],
-            )
-            retrieved = client.retrieve(
-                query="pnpm",
-                scope={"projectId": "repo:test"},
-                needs=["current_facts"],
-                options={"includeDebug": True},
-            )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = str(Path(tmp_dir) / "sdk-python.lattice")
+            with Quipu.stdio([str(CORE_BINARY), "--db", db_path, "serve-stdio"]) as client:
+                remembered = client.remember(
+                    scope={"projectId": "repo:test"},
+                    messages=[{"role": "user", "content": "Use pnpm through the SDK."}],
+                )
+                retrieved = client.retrieve(
+                    query="pnpm",
+                    scope={"projectId": "repo:test"},
+                    needs=["current_facts"],
+                    options={"includeDebug": True},
+                )
 
-            self.assertEqual(remembered["status"], "stored")
-            self.assertIn("The repo uses pnpm as its package manager.", retrieved["prompt"])
-            self.assertEqual(len(retrieved["context"]["currentFacts"]), 1)
-            self.assertEqual(retrieved["trace"]["keptCount"], 1)
+                self.assertEqual(remembered["status"], "stored")
+                self.assertIn("The repo uses pnpm as its package manager.", retrieved["prompt"])
+                self.assertEqual(len(retrieved["context"]["currentFacts"]), 1)
+                self.assertEqual(retrieved["trace"]["keptCount"], 1)
 
     @unittest.skipUnless(shutil.which("zig"), "zig is not installed")
     def test_local_client_auto_starts_core_stdio(self):
@@ -182,8 +185,10 @@ class QuipuClientTests(unittest.TestCase):
         env["ZIG_GLOBAL_CACHE_DIR"] = "/tmp/quipu-zig-cache"
         subprocess.run(["zig", "build"], cwd=str(CORE_DIR), check=True, env=env)
 
-        with Quipu.local(binary=str(CORE_BINARY)) as client:
-            self.assertEqual(client.health()["status"], "ok")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = str(Path(tmp_dir) / "sdk-python-local.lattice")
+            with Quipu.local(binary=str(CORE_BINARY), db_path=db_path) as client:
+                self.assertEqual(client.health()["status"], "ok")
 
 
 if __name__ == "__main__":

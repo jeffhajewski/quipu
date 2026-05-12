@@ -177,6 +177,11 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    if (!build_options.enable_lattice and config.db_path != null) {
+        try printStartupError(init.io, "quipu was built without LatticeDB support; --db requires rebuilding with -Denable-lattice=true and system liblattice");
+        std.process.exit(1);
+    }
+
     if (config.db_path) |path| {
         try ensureParentDir(init.io, path);
     }
@@ -202,6 +207,14 @@ pub fn main(init: std.process.Init) !void {
     var runtime = runtime_mod.Runtime.initWithOptions(adapter_state.adapter(), protocol.Health.default(), runtime_options);
     defer runtime.deinit();
     try runCommand(init.io, allocator, args, config.command_index, &runtime, adapter_state.adapter());
+}
+
+fn printStartupError(io: std.Io, message: []const u8) !void {
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_file_writer: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
+    const stderr = &stderr_file_writer.interface;
+    defer stderr.flush() catch {};
+    try stderr.print("quipu: {s}\n", .{message});
 }
 
 fn parseRuntimeConfig(args: []const [:0]const u8) RuntimeConfig {
@@ -608,7 +621,7 @@ fn providerEndpointFromConfig(
         environ_map.get("QUIPU_MODEL_API_KEY") orelse
         environ_map.get("QUIPU_OPENROUTER_API_KEY") orelse
         if (defaults.api_key_env) |key| environ_map.get(key) else null orelse
-        file_config.llm_api_key;
+            file_config.llm_api_key;
     return .{
         .kind = .http,
         .name = defaults.name,
@@ -1510,13 +1523,13 @@ fn buildRetrieveRequest(allocator: std.mem.Allocator, args: []const [:0]const u8
         .jsonrpc = "2.0",
         .id = "cli_retrieve",
         .method = "memory.retrieve",
-            .params = .{
-                .query = query,
-                .mode = parsed.mode,
-                .scope = parsed.scope.json(),
-                .budgetTokens = parsed.budget_tokens,
-                .needs = parsed.needs.items,
-                .options = .{
+        .params = .{
+            .query = query,
+            .mode = parsed.mode,
+            .scope = parsed.scope.json(),
+            .budgetTokens = parsed.budget_tokens,
+            .needs = parsed.needs.items,
+            .options = .{
                 .includeEvidence = parsed.include_evidence,
                 .includeDebug = parsed.include_debug,
                 .logTrace = parsed.include_debug,
