@@ -3799,15 +3799,17 @@ var runtime_test_db_counter = std.atomic.Value(u64).init(0);
 
 const RuntimeTestHarness = if (build_options.enable_lattice) struct {
     allocator: std.mem.Allocator,
+    tmp_dir: std.testing.TmpDir,
     db_path: []u8,
     adapter_state: lattice_storage.LatticeAdapter,
     health_value: protocol.Health,
 
     fn init(allocator: std.mem.Allocator) !RuntimeTestHarness {
+        var tmp_dir = std.testing.tmpDir(.{});
+        errdefer tmp_dir.cleanup();
         const id = runtime_test_db_counter.fetchAdd(1, .monotonic);
-        const db_path = try std.fmt.allocPrint(allocator, "/private/tmp/quipu-runtime-test-{d}.lattice", .{id});
+        const db_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/quipu-runtime-test-{d}.lattice", .{ tmp_dir.sub_path[0..], id });
         errdefer allocator.free(db_path);
-        std.Io.Dir.deleteFileAbsolute(std.testing.io, db_path) catch {};
 
         var adapter_state = try lattice_storage.LatticeAdapter.open(allocator, db_path, .{ .io = std.testing.io });
         errdefer adapter_state.deinit();
@@ -3818,6 +3820,7 @@ const RuntimeTestHarness = if (build_options.enable_lattice) struct {
         health_value.lattice_version = lattice_storage.LatticeAdapter.latticeVersion();
         return .{
             .allocator = allocator,
+            .tmp_dir = tmp_dir,
             .db_path = db_path,
             .adapter_state = adapter_state,
             .health_value = health_value,
@@ -3826,7 +3829,7 @@ const RuntimeTestHarness = if (build_options.enable_lattice) struct {
 
     fn deinit(self: *RuntimeTestHarness) void {
         self.adapter_state.deinit();
-        std.Io.Dir.deleteFileAbsolute(std.testing.io, self.db_path) catch {};
+        self.tmp_dir.cleanup();
         self.allocator.free(self.db_path);
     }
 
