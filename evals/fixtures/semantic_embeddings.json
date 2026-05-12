@@ -1,0 +1,9 @@
+{
+  "model": "fixture-semantic-4d",
+  "dimensions": 4,
+  "embeddings": {
+    "type: Message\ncontent: The lodging reservation is at the Arbor Hotel.\ncreatedAt: 2026-03-01T09:00:00Z\nprojectId: repo:semantic-vector": [1.0, 0.0, 0.0, 0.0],
+    "type: Message\ncontent: The office parking pass expires Friday.\ncreatedAt: 2026-03-01T10:00:00Z\nprojectId: repo:semantic-vector": [0.0, 1.0, 0.0, 0.0],
+    "Where should I sleep on the trip?": [1.0, 0.0, 0.0, 0.0]
+  }
+}

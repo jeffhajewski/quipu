@@ -61,3 +61,9 @@ Set `LATTICE_INCLUDE` and `LATTICE_LIB_DIR` or `LATTICE_LIB_PATH` so test and
 eval runs build against the system LatticeDB installation. Quipu tests should
 exercise LatticeDB by default; the in-memory adapter is reserved for
 adapter-local/no-lattice builds.
+
+Semantic search tests should still use LatticeDB for persistence and vector
+indexing. Expensive or network embedding providers may be replaced by local
+OpenAI-compatible fixture endpoints backed by precomputed vectors, as in
+`evals/fixtures/semantic_embeddings.json`; do not replace LatticeDB itself with
+an in-memory adapter for those tests.

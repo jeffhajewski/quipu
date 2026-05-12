@@ -3,11 +3,13 @@ from __future__ import annotations
 import sys
 import unittest
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import os
 import shutil
 import subprocess
 import tempfile
+from threading import Thread
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,12 +34,62 @@ SUITE_PATH = ROOT / "evals" / "suites" / "quipu_synthetic.yaml"
 LOCOMO_MINI_PATH = ROOT / "evals" / "suites" / "external" / "locomo_mini.yaml"
 LONGMEMEVAL_MINI_PATH = ROOT / "evals" / "suites" / "external" / "longmemeval_mini.yaml"
 LONGMEMEVAL_SYNTHESIS_LAB_PATH = ROOT / "evals" / "suites" / "external" / "longmemeval_synthesis_lab.yaml"
+SEMANTIC_EMBEDDINGS_PATH = ROOT / "evals" / "fixtures" / "semantic_embeddings.json"
 CORE_DIR = ROOT / "core"
 CORE_BINARY = CORE_DIR / "zig-out" / "bin" / "quipu"
 LATTICE_INCLUDE = os.environ.get("LATTICE_INCLUDE")
 LATTICE_LIB = os.environ.get("LATTICE_LIB_DIR") or (
     str(Path(os.environ["LATTICE_LIB_PATH"]).parent) if os.environ.get("LATTICE_LIB_PATH") else None
 )
+
+
+class PrecomputedEmbeddingServer:
+    def __init__(self, embeddings: dict[str, list[float]]) -> None:
+        self.embeddings = embeddings
+        self.requests: list[str] = []
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("content-length", "0"))
+                payload = json.loads(self.rfile.read(length))
+                raw_input = payload.get("input")
+                texts = [raw_input] if isinstance(raw_input, str) else raw_input
+                if not isinstance(texts, list) or not all(isinstance(text, str) for text in texts):
+                    self.send_error(400, "input must be a string or list of strings")
+                    return
+
+                data = []
+                for index, text in enumerate(texts):
+                    vector = owner.embeddings.get(text)
+                    if vector is None:
+                        self.send_error(400, f"missing precomputed embedding for {text!r}")
+                        return
+                    owner.requests.append(text)
+                    data.append({"object": "embedding", "index": index, "embedding": vector})
+
+                response = json.dumps({"object": "list", "data": data}, separators=(",", ":")).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_port}/embeddings"
+        self._thread = Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "PrecomputedEmbeddingServer":
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=2)
 
 
 class SyntheticEvalTests(unittest.TestCase):
@@ -707,6 +759,112 @@ class SyntheticEvalTests(unittest.TestCase):
                 self.assertTrue(
                     any("heliotrope" in item["text"] for item in hybrid_results["results"])
                 )
+
+    @unittest.skipUnless(
+        shutil.which("zig") and LATTICE_INCLUDE and LATTICE_LIB,
+        "zig, LATTICE_INCLUDE, and LATTICE_LIB_DIR or LATTICE_LIB_PATH are required",
+    )
+    def test_core_lattice_semantic_search_uses_precomputed_embeddings(self):
+        fixture = json.loads(SEMANTIC_EMBEDDINGS_PATH.read_text())
+        env = os.environ.copy()
+        env["ZIG_GLOBAL_CACHE_DIR"] = "/tmp/quipu-zig-cache"
+        subprocess.run(
+            [
+                "zig",
+                "build",
+                "-Denable-lattice=true",
+                f"-Dlattice-include={LATTICE_INCLUDE}",
+                f"-Dlattice-lib={LATTICE_LIB}",
+            ],
+            cwd=str(CORE_DIR),
+            check=True,
+            env=env,
+        )
+
+        with (
+            tempfile.TemporaryDirectory(prefix="quipu-lattice-semantic-") as directory,
+            PrecomputedEmbeddingServer(fixture["embeddings"]) as embeddings,
+        ):
+            db_path = Path(directory) / "quipu.lattice"
+            core_args = [
+                "--db",
+                str(db_path),
+                "--embedding-provider",
+                "http",
+                "--embedding-url",
+                embeddings.url,
+                "--embedding-model",
+                fixture["model"],
+                "--vector-dimensions",
+                str(fixture["dimensions"]),
+            ]
+            with CoreStdioClient(CORE_BINARY, extra_args=core_args) as client:
+                health = client.call("system.health", {})
+                self.assertEqual(health["storage"]["backend"], "lattice")
+                self.assertTrue(health["storage"]["vector"])
+                self.assertEqual(health["storage"]["vectorDimensions"], fixture["dimensions"])
+                self.assertEqual(health["storage"]["embeddingModel"], fixture["model"])
+
+                remembered = client.call(
+                    "memory.remember",
+                    {
+                        "scope": {"projectId": "repo:semantic-vector"},
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "The lodging reservation is at the Arbor Hotel.",
+                                "createdAt": "2026-03-01T09:00:00Z",
+                            },
+                            {
+                                "role": "user",
+                                "content": "The office parking pass expires Friday.",
+                                "createdAt": "2026-03-01T10:00:00Z",
+                            },
+                        ],
+                        "extract": False,
+                    },
+                )
+                vector_results = client.call(
+                    "memory.search",
+                    {
+                        "query": "Where should I sleep on the trip?",
+                        "scope": {"projectId": "repo:semantic-vector"},
+                        "labels": ["message"],
+                        "mode": "vector",
+                        "limit": 1,
+                    },
+                )
+                hybrid_results = client.call(
+                    "memory.search",
+                    {
+                        "query": "Where should I sleep on the trip?",
+                        "scope": {"projectId": "repo:semantic-vector"},
+                        "labels": ["message"],
+                        "mode": "hybrid",
+                        "limit": 1,
+                    },
+                )
+                retrieved = client.call(
+                    "memory.retrieve",
+                    {
+                        "query": "Where should I sleep on the trip?",
+                        "scope": {"projectId": "repo:semantic-vector"},
+                        "needs": ["raw"],
+                        "options": {
+                            "includeDebug": True,
+                            "logAudit": False,
+                            "logRetrieval": False,
+                        },
+                    },
+                )
+
+                self.assertEqual(remembered["status"], "stored")
+                self.assertEqual(vector_results["results"][0]["text"], "The lodging reservation is at the Arbor Hotel.")
+                self.assertEqual(hybrid_results["results"][0]["text"], "The lodging reservation is at the Arbor Hotel.")
+                self.assertIn("The lodging reservation is at the Arbor Hotel.", retrieved["prompt"])
+                self.assertEqual(retrieved["trace"]["candidateSources"]["hybrid"], len(retrieved["items"]))
+
+        self.assertEqual(set(embeddings.requests), set(fixture["embeddings"].keys()))
 
 
 if __name__ == "__main__":
