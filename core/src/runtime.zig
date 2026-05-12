@@ -71,6 +71,67 @@ const MessageResult = struct {
     validFrom: ?[]const u8 = null,
     validTo: ?[]const u8 = null,
     evidence: []const EvidenceResult = &.{},
+    includeDebug: bool = false,
+    slotKey: ?[]const u8 = null,
+    subject: ?[]const u8 = null,
+    attribute: ?[]const u8 = null,
+    value: ?[]const u8 = null,
+    numericValue: ?i64 = null,
+    unit: ?[]const u8 = null,
+    aggregationMode: ?[]const u8 = null,
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("qid");
+        try jw.write(self.qid);
+        try jw.objectField("type");
+        try jw.write(self.type);
+        try jw.objectField("text");
+        try jw.write(self.text);
+        try jw.objectField("score");
+        try jw.write(self.score);
+        try jw.objectField("confidence");
+        try jw.write(self.confidence);
+        try jw.objectField("state");
+        try jw.write(self.state);
+        try jw.objectField("validFrom");
+        try jw.write(self.validFrom);
+        try jw.objectField("validTo");
+        try jw.write(self.validTo);
+        try jw.objectField("evidence");
+        try jw.write(self.evidence);
+        if (self.includeDebug) {
+            if (self.slotKey) |slot_key| {
+                try jw.objectField("slotKey");
+                try jw.write(slot_key);
+            }
+            if (self.subject) |subject| {
+                try jw.objectField("subject");
+                try jw.write(subject);
+            }
+            if (self.attribute) |attribute| {
+                try jw.objectField("attribute");
+                try jw.write(attribute);
+            }
+            if (self.value) |value| {
+                try jw.objectField("value");
+                try jw.write(value);
+            }
+            if (self.numericValue) |numeric_value| {
+                try jw.objectField("numericValue");
+                try jw.write(numeric_value);
+            }
+            if (self.unit) |unit| {
+                try jw.objectField("unit");
+                try jw.write(unit);
+            }
+            if (self.aggregationMode) |aggregation_mode| {
+                try jw.objectField("aggregationMode");
+                try jw.write(aggregation_mode);
+            }
+        }
+        try jw.endObject();
+    }
 };
 
 const EvidenceResult = struct {
@@ -642,7 +703,7 @@ pub const Runtime = struct {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
         };
 
-        var results = try self.collectItems(allocator, query, mode, @intCast(limit), scope, include_deleted, params.get("labels"), null, .{}, true);
+        var results = try self.collectItems(allocator, query, mode, @intCast(limit), scope, include_deleted, params.get("labels"), null, .{}, true, false);
         defer results.deinit();
 
         const response = .{
@@ -680,12 +741,12 @@ pub const Runtime = struct {
 
         const raw_only = needsCount(needs_value) == 1 and needsIncludes(needs_value, "raw");
         var results = if (raw_only and retrieve_mode == .fts)
-            try self.collectRawLexicalItems(allocator, query, 40, scope, event_window, include_evidence)
+            try self.collectRawLexicalItems(allocator, query, 40, scope, valid_at, event_window, include_evidence, include_trace)
         else
-            try self.collectItems(allocator, query, retrieve_mode, 40, scope, false, null, valid_at, event_window, include_evidence);
+            try self.collectItems(allocator, query, retrieve_mode, 40, scope, false, null, valid_at, event_window, include_evidence, include_trace);
         defer results.deinit();
         if (needsIncludes(needs_value, "core")) {
-            try self.appendCoreItems(allocator, &results, scope, include_evidence);
+            try self.appendCoreItems(allocator, &results, scope, include_evidence, include_trace);
         }
         const candidate_count = results.items.items.len;
         const dropped_for_needs = results.filterByNeeds(needs_value);
@@ -810,12 +871,12 @@ pub const Runtime = struct {
 
         const raw_only = needsCount(needs_value) == 1 and needsIncludes(needs_value, "raw");
         var results = if (raw_only and retrieve_mode == .fts)
-            try self.collectRawLexicalItems(allocator, query, 40, scope, event_window, include_evidence)
+            try self.collectRawLexicalItems(allocator, query, 40, scope, valid_at, event_window, include_evidence, include_trace)
         else
-            try self.collectItems(allocator, query, retrieve_mode, 40, scope, false, null, valid_at, event_window, include_evidence);
+            try self.collectItems(allocator, query, retrieve_mode, 40, scope, false, null, valid_at, event_window, include_evidence, include_trace);
         defer results.deinit();
         if (needsIncludes(needs_value, "core")) {
-            try self.appendCoreItems(allocator, &results, scope, include_evidence);
+            try self.appendCoreItems(allocator, &results, scope, include_evidence, include_trace);
         }
         const candidate_count = results.items.items.len;
         const dropped_for_needs = results.filterByNeeds(needs_value);
@@ -828,6 +889,17 @@ pub const Runtime = struct {
         defer warnings.deinit(allocator);
         if (dropped_for_budget > 0) try warnings.append(allocator, "token_budget_truncated");
         if (results.items.items.len == 0) try warnings.append(allocator, "no_memory_items");
+
+        const pre_gate_packet = try buildAnswerEvidencePacket(allocator, results.items.items);
+        defer freeAnswerEvidencePacket(allocator, pre_gate_packet);
+        var evidence_gate = try answer_synthesis.gateEvidence(allocator, query, valid_at, pre_gate_packet);
+        defer evidence_gate.deinit();
+        if (evidence_gate.items.len > 0) {
+            _ = results.filterByQids(evidence_gate.trace.keptQids);
+        }
+        for (evidence_gate.trace.warnings) |warning| {
+            if (!containsWarning(warnings.items, warning)) try warnings.append(allocator, warning);
+        }
         try appendRetrievalWarnings(allocator, &warnings, results.items.items, include_evidence);
 
         var context = try OwnedContextPacket.fromItems(allocator, results.items.items, warnings.items);
@@ -864,9 +936,7 @@ pub const Runtime = struct {
             providers.ProviderEndpoint{ .kind = .deterministic, .name = "deterministic_prompt" }
         else
             self.options.answer_provider;
-        const evidence_packet = try buildAnswerEvidencePacket(allocator, results.items.items);
-        defer freeAnswerEvidencePacket(allocator, evidence_packet);
-        const raw_provider_answer = if (evidence_packet.len == 0 or answer_synthesis.hasStrongHeuristic(query, evidence_packet))
+        const raw_provider_answer = if (evidence_gate.items.len == 0 or answer_synthesis.hasStrongHeuristic(query, evidence_gate.items))
             null
         else
             providers.generateAnswer(allocator, self.options.io, endpoint, query, prompt) catch |err| {
@@ -887,9 +957,10 @@ pub const Runtime = struct {
         var synthesized = try answer_synthesis.synthesize(
             allocator,
             query,
-            evidence_packet,
+            evidence_gate.items,
             raw_provider_answer,
             abstain_if_weak,
+            evidence_gate.trace,
         );
         defer synthesized.deinit();
 
@@ -1476,19 +1547,27 @@ pub const Runtime = struct {
         };
 
         const label = extractor.labelName(candidate.label);
-        try self.supersedeCurrentSlot(allocator, scope, candidate.slot_key, created_at);
+        if (std.mem.eql(u8, candidate.aggregation_mode, "single_value")) {
+            try self.supersedeCurrentSlot(allocator, scope, candidate.slot_key, candidate.valid_from orelse created_at);
+        }
         const qid = try self.nextQid(allocator, extractor.qidPrefix(candidate.label));
         defer allocator.free(qid);
         const quote_for_props = try clampPropertyText(allocator, quote);
         defer allocator.free(quote_for_props);
+        const valid_from = candidate.valid_from orelse created_at;
         const props = try stringifyAlloc(allocator, .{
             .kind = labelType(label),
             .text = candidate.text,
             .slotKey = candidate.slot_key,
+            .subject = candidate.subject,
+            .attribute = candidate.attribute,
             .value = candidate.value,
+            .numericValue = candidate.numeric_value,
+            .unit = candidate.unit,
+            .aggregationMode = candidate.aggregation_mode,
             .state = "current",
-            .validFrom = created_at,
-            .validTo = @as(?[]const u8, null),
+            .validFrom = valid_from,
+            .validTo = candidate.valid_to,
             .evidenceQid = message_qid,
             .quote = quote_for_props,
             .tenantId = scope.tenant_id,
@@ -1536,10 +1615,15 @@ pub const Runtime = struct {
             .utility = @as(f32, 0.5),
             .relatedCardQids = related_card_qids,
             .slotKey = candidate.slot_key,
+            .subject = candidate.subject,
+            .attribute = candidate.attribute,
             .value = candidate.value,
+            .numericValue = candidate.numeric_value,
+            .unit = candidate.unit,
+            .aggregationMode = candidate.aggregation_mode,
             .state = "current",
-            .validFrom = created_at,
-            .validTo = @as(?[]const u8, null),
+            .validFrom = candidate.valid_from orelse created_at,
+            .validTo = candidate.valid_to,
             .evidenceQid = message_qid,
             .quote = quote_for_props,
             .tenantId = scope.tenant_id,
@@ -1713,8 +1797,17 @@ pub const Runtime = struct {
         defer allocator.free(text);
         const slot_key = try readPropertyString(allocator, node.properties_json, "slotKey");
         defer allocator.free(slot_key);
+        const subject = try readOptionalPropertyString(allocator, node.properties_json, "subject");
+        defer if (subject) |value_to_free| allocator.free(value_to_free);
+        const attribute = try readOptionalPropertyString(allocator, node.properties_json, "attribute");
+        defer if (attribute) |value_to_free| allocator.free(value_to_free);
         const value = try readPropertyString(allocator, node.properties_json, "value");
         defer allocator.free(value);
+        const numeric_value = try readOptionalPropertyInt(allocator, node.properties_json, "numericValue");
+        const unit = try readOptionalPropertyString(allocator, node.properties_json, "unit");
+        defer if (unit) |value_to_free| allocator.free(value_to_free);
+        const aggregation_mode = try readOptionalPropertyString(allocator, node.properties_json, "aggregationMode");
+        defer if (aggregation_mode) |value_to_free| allocator.free(value_to_free);
         const evidence_qid = try readPropertyString(allocator, node.properties_json, "evidenceQid");
         defer allocator.free(evidence_qid);
         const quote = try readPropertyString(allocator, node.properties_json, "quote");
@@ -1734,7 +1827,12 @@ pub const Runtime = struct {
             .kind = labelType(node.label),
             .text = text,
             .slotKey = slot_key,
+            .subject = subject,
+            .attribute = attribute,
             .value = value,
+            .numericValue = numeric_value,
+            .unit = unit,
+            .aggregationMode = aggregation_mode orelse "single_value",
             .state = state,
             .validFrom = valid_from,
             .validTo = valid_to,
@@ -1829,6 +1927,7 @@ pub const Runtime = struct {
         valid_at: ?[]const u8,
         event_window: EventWindow,
         include_evidence: bool,
+        include_debug: bool,
     ) !OwnedItems {
         const hits = try self.collectSearchHits(allocator, query, mode, @max(limit * 4, limit));
         defer freeHits(allocator, hits);
@@ -1844,6 +1943,12 @@ pub const Runtime = struct {
             if (isHiddenSearchLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) continue;
             if (!labelAllowed(node.label, labels_value)) continue;
             if (!try nodeWithinEventWindow(allocator, node, event_window)) continue;
+            if (!include_deleted and valid_at != null) {
+                if (!try nodeActiveAt(allocator, node, valid_at.?)) continue;
+            }
+            if (!include_deleted and valid_at == null and isSlotMemoryLabel(node.label)) {
+                if (!try propertyEquals(allocator, node.properties_json, "state", "current")) continue;
+            }
             if (!include_deleted and isDerivedLabel(node.label)) {
                 if (valid_at) |timestamp| {
                     if (!try derivedActiveAt(allocator, node, timestamp)) continue;
@@ -1862,6 +1967,8 @@ pub const Runtime = struct {
             errdefer if (valid_from) |value_to_free| allocator.free(value_to_free);
             const valid_to = try readOptionalPropertyString(allocator, node.properties_json, "validTo");
             errdefer if (valid_to) |value_to_free| allocator.free(value_to_free);
+            const slot_metadata = try slotMetadataForNode(allocator, node);
+            errdefer slot_metadata.deinit(allocator);
             const result_qid = try allocator.dupe(u8, node.qid);
             errdefer allocator.free(result_qid);
             try owned.items.append(allocator, .{
@@ -1873,6 +1980,14 @@ pub const Runtime = struct {
                 .validFrom = valid_from,
                 .validTo = valid_to,
                 .evidence = evidence,
+                .includeDebug = include_debug,
+                .slotKey = slot_metadata.slot_key,
+                .subject = slot_metadata.subject,
+                .attribute = slot_metadata.attribute,
+                .value = slot_metadata.value,
+                .numericValue = slot_metadata.numeric_value,
+                .unit = slot_metadata.unit,
+                .aggregationMode = slot_metadata.aggregation_mode,
             });
             if (owned.items.items.len >= limit) break;
         }
@@ -1885,8 +2000,10 @@ pub const Runtime = struct {
         query: []const u8,
         limit: usize,
         scope: Scope,
+        valid_at: ?[]const u8,
         event_window: EventWindow,
         include_evidence: bool,
+        include_debug: bool,
     ) !OwnedItems {
         const query_terms = try normalizedTokens(allocator, query);
         defer freeStringList(allocator, query_terms);
@@ -1901,6 +2018,9 @@ pub const Runtime = struct {
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
             if (!try scope.matchesNode(allocator, node)) continue;
             if (!try nodeWithinEventWindow(allocator, node, event_window)) continue;
+            if (valid_at) |timestamp| {
+                if (!try nodeActiveAt(allocator, node, timestamp)) continue;
+            }
 
             const text = try allocator.dupe(u8, entry.text);
             errdefer allocator.free(text);
@@ -1928,6 +2048,7 @@ pub const Runtime = struct {
                 .validFrom = valid_from,
                 .validTo = valid_to,
                 .evidence = evidence,
+                .includeDebug = include_debug,
             });
         }
         sortItemsByScore(&owned);
@@ -2090,7 +2211,7 @@ pub const Runtime = struct {
         }
     }
 
-    fn appendCoreItems(self: *Runtime, allocator: std.mem.Allocator, owned: *OwnedItems, scope: Scope, include_evidence: bool) !void {
+    fn appendCoreItems(self: *Runtime, allocator: std.mem.Allocator, owned: *OwnedItems, scope: Scope, include_evidence: bool, include_debug: bool) !void {
         const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
         defer freeHits(allocator, hits);
 
@@ -2117,6 +2238,7 @@ pub const Runtime = struct {
                 .score = hit.score,
                 .state = state,
                 .evidence = evidence,
+                .includeDebug = include_debug,
             });
         }
     }
@@ -2330,12 +2452,34 @@ const OwnedItems = struct {
         return false;
     }
 
+    fn filterByQids(self: *OwnedItems, kept_qids: []const []const u8) usize {
+        var dropped: usize = 0;
+        var write_index: usize = 0;
+        for (self.items.items) |item| {
+            if (!stringListContains(kept_qids, item.qid)) {
+                self.freeItem(item);
+                dropped += 1;
+                continue;
+            }
+            self.items.items[write_index] = item;
+            write_index += 1;
+        }
+        self.items.items.len = write_index;
+        return dropped;
+    }
+
     fn freeItem(self: *OwnedItems, item: MessageResult) void {
         self.allocator.free(item.qid);
         self.allocator.free(item.text);
         self.allocator.free(item.state);
         if (item.validFrom) |value| self.allocator.free(value);
         if (item.validTo) |value| self.allocator.free(value);
+        if (item.slotKey) |value| self.allocator.free(value);
+        if (item.subject) |value| self.allocator.free(value);
+        if (item.attribute) |value| self.allocator.free(value);
+        if (item.value) |value| self.allocator.free(value);
+        if (item.unit) |value| self.allocator.free(value);
+        if (item.aggregationMode) |value| self.allocator.free(value);
         freeEvidence(self.allocator, item.evidence);
     }
 };
@@ -2362,6 +2506,13 @@ fn buildAnswerEvidencePacket(allocator: std.mem.Allocator, items: []const Messag
             .validFrom = item.validFrom,
             .validTo = item.validTo,
             .evidenceQids = evidence_qids,
+            .slotKey = item.slotKey,
+            .subject = item.subject,
+            .attribute = item.attribute,
+            .value = item.value,
+            .numericValue = item.numericValue,
+            .unit = item.unit,
+            .aggregationMode = item.aggregationMode,
         };
         written += 1;
     }
@@ -2534,6 +2685,25 @@ const OwnedAuditEvents = struct {
             self.allocator.free(item.rawJson);
         }
         self.items.deinit(self.allocator);
+    }
+};
+
+const SlotMetadata = struct {
+    slot_key: ?[]u8 = null,
+    subject: ?[]u8 = null,
+    attribute: ?[]u8 = null,
+    value: ?[]u8 = null,
+    numeric_value: ?i64 = null,
+    unit: ?[]u8 = null,
+    aggregation_mode: ?[]u8 = null,
+
+    fn deinit(self: SlotMetadata, allocator: std.mem.Allocator) void {
+        if (self.slot_key) |value| allocator.free(value);
+        if (self.subject) |value| allocator.free(value);
+        if (self.attribute) |value| allocator.free(value);
+        if (self.value) |value| allocator.free(value);
+        if (self.unit) |value| allocator.free(value);
+        if (self.aggregation_mode) |value| allocator.free(value);
     }
 };
 
@@ -2842,6 +3012,33 @@ fn readOptionalPropertyString(allocator: std.mem.Allocator, properties_json: []c
         .null => null,
         .string => |string| try allocator.dupe(u8, string),
         else => null,
+    };
+}
+
+fn readOptionalPropertyInt(allocator: std.mem.Allocator, properties_json: []const u8, key: []const u8) !?i64 {
+    var parsed = try std.json.parseFromSlice(Value, allocator, properties_json, .{});
+    defer parsed.deinit();
+    const object = switch (parsed.value) {
+        .object => |object| object,
+        else => return null,
+    };
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .null => null,
+        .integer => |integer| integer,
+        else => null,
+    };
+}
+
+fn slotMetadataForNode(allocator: std.mem.Allocator, node: storage.Node) !SlotMetadata {
+    return .{
+        .slot_key = try readOptionalPropertyString(allocator, node.properties_json, "slotKey"),
+        .subject = try readOptionalPropertyString(allocator, node.properties_json, "subject"),
+        .attribute = try readOptionalPropertyString(allocator, node.properties_json, "attribute"),
+        .value = try readOptionalPropertyString(allocator, node.properties_json, "value"),
+        .numeric_value = try readOptionalPropertyInt(allocator, node.properties_json, "numericValue"),
+        .unit = try readOptionalPropertyString(allocator, node.properties_json, "unit"),
+        .aggregation_mode = try readOptionalPropertyString(allocator, node.properties_json, "aggregationMode"),
     };
 }
 
@@ -3166,7 +3363,13 @@ fn eventTimestampForNode(allocator: std.mem.Allocator, node: storage.Node) !?[]u
     if (std.mem.eql(u8, node.label, "Message")) {
         return readOptionalPropertyString(allocator, node.properties_json, "createdAt");
     }
-    if (isDerivedLabel(node.label)) {
+    if (std.mem.eql(u8, node.label, "Episode")) {
+        return readOptionalPropertyString(allocator, node.properties_json, "eventTime");
+    }
+    if (std.mem.eql(u8, node.label, "Observation")) {
+        return readOptionalPropertyString(allocator, node.properties_json, "createdAt");
+    }
+    if (isSlotMemoryLabel(node.label)) {
         return readOptionalPropertyString(allocator, node.properties_json, "validFrom");
     }
     return null;
@@ -3176,10 +3379,28 @@ fn validFromForNode(allocator: std.mem.Allocator, node: storage.Node) !?[]u8 {
     if (std.mem.eql(u8, node.label, "Message")) {
         return readOptionalPropertyString(allocator, node.properties_json, "createdAt");
     }
-    if (isDerivedLabel(node.label)) {
+    if (std.mem.eql(u8, node.label, "Episode")) {
+        return readOptionalPropertyString(allocator, node.properties_json, "eventTime");
+    }
+    if (std.mem.eql(u8, node.label, "Observation")) {
+        return readOptionalPropertyString(allocator, node.properties_json, "createdAt");
+    }
+    if (isSlotMemoryLabel(node.label)) {
         return readOptionalPropertyString(allocator, node.properties_json, "validFrom");
     }
     return null;
+}
+
+fn nodeActiveAt(allocator: std.mem.Allocator, node: storage.Node, valid_at: []const u8) !bool {
+    if (isSlotMemoryLabel(node.label)) {
+        return derivedActiveAt(allocator, node, valid_at);
+    }
+    const timestamp = try eventTimestampForNode(allocator, node);
+    defer if (timestamp) |value_to_free| allocator.free(value_to_free);
+    if (timestamp) |value| {
+        return !timestampBefore(valid_at, value);
+    }
+    return true;
 }
 
 fn derivedActiveAt(allocator: std.mem.Allocator, node: storage.Node, valid_at: []const u8) !bool {
@@ -3207,7 +3428,7 @@ fn timestampAtOrAfter(left: []const u8, right: []const u8) bool {
 }
 
 fn evidenceForNode(allocator: std.mem.Allocator, node: storage.Node) ![]EvidenceResult {
-    if (!isDerivedLabel(node.label)) {
+    if (!isEvidenceLinkedLabel(node.label)) {
         return allocator.alloc(EvidenceResult, 0);
     }
     const evidence_qid = readPropertyString(allocator, node.properties_json, "evidenceQid") catch {
@@ -3319,6 +3540,13 @@ fn evidenceExpected(item_type: []const u8) bool {
 fn containsWarning(warnings: []const []const u8, expected: []const u8) bool {
     for (warnings) |warning| {
         if (std.mem.eql(u8, warning, expected)) return true;
+    }
+    return false;
+}
+
+fn stringListContains(values: []const []const u8, expected: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, expected)) return true;
     }
     return false;
 }
@@ -3925,6 +4153,34 @@ test "runtime extracts current package manager facts" {
     try std.testing.expect(std.mem.indexOf(u8, historical, "The repo uses pnpm as its package manager.") == null);
 }
 
+test "runtime keeps additive facts current for aggregation" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
+
+    const first = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"lab:counts\"},\"messages\":[{\"role\":\"user\",\"content\":\"I bought 2 train tickets for the retreat.\",\"createdAt\":\"2026-02-01T15:00:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(first);
+    const second = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"lab:counts\"},\"messages\":[{\"role\":\"user\",\"content\":\"I bought 3 more train tickets for the retreat.\",\"createdAt\":\"2026-02-04T15:00:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(second);
+
+    const answer = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"How many train tickets did I buy for the retreat in total?\",\"scope\":{\"projectId\":\"lab:counts\"},\"options\":{\"includeDebug\":true,\"abstainIfWeak\":true,\"logRetrieval\":false}}}",
+    );
+    defer std.testing.allocator.free(answer);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"answer\":\"5\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"aggregationMode\":\"additive\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"slotKey\":\"counts.retreat.train_tickets\"") != null);
+}
+
 test "runtime retrieve assembles categorized context and trace" {
     const in_memory = @import("in_memory_storage.zig");
     var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
@@ -4004,6 +4260,33 @@ test "runtime retrieve filters event windows and token budgets" {
     try std.testing.expect(std.mem.indexOf(u8, budgeted, "\"token_budget_truncated\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, budgeted, "\"no_memory_items\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, budgeted, "\"droppedForBudget\":2") != null);
+}
+
+test "runtime validAt excludes future raw messages" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    var runtime = Runtime.init(adapter_state.adapter(), protocol.Health.default());
+    defer runtime.deinit();
+
+    const old = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"Temporal raw old marker.\",\"createdAt\":\"2026-01-01T10:00:00Z\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(old);
+    const future = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"Temporal raw future marker.\",\"createdAt\":\"2026-03-01T10:00:00Z\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(future);
+
+    const retrieve = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"Temporal raw marker\",\"scope\":{\"projectId\":\"repo:test\"},\"needs\":[\"raw\"],\"time\":{\"validAt\":\"2026-02-01T00:00:00Z\"}}}",
+    );
+    defer std.testing.allocator.free(retrieve);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "Temporal raw old marker.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "Temporal raw future marker.") == null);
 }
 
 test "runtime graph retrieve expands through resolved entities" {

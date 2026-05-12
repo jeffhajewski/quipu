@@ -209,6 +209,7 @@ def compact_answer_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
     if not trace:
         return {}
     validation = trace.get("validation")
+    evidence_gate = trace.get("evidenceGate") if isinstance(trace.get("evidenceGate"), Mapping) else {}
     return {
         "strategy": trace.get("strategy"),
         "answerable": trace.get("answerable"),
@@ -216,6 +217,12 @@ def compact_answer_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
         "candidateCount": len(trace.get("candidateAnswers", [])) if isinstance(trace.get("candidateAnswers"), list) else 0,
         "validationStatus": validation.get("status") if isinstance(validation, Mapping) else None,
         "validationWarnings": validation.get("warnings", []) if isinstance(validation, Mapping) else [],
+        "evidenceGate": {
+            "querySlots": evidence_gate.get("querySlots", []) if isinstance(evidence_gate, Mapping) else [],
+            "warnings": evidence_gate.get("warnings", []) if isinstance(evidence_gate, Mapping) else [],
+            "keptCount": len(evidence_gate.get("keptQids", [])) if isinstance(evidence_gate.get("keptQids"), list) else 0,
+            "rejectedCount": len(evidence_gate.get("rejectedQids", [])) if isinstance(evidence_gate.get("rejectedQids"), list) else 0,
+        },
     }
 
 

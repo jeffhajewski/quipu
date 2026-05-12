@@ -74,6 +74,12 @@ test("memory.answer fixture includes optional answerTrace", () => {
   assert.equal(fixture.request.params.options.includeDebug, true);
 });
 
+test("method schema accepts slot metadata and evidence gate fields", () => {
+  const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
+  assert.ok(schema.$defs.memoryItem.properties.slotKey);
+  assert.ok(schema.$defs.answerTrace.properties.evidenceGate);
+});
+
 test("invalid request fixture is rejected", () => {
   const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.retrieve.invalid_request.json"), "utf8"));
   assert.throws(() => validateJsonRpcRequest(fixture.request), QuipuProtocolError);

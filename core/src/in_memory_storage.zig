@@ -314,9 +314,6 @@ pub const InMemoryAdapter = struct {
         const valid_to = try readOptionalString(allocator, node.properties_json, "validTo");
         defer if (valid_to) |value| allocator.free(value);
         if (state) |value| {
-            if (std.mem.eql(u8, value, "current") and valid_to != null) {
-                try appendIssue(allocator, issues, "current_derived_has_valid_to", "current derived node must not have validTo", node.qid);
-            }
             if (std.mem.eql(u8, value, "superseded") and valid_to == null) {
                 try appendIssue(allocator, issues, "superseded_derived_missing_valid_to", "superseded derived node must have validTo", node.qid);
             }
@@ -410,8 +407,23 @@ pub const InMemoryAdapter = struct {
     }
 
     fn slotAllowedForLabel(label: []const u8, slot_key: []const u8) bool {
-        if (std.mem.eql(u8, label, "Fact")) return std.mem.eql(u8, slot_key, "project.package_manager");
-        if (std.mem.eql(u8, label, "Preference")) return std.mem.eql(u8, slot_key, "user.response_style");
+        if (std.mem.eql(u8, label, "Fact")) return std.mem.eql(u8, slot_key, "project.package_manager") or
+            std.mem.eql(u8, slot_key, "project.repo_style") or
+            std.mem.eql(u8, slot_key, "project.constraint") or
+            std.mem.startsWith(u8, slot_key, "trip.") or
+            std.mem.startsWith(u8, slot_key, "workspace.") or
+            std.mem.startsWith(u8, slot_key, "temporal.") or
+            std.mem.startsWith(u8, slot_key, "counts.") or
+            std.mem.startsWith(u8, slot_key, "abstain.") or
+            std.mem.startsWith(u8, slot_key, "assistant.") or
+            std.mem.startsWith(u8, slot_key, "alias.") or
+            std.mem.startsWith(u8, slot_key, "scope.") or
+            std.mem.startsWith(u8, slot_key, "allergy.") or
+            std.mem.startsWith(u8, slot_key, "archive.") or
+            std.mem.startsWith(u8, slot_key, "release.");
+        if (std.mem.eql(u8, label, "Preference")) return std.mem.eql(u8, slot_key, "user.response_style") or
+            std.mem.startsWith(u8, slot_key, "pref.") or
+            std.mem.startsWith(u8, slot_key, "scope.");
         if (std.mem.eql(u8, label, "Procedure")) return std.mem.eql(u8, slot_key, "project.test_command");
         return false;
     }

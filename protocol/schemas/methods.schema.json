@@ -54,6 +54,16 @@
         },
         "validFrom": { "type": ["string", "null"], "format": "date-time" },
         "validTo": { "type": ["string", "null"], "format": "date-time" },
+        "slotKey": { "type": "string" },
+        "subject": { "type": "string" },
+        "attribute": { "type": "string" },
+        "value": { "type": "string" },
+        "numericValue": { "type": "integer" },
+        "unit": { "type": "string" },
+        "aggregationMode": {
+          "type": "string",
+          "enum": ["single_value", "additive"]
+        },
         "evidence": {
           "type": "array",
           "items": { "$ref": "#/$defs/evidence" }
@@ -198,6 +208,37 @@
               "items": { "type": "string" }
             }
           }
+        },
+        "evidenceGate": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": ["querySlots", "keptQids", "rejectedQids", "warnings"],
+              "additionalProperties": false,
+              "properties": {
+                "querySlots": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "keptQids": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/qid" }
+                },
+                "rejectedQids": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/qid" }
+                },
+                "warnings": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": ["slot_mismatch", "weak_slot_support", "stale_candidate", "temporal_mismatch"]
+                  }
+                }
+              }
+            },
+            { "type": "null" }
+          ]
         }
       }
     },

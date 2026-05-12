@@ -69,6 +69,8 @@ class ProtocolFixtureTests(unittest.TestCase):
         self.assertTrue(expected_defs.issubset(defs))
         self.assertIn("answerTrace", defs)
         self.assertIn("answerTrace", defs["memoryAnswerResult"]["properties"])
+        self.assertIn("evidenceGate", defs["answerTrace"]["properties"])
+        self.assertIn("slotKey", defs["memoryItem"]["properties"])
         self.assertIn("abstainIfWeak", defs["memoryAnswerParams"]["properties"]["options"]["properties"])
 
     def test_fixtures_cover_public_methods(self):
