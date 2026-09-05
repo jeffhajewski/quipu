@@ -1,0 +1,17 @@
+{
+  "career": {
+    "offer": {"assertions": [{"text": "The user declined the Helix workshop.", "messageIndex": 0, "quote": "I declined the Helix workshop"}]},
+    "residence": {"assertions": [
+      {"text": "The user lives in Pinehaven as of February 2026.", "messageIndex": 0, "quote": "I live in Pinehaven now."},
+      {"text": "The user lived in Riverton from 2015 to 2019.", "messageIndex": 0, "quote": "I lived in Riverton from 2015 to 2019."}
+    ]},
+    "future": {"assertions": [{"text": "The user moved to Lakeford in August 2026.", "messageIndex": 0, "quote": "I moved to Lakeford in August 2026."}]}
+  },
+  "projects": {
+    "cedar": {"assertions": [
+      {"text": "The Cedar TypeScript SDK uses the npm package manager.", "messageIndex": 0, "quote": "Use npm for Cedar's TypeScript SDK."},
+      {"text": "The assistant reported successfully validating the SDK with npm run build.", "messageIndex": 1, "quote": "The SDK validation command we used successfully was npm run build."}
+    ]},
+    "atlas": {"assertions": [{"text": "The Atlas SDK uses pnpm and is validated with pnpm test.", "messageIndex": 0, "quote": "Use pnpm for Atlas. Run pnpm test to validate its SDK."}]}
+  }
+}

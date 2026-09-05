@@ -1,6 +1,7 @@
 # Memory architecture experiments
 
-Status: planned; E1 implementation started September 5, 2026.
+Status: E1 runner and fictional provider pilot completed September 5, 2026;
+held-out E1 evaluation and E2–E4 remain pending.
 
 These experiments test the event-sourced design proposal before changing
 Quipu's runtime architecture. Preserved evidence, scoped access, validated
@@ -198,8 +199,8 @@ source evidence. Do not require Quipu's internal graph layout. Review existing
 | Milestone | Status | Exit criterion |
 | --- | --- | --- |
 | Shared protocol and four experiment definitions | Written | Reviewable hypotheses, controls, metrics, decisions |
-| E1 independent runner and smoke fixtures | In progress | Real representations; no gold leakage; budgeted traces |
-| E1 provider-backed pilot | Pending | Frozen extraction; all three arms; separate reader/grade metrics |
+| E1 independent runner and smoke fixtures | Implemented | Real representations; no gold leakage; budgeted traces |
+| E1 provider-backed pilot | Completed on fictional smoke data | Frozen extraction; all three arms; separate reader/grade metrics |
 | E1 held-out public benchmark | Pending | Official grading, paired uncertainty, complete usage accounting |
 | E2 predicate-history prototype | Pending | E1 baseline frozen; temporal semantics specified |
 | E3 resolution comparison | Pending | Labeled candidate pairs and conservative baseline |
@@ -208,3 +209,25 @@ source evidence. Do not require Quipu's internal graph layout. Review existing
 Promote successful behavior into `SPEC.md` and the daemon only after reviewing
 the experiment. A smoke run or small provider pilot does not select an
 architecture. Log negative findings and unresolved cases alongside wins.
+
+### First E1 pilot: September 5, 2026
+
+The [runner and commands](../evals/experiments/README.md) now implement all three
+E1 representations, BM25/real-vector hybrid retrieval, frozen extraction and
+provider responses, an actual reader-token budget, and separate answer/evidence
+metrics. The offline fixture deliberately loses a causal detail while preserving
+its provenance; it reports no answer accuracy.
+
+The first provider pilot used five entirely fictional questions, GPT-4o-mini
+for extraction/reading, GPT-4o for the pilot grader, text-embedding-3-small for
+vectors, and a 256-token context limit with `o200k_base`. All three arms and the
+budgeted oracle-source diagnostic answered 5/5 correctly, with no runtime
+errors. This is an end-to-end harness check, not evidence favoring any arm.
+
+Local artifacts are in `artifacts/experiments/e1-provider-pilot/`; a replay of
+the frozen responses with the final runner is in
+`artifacts/experiments/e1-provider-replay/`. Artifacts and provider caches remain
+ignored. The next E1 milestone is a fixed LongMemEval-S development slice with
+official grading and manually reviewed evidence sufficiency, followed by a
+held-out paired comparison. E2–E4 remain specified experiments, not implemented
+capabilities.

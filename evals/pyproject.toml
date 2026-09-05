@@ -5,10 +5,14 @@ description = "Evaluation harness for Quipu memory"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 
+[project.optional-dependencies]
+experiments = ["tiktoken>=0.7"]
+
 [project.scripts]
 quipu-eval = "quipu_evals.runner:main"
 quipu-core-eval = "quipu_evals.core_runner:main"
 quipu-benchmark = "quipu_evals.benchmarks:main"
+quipu-experiment-e1 = "quipu_evals.representation_experiment:main"
 
 [build-system]
 requires = ["hatchling"]

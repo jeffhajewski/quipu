@@ -1,5 +1,10 @@
 # Quipu Evals
 
+For the controlled architecture study, see
+[`experiments/README.md`](experiments/README.md). E1 compares actual raw passages,
+extracted assertions, and their combination independently of the fixture
+baseline registry. `just experiment-e1-smoke` runs its offline harness check.
+
 Benchmark harness for Quipu memory.
 
 ## Current Suites

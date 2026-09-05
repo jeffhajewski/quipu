@@ -1,0 +1,36 @@
+{
+  "name": "representation_smoke", "version": "0.1.0",
+  "metadata": {"source": "entirely fictional E1 harness fixtures authored for this experiment; no real people, conversations, or projects", "split": "smoke", "fullDataset": false},
+  "suites": ["representation", "temporal", "scope", "abstention"],
+  "scenarios": [
+    {
+      "scenarioId": "career", "metadata": {}, "actors": [], "forgetOps": [],
+      "events": [
+        {"eventId": "offer", "time": "2026-01-01T00:00:00Z", "type": "message", "scope": {"user": "synthetic_nora"}, "groundTruthMemories": [],
+         "messages": [{"role": "user", "content": "I declined the Helix workshop because its evening sessions conflicted with my orchestra rehearsals. The course material looked excellent."}]},
+        {"eventId": "residence", "time": "2026-02-01T00:00:00Z", "type": "message", "scope": {"user": "synthetic_nora"}, "groundTruthMemories": [],
+         "messages": [{"role": "user", "content": "I live in Pinehaven now. Before Pinehaven, I lived in Riverton from 2015 to 2019. I have not told you where I lived in 2020."}]},
+        {"eventId": "future", "time": "2026-09-01T00:00:00Z", "type": "message", "scope": {"user": "synthetic_nora"}, "groundTruthMemories": [],
+         "messages": [{"role": "user", "content": "I moved to Lakeford in August 2026."}]}
+      ],
+      "queries": [
+        {"queryId": "reason", "time": "2026-03-01T00:00:00Z", "query": "Why did I turn down the Helix course?", "scope": {"user": "synthetic_nora"}, "expectedAnswer": "The evening sessions conflicted with orchestra rehearsals.", "expectedEvidenceEventIds": ["offer"], "mustNotUseEventIds": [], "category": "reason"},
+        {"queryId": "current", "time": "2026-03-01T00:00:00Z", "query": "Where do I live now?", "scope": {"user": "synthetic_nora"}, "expectedAnswer": "Pinehaven", "expectedEvidenceEventIds": ["residence"], "mustNotUseEventIds": ["future"], "category": "temporal"},
+        {"queryId": "gap", "time": "2026-03-01T00:00:00Z", "query": "Where did I live in 2020?", "scope": {"user": "synthetic_nora"}, "expectedAnswer": "I don't know.", "expectedEvidenceEventIds": [], "mustNotUseEventIds": ["future"], "category": "abstention", "shouldAbstain": true}
+      ]
+    },
+    {
+      "scenarioId": "projects", "metadata": {}, "actors": [], "forgetOps": [],
+      "events": [
+        {"eventId": "cedar", "time": "2026-01-01T00:00:00Z", "type": "message", "scope": {"project": "synthetic_cedar"}, "groundTruthMemories": [],
+         "messages": [{"role": "user", "content": "Use npm for Cedar's TypeScript SDK."}, {"role": "assistant", "content": "The SDK validation command we used successfully was npm run build."}]},
+        {"eventId": "atlas", "time": "2026-02-01T00:00:00Z", "type": "message", "scope": {"project": "atlas"}, "groundTruthMemories": [],
+         "messages": [{"role": "user", "content": "Use pnpm for Atlas. Run pnpm test to validate its SDK."}]}
+      ],
+      "queries": [
+        {"queryId": "manager", "time": "2026-03-01T00:00:00Z", "query": "Which package manager should I use for the Cedar SDK?", "scope": {"project": "synthetic_cedar"}, "expectedAnswer": "npm", "expectedEvidenceEventIds": ["cedar"], "mustNotUseEventIds": ["atlas"], "category": "scope"},
+        {"queryId": "command", "time": "2026-03-01T00:00:00Z", "query": "What exact SDK validation command did the assistant report using?", "scope": {"project": "synthetic_cedar"}, "expectedAnswer": "npm run build", "expectedEvidenceEventIds": ["cedar"], "mustNotUseEventIds": ["atlas"], "category": "assistant-evidence"}
+      ]
+    }
+  ]
+}

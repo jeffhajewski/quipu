@@ -22,6 +22,12 @@ sdk-smoke:
 eval-smoke:
     PYTHONPATH=evals/src python3 -m quipu_evals.runner evals/suites/quipu_synthetic.yaml
 
+experiment-e1-smoke:
+    PYTHONPATH=evals/src python3 -m quipu_evals.representation_experiment evals/suites/experiments/representation_smoke.json --assertion-fixture evals/fixtures/representation_assertions.json
+
+experiment-e1-test:
+    python3 -m unittest discover -s evals/tests -p test_representation_experiment.py
+
 eval-core-smoke:
     PYTHONPATH=evals/src python3 -m quipu_evals.core_runner evals/suites/quipu_synthetic.yaml --strict
 
