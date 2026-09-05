@@ -1,5 +1,10 @@
 # Evals
 
+The controlled architecture study is specified in
+[`memory-experiments.md`](memory-experiments.md): raw versus assertion retrieval,
+predicate histories, selective resolution, and disposable summaries. These
+experiments are separate from the deterministic fixture ablations below.
+
 The eval harness starts with the shared scenario schema in `evals/suites/quipu_synthetic.yaml`. The current suite file is JSON-compatible YAML so the scaffold can load it with Python's standard library before external YAML dependencies are introduced.
 
 Quipu reports three result classes:
