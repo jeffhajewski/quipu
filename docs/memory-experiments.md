@@ -1,7 +1,11 @@
 # Memory architecture experiments
 
-Status: E1 runner and fictional provider pilot completed September 5, 2026;
-held-out E1 evaluation and E2–E4 remain pending.
+Status: E1 directional held-out study completed September 5, 2026: 42 questions,
+five treatments, two budgets, zero failed cases. See
+[results and architecture decision](memory-experiment-results.md).
+Retain directly searchable raw evidence; assertion-only replacement lost
+substantially, while assertion-assisted retrieval needs further confirmation.
+E2–E4 remain pending; no SOTA or production-runtime result is claimed.
 
 These experiments test the event-sourced design proposal before changing
 Quipu's runtime architecture. Preserved evidence, scoped access, validated
