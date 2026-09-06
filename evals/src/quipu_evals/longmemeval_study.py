@@ -314,7 +314,7 @@ def evaluate_one(scenario, cache, output, budgets, arms, formatter, tokenizer):
     for arm in arms:
         if errors and arm in ("assertions", "combined", "assertion_keys"):
             raise ValueError(f"{len(errors)} episodes have not completed extraction")
-        pool = raw if arm in ("raw", "oracle_source", "oracle_turn") else assertions if arm == "assertions" else raw + assertions
+        pool = raw if arm in ("raw", "raw_message", "oracle_source", "oracle_turn") else assertions if arm == "assertions" else raw + assertions
         c.stage = "embedding"
         started = time.perf_counter()
         if arm == "oracle_source":
@@ -325,14 +325,14 @@ def evaluate_one(scenario, cache, output, budgets, arms, formatter, tokenizer):
         else:
             ranked = rank(query.query, pool, c)
         retrieval_ms = (time.perf_counter() - started) * 1000
-        if arm == "assertion_keys":
+        if arm in ("assertion_keys", "raw_message"):
             # Assertions are extra search keys; readers receive original source messages.
             raw_by_message = defaultdict(list)
             for p in raw:
                 raw_by_message[(p.event_id, p.message_index)].append(p)
             expanded, seen = [], set()
             for p, score in ranked:
-                for evidence in ([p] if p.kind == "raw" else raw_by_message[(p.event_id, p.message_index)]):
+                for evidence in ([p] if p.kind == "raw" and arm != "raw_message" else raw_by_message[(p.event_id, p.message_index)]):
                     if evidence.id not in seen:
                         expanded.append((evidence, score))
                         seen.add(evidence.id)
@@ -403,7 +403,7 @@ def main():
     parser.add_argument("--cache", type=Path, default=Path("artifacts/experiments/e1-study-cache"))
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--budgets", type=int, nargs="+", default=[1024, 4096])
-    parser.add_argument("--arms", nargs="+", choices=["raw", "assertions", "combined", "assertion_keys", "oracle_source", "oracle_turn"], default=["raw", "assertions", "combined", "oracle_source"])
+    parser.add_argument("--arms", nargs="+", choices=["raw", "raw_message", "assertions", "combined", "assertion_keys", "oracle_source", "oracle_turn"], default=["raw", "assertions", "combined", "oracle_source"])
     parser.add_argument("--upstream", type=Path, default=Path("artifacts/experiments/LongMemEval-upstream/src/evaluation/evaluate_qa.py"))
     args = parser.parse_args()
     if args.stage == "prepare":

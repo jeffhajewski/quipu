@@ -75,3 +75,9 @@ retrieval/packing settings unchanged. The dev and held-out caches are separate.
 The held-out split has 42 questions and 1,995 sessions. Its ingestion is
 query-blind and can run ahead of evaluation. An oracle-turn diagnostic remains
 separate from these treatments.
+
+Before opening held-out scores, add one confound control: `raw_message` expands
+a raw retrieval hit to all chunks of its source message, without assertion
+extraction. Development showed an ordinal-list question benefiting from source
+expansion. This control distinguishes assertion-assisted matching from a simpler
+context-assembly improvement. It uses the same budgets, reader and grader.
