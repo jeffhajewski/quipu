@@ -2214,23 +2214,7 @@ pub const Runtime = struct {
             else => |e| return e,
         };
         defer freeHits(allocator, vector_hits);
-        // RRF is rank based, so each channel must be in score order first.
-        sortHitsByScore(fts_hits);
-        sortHitsByScore(vector_hits);
-
-        var merged = std.ArrayList(storage.SearchHit).empty;
-        errdefer {
-            for (merged.items) |hit| allocator.free(hit.qid);
-            merged.deinit(allocator);
-        }
-        try appendRrfHits(allocator, &merged, fts_hits, 1.0);
-        try appendRrfHits(allocator, &merged, vector_hits, 1.0);
-        sortHitsByScore(merged.items);
-        if (merged.items.len > limit) {
-            for (merged.items[limit..]) |hit| allocator.free(hit.qid);
-            merged.shrinkRetainingCapacity(limit);
-        }
-        return merged.toOwnedSlice(allocator);
+        return fuseRankedHits(allocator, &.{ fts_hits, vector_hits }, limit);
     }
 
     fn graphSearch(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, limit: usize) ![]storage.SearchHit {
@@ -3871,6 +3855,27 @@ fn freeStreamEntries(allocator: std.mem.Allocator, entries: []storage.StreamEntr
     allocator.free(entries);
 }
 
+/// Reciprocal-rank fusion (k = 60) of several channels. RRF is rank based,
+/// so each channel is put in descending score order before its ranks count.
+/// Returns at most `limit` fused hits, sorted by fused score.
+fn fuseRankedHits(allocator: std.mem.Allocator, channels: []const []storage.SearchHit, limit: usize) ![]storage.SearchHit {
+    var merged = std.ArrayList(storage.SearchHit).empty;
+    errdefer {
+        for (merged.items) |hit| allocator.free(hit.qid);
+        merged.deinit(allocator);
+    }
+    for (channels) |channel| {
+        sortHitsByScore(channel);
+        try appendRrfHits(allocator, &merged, channel, 1.0);
+    }
+    sortHitsByScore(merged.items);
+    if (merged.items.len > limit) {
+        for (merged.items[limit..]) |hit| allocator.free(hit.qid);
+        merged.shrinkRetainingCapacity(limit);
+    }
+    return merged.toOwnedSlice(allocator);
+}
+
 fn appendRrfHits(allocator: std.mem.Allocator, merged: *std.ArrayList(storage.SearchHit), hits: []const storage.SearchHit, weight: f32) !void {
     for (hits, 0..) |hit, rank| {
         const fused_score = weight * reciprocalRank(rank);
@@ -4902,6 +4907,34 @@ fn expectChunksReassemble(allocator: std.mem.Allocator, content: []const u8, end
         start = end;
     }
     try std.testing.expectEqualStrings(content, rebuilt.items);
+}
+
+test "rrf fuses channels by rank after sorting each by score" {
+    const allocator = std.testing.allocator;
+    // Channels arrive out of score order; fusion must rank by score, not position.
+    var lexical = [_]storage.SearchHit{
+        .{ .qid = "b", .score = 1.0 },
+        .{ .qid = "a", .score = 9.0 },
+        .{ .qid = "c", .score = 4.0 },
+    };
+    var semantic = [_]storage.SearchHit{
+        .{ .qid = "c", .score = 0.4 },
+        .{ .qid = "a", .score = 0.9 },
+    };
+    const fused = try fuseRankedHits(allocator, &.{ &lexical, &semantic }, 10);
+    defer freeHits(allocator, fused);
+    try std.testing.expectEqual(@as(usize, 3), fused.len);
+    try std.testing.expectEqualStrings("a", fused[0].qid);
+    try std.testing.expectEqualStrings("c", fused[1].qid);
+    try std.testing.expectEqualStrings("b", fused[2].qid);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0 / 61.0), fused[0].score, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0 / 62.0), fused[1].score, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0 / 63.0), fused[2].score, 1e-6);
+
+    const top = try fuseRankedHits(allocator, &.{ &lexical, &semantic }, 1);
+    defer freeHits(allocator, top);
+    try std.testing.expectEqual(@as(usize, 1), top.len);
+    try std.testing.expectEqualStrings("a", top[0].qid);
 }
 
 test "estimate item tokens uses bytes over 3.5 plus line overhead" {
