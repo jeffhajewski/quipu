@@ -16,10 +16,11 @@ export PATH="$HOME/.quipu/bin:$PATH"
 quipu --db "$HOME/.quipu/memory.lattice" health
 ```
 
-The installer builds the Zig core against a system-installed LatticeDB native
-library for durable graph, full-text, vector, and stream storage. You need
-`git`, `zig`, `lattice.h`, and `liblattice` installed; set `LATTICE_INCLUDE`
-and `LATTICE_LIB_DIR` when they are not in standard system paths.
+The installer builds the Zig core against a system-installed LatticeDB `0.15.0`
+native library for durable graph, full-text, vector, and stream storage. You
+need `git`, `zig`, `lattice.h`, and `liblattice` installed; set
+`LATTICE_INCLUDE` and `LATTICE_LIB_DIR` when they are not in standard system
+paths.
 
 ## Why Quipu
 
@@ -128,8 +129,10 @@ Current external benchmark status:
 - Lattice graph retrieval with deterministic entity resolution is wired through
   the benchmark harness and passes the LoCoMo graph smoke with verification and
   trace artifacts under `artifacts/benchmarks/locomo-graph-smoke/`. The full
-  LoCoMo graph+ER run is blocked on LatticeDB `0.6.0` `LatticeIo`/close issues
+  LoCoMo graph+ER run was blocked on LatticeDB `0.6.0` `LatticeIo`/close issues
   with large-message writes, stream rereads, and dense edge materialization.
+  The LatticeDB `0.15.0` adapter writes 64KB values, appends streams without
+  rereading them, and stores edges natively; the run has not been repeated yet.
 - Local BM25 on the same normalized suite: exact 24.12%, evidence recall
   50.42%. Full context remains the local upper bound at exact 42.80% and
   evidence recall 99.70%.
@@ -306,8 +309,10 @@ Agent runtime / app
 The Zig core owns memory semantics. Storage adapters provide graph records,
 full-text search, vector search, streams, transactions, and verification.
 
-The LatticeDB adapter stores Quipu nodes as durable graph nodes with public qids,
-creates provenance edges, indexes text with Lattice FTS, stores deterministic
+The LatticeDB adapter stores Quipu nodes as durable graph nodes with public qids
+under a shared `QuipuNode` label, stores provenance edges as native Lattice
+edges, ranks text with BM25 over one declared full-text index of each searchable
+node's `searchText`, `content`, `text`, or `name`, stores deterministic
 `lattice_hash_embed` or OpenAI-compatible provider vectors for search, and
 publishes events through Lattice native durable streams.
 
@@ -391,14 +396,19 @@ just benchmark-locomo-full /path/to/locomo10.json
 just benchmark-locomo-download
 ```
 
-Build with an explicit system LatticeDB install:
+Build with an explicit system LatticeDB `0.15.0` install:
 
 ```bash
+git clone --depth 1 --branch v0.15.0 https://github.com/jeffhajewski/latticedb.git
+(cd latticedb && zig build -Doptimize=ReleaseSafe)
 cd core
 zig build \
-  -Dlattice-include=/path/to/latticedb/include \
-  -Dlattice-lib=/path/to/latticedb/lib
+  -Dlattice-include=/path/to/latticedb/zig-out/include \
+  -Dlattice-lib=/path/to/latticedb/zig-out/lib
 ```
+
+Build LatticeDB with `-Doptimize=ReleaseSafe` (as CI does) for anything you
+time: a Debug `liblattice` ingests about 35 times slower.
 
 ## Repository Layout
 
