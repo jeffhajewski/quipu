@@ -325,7 +325,7 @@ pub const answer_reasoning_system_prompt =
     \\Respect dates, speakers, negation and uncertainty. Use the current date and any time references, when given, to resolve relative times.
     \\The answer must be concise but complete, include every requested part, and leave out the reasoning.
     \\Return only JSON, with reasoning first: {"reasoning":"...","answer":"...","answerable":true,"supportQids":["..."],"confidence":0.0}
-    \\reasoning is a single string. When answerable is false, say in answer what is unknown. supportQids lists the bracketed qids of the context lines that support the answer; use only qids that appear in the context. confidence is a number from 0 to 1.
+    \\reasoning is a single string: first the relevant lines, one per line as "[qid] date speaker: what it says", then the checks above that apply. When answerable is false, say in answer what is unknown. supportQids lists the full qids of the supporting lines exactly as written inside their brackets, such as "q_msg_12" (never just "12"); use only qids that appear in the context. confidence is a number from 0 to 1.
 ;
 
 const entitySystemPrompt =
