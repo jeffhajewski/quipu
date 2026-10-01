@@ -13,7 +13,8 @@
       "needs": ["procedural"],
       "options": {
         "includeDebug": true,
-        "logRetrieval": false
+        "logRetrieval": false,
+        "rerank": false
       }
     }
   },

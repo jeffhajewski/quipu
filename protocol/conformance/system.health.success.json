@@ -30,6 +30,12 @@
       "workers": {
         "extractor": "unavailable",
         "consolidator": "unavailable"
+      },
+      "capabilities": {
+        "reranker": {
+          "configured": false,
+          "model": null
+        }
       }
     }
   }

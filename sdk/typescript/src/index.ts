@@ -88,6 +88,10 @@ export type RetrieveRequest = {
     logRetrieval?: boolean;
     abstainIfWeak?: boolean;
     format?: "prompt" | "json";
+    /** Set false to bypass a configured reranker for this request. */
+    rerank?: boolean;
+    /** Leading candidates sent to a configured reranker (default 50). */
+    rerankCandidates?: number;
   };
 };
 
@@ -176,6 +180,14 @@ function optionalString(value: Record<string, unknown>, key: string, label: stri
 function optionalBoolean(value: Record<string, unknown>, key: string, label: string): void {
   if (key in value && typeof value[key] !== "boolean") {
     throw new QuipuProtocolError(`${label}.${key} must be a boolean`);
+  }
+}
+
+function validateRerankCandidates(options: Record<string, unknown>): void {
+  if (!("rerankCandidates" in options)) return;
+  const count = options.rerankCandidates;
+  if (!Number.isInteger(count) || Number(count) < 1) {
+    throw new QuipuProtocolError("options.rerankCandidates must be a positive integer");
   }
 }
 
@@ -296,15 +308,25 @@ function validateRetrieve(params: Record<string, unknown>): void {
     assertObject(params.options, "options");
     rejectExtra(
       params.options,
-      new Set(["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format"]),
+      new Set([
+        "includeEvidence",
+        "includeDebug",
+        "logTrace",
+        "logRetrieval",
+        "abstainIfWeak",
+        "format",
+        "rerank",
+        "rerankCandidates",
+      ]),
       "options",
     );
-    for (const key of ["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak"]) {
+    for (const key of ["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "rerank"]) {
       optionalBoolean(params.options, key, "options");
     }
     if ("format" in params.options && !["prompt", "json"].includes(String(params.options.format))) {
       throw new QuipuProtocolError("options.format is invalid");
     }
+    validateRerankCandidates(params.options);
   }
 }
 
@@ -338,15 +360,25 @@ function validateAnswer(params: Record<string, unknown>): void {
     assertObject(params.options, "options");
     rejectExtra(
       params.options,
-      new Set(["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format"]),
+      new Set([
+        "includeEvidence",
+        "includeDebug",
+        "logTrace",
+        "logRetrieval",
+        "abstainIfWeak",
+        "format",
+        "rerank",
+        "rerankCandidates",
+      ]),
       "options",
     );
-    for (const key of ["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak"]) {
+    for (const key of ["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "rerank"]) {
       optionalBoolean(params.options, key, "options");
     }
     if ("format" in params.options && !["prompt", "json"].includes(String(params.options.format))) {
       throw new QuipuProtocolError("options.format is invalid");
     }
+    validateRerankCandidates(params.options);
   }
 }
 

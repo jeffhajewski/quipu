@@ -136,6 +136,14 @@ def _optional_bool(value: Mapping[str, Any], key: str, label: str) -> None:
         raise QuipuProtocolError(f"{label}.{key} must be a boolean")
 
 
+def _validate_rerank_candidates(options: Mapping[str, Any]) -> None:
+    if "rerankCandidates" not in options:
+        return
+    count = options["rerankCandidates"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise QuipuProtocolError("options.rerankCandidates must be a positive integer")
+
+
 def _validate_scope(value: Any, label: str = "scope") -> None:
     scope = _ensure_object(value, label)
     _reject_extra(scope, SCOPE_KEYS, label)
@@ -233,13 +241,15 @@ def _validate_retrieve(params: Mapping[str, Any]) -> None:
         options = _ensure_object(params["options"], "options")
         _reject_extra(
             options,
-            {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format"},
+            {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format",
+             "rerank", "rerankCandidates"},
             "options",
         )
-        for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak"):
+        for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "rerank"):
             _optional_bool(options, key, "options")
         if "format" in options and options["format"] not in {"prompt", "json"}:
             raise QuipuProtocolError("options.format is invalid")
+        _validate_rerank_candidates(options)
 
 
 def _validate_answer(params: Mapping[str, Any]) -> None:
@@ -268,13 +278,15 @@ def _validate_answer(params: Mapping[str, Any]) -> None:
         options = _ensure_object(params["options"], "options")
         _reject_extra(
             options,
-            {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format"},
+            {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format",
+             "rerank", "rerankCandidates"},
             "options",
         )
-        for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak"):
+        for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "rerank"):
             _optional_bool(options, key, "options")
         if "format" in options and options["format"] not in {"prompt", "json"}:
             raise QuipuProtocolError("options.format is invalid")
+        _validate_rerank_candidates(options)
 
 
 def _validate_search(params: Mapping[str, Any]) -> None:
