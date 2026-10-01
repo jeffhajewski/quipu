@@ -53,6 +53,37 @@ Correct answers out of 70, at 1,024 / 4,096 tokens.
 
 Every run completed all 70 questions with no runtime errors.
 
+### Top-tier reader
+
+The default configuration (`d1d5445`) was run with
+`anthropic/claude-sonnet-5.5` as reader. Retrieval and contexts are identical
+to the GPT-4o-mini rows above; the judge is unchanged.
+
+| Run | 1,024 | 4,096 | Paired comparison |
+| --- | ---: | ---: | --- |
+| Default + GPT-4o-mini | 53 (75.7%) | 50 (71.4%) | — |
+| Default + Sonnet 5.5 | 58 (82.9%) | 61 (87.1%) | vs GPT-4o-mini: 8/3 wins/losses (p=.23); 13/2 (p=.007) |
+| Default + Sonnet 5.5 + reader reasoning | 58 (82.9%) | 63 (90.0%) | vs Sonnet 5.5 without reasoning: 2/2 (p=1.0); 3/1 (p=.63) |
+
+Per-category results at 4K, Sonnet 5.5 vs GPT-4o-mini, out of 10:
+
+| Category | Sonnet 5.5 | GPT-4o-mini |
+| --- | ---: | ---: |
+| Abstention | 10 | 9 |
+| Knowledge update | 9 | 5 |
+| Single-session preference | 10 | 5 |
+| Single-session assistant | 9 | 8 |
+| Single-session user | 10 | 10 |
+| Multi-session | 6 | 5 |
+| Temporal reasoning | 7 | 8 |
+
+With the stronger reader, 4K beats 1K, and the knowledge-update and preference
+failures largely disappear. The rest of the gap is concentrated in
+multi-session aggregation and temporal reasoning.
+
+Answer cost per arm was $0.41 at 1K and $1.05 at 4K, or $0.58 and $1.21 with
+reasoning. Answer latency p50 was 2.7–3.2 s, or 3.9–4.1 s with reasoning.
+
 ## What we learned
 
 - **The reader is now the bottleneck, not retrieval.** At 4K, 93% of gold
@@ -78,10 +109,11 @@ Every run completed all 70 questions with no runtime errors.
 
 ## Cost
 
-The sprint's provider spend was about $1.80 in total:
+The sprint's provider spend was about $5.40 in total:
 
 - $0.27 for the E1 reference,
-- $1.50 across the daemon harness runs,
+- $1.50 across the GPT-4o-mini daemon harness runs,
+- about $3.60 for the two Sonnet 5.5 arms,
 - the rest on agent smoke tests.
 
 Embeddings cost about $0.13 per uncached full slice. A GPT-4o-mini reader with
@@ -89,8 +121,13 @@ the GPT-4o judge costs about $0.05–0.15 per arm.
 
 ## Open items
 
-- Run a top-tier reader on the dev slice, then the frozen configuration on all
-  500 questions, and a whole-history baseline with that reader.
+- Run the frozen configuration on all 500 questions. Report the 374 questions
+  that neither E1 nor this sprint used separately from the full set. Add a
+  whole-history baseline with the same reader.
+- Multi-session aggregation (6/10 with Sonnet 5.5) is the weakest category.
+  At 4K, all gold turns are in context for 88% of questions. Larger budgets
+  and fact keys pointing back to raw evidence (E1's `assertion_keys` arm) are
+  the next retrieval levers.
 - The runtime's `fullTextSearch("", 1000)` enumeration cap still bounds
   supersession, provenance and forget closures. Forget propagation must not
   depend on a 1,000-node cap.

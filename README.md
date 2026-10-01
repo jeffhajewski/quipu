@@ -119,10 +119,11 @@ Current external benchmark status:
   LongMemEval oracle/S/M JSON files into timestamped session events and
   session-level evidence queries. This is wired for reproducible runs, not a
   published LongMemEval score.
-- LongMemEval-S development slice (70 questions, GPT-4o-mini reader, official
-  judge): the daemon scores 75.7% at 1,024 tokens and 71.4% at 4,096,
-  matching the E1 prototype. Development-slice result, not a leaderboard
-  claim; see [docs/sota-sprint-results.md](./docs/sota-sprint-results.md).
+- LongMemEval-S development slice (70 questions, official judge): with a
+  GPT-4o-mini reader the daemon scores 75.7% at 1,024 tokens and 71.4% at
+  4,096, matching the E1 prototype; with Claude Sonnet 5.5 it scores 87.1% at
+  4,096. Development-slice result, not a leaderboard claim; see
+  [docs/sota-sprint-results.md](./docs/sota-sprint-results.md).
 - Full LoCoMo local raw-retrieval run: 1,986 questions, LatticeDB `0.6.0`,
   core Lattice answer-containment exact match 28.55%, evidence recall 58.27%,
   with reports under `artifacts/benchmarks/locomo-core-lattice-raw-fast-full/`.
