@@ -23,7 +23,9 @@ const card_keywords_generic = [_][]const u8{"memory-card"};
 const card_tags_fact = [_][]const u8{ "fact", "project" };
 const card_tags_preference = [_][]const u8{ "preference", "user" };
 const card_tags_procedure = [_][]const u8{ "procedure", "project" };
-const property_text_max_bytes = 4096;
+/// LatticeDB 0.15 stores large values; 64 KiB round-trips in the adapter tests.
+/// Longer message text still survives intact across its Chunk nodes.
+const property_text_max_bytes = 64 * 1024;
 const property_truncation_marker = "…";
 /// Messages longer than this many bytes are split into Chunk nodes.
 const message_chunk_max_bytes = 1200;
