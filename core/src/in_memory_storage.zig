@@ -328,6 +328,11 @@ pub const InMemoryAdapter = struct {
         return error.Unsupported;
     }
 
+    /// No embeddings, so nothing to prefetch.
+    fn prefetchEmbeddings(_: *anyopaque, _: []const []const u8) !void {}
+
+    fn clearPrefetchedEmbeddings(_: *anyopaque) void {}
+
     fn appendStream(context: *anyopaque, stream: []const u8, payload_json: []const u8) !storage.StreamEntry {
         const self = ctx(context);
         const sequence = self.next_sequence;
@@ -565,6 +570,8 @@ pub const InMemoryAdapter = struct {
         .find_edges = findEdges,
         .full_text_search = fullTextSearch,
         .embed_text = embedText,
+        .prefetch_embeddings = prefetchEmbeddings,
+        .clear_prefetched_embeddings = clearPrefetchedEmbeddings,
         .vector_search = vectorSearch,
         .append_stream = appendStream,
         .read_stream = readStream,
