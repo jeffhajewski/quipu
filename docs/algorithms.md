@@ -74,14 +74,26 @@ advertises a non-hash embedding model. Callers can override this with
    packet, so stale "uses npm" evidence does not sit next to the current "uses
    pnpm" fact. Memory cards that restate a fact, preference, or procedure slot
    already in the packet are dropped as duplicates.
-7. Pack items greedily in rank order into `budgetTokens` (default 4096),
+7. Optionally rerank with a cross-encoder. This step runs only when a reranker
+   is configured ([providers.md](providers.md#reranker)) and
+   `options.rerank` is not `false`. The leading `options.rerankCandidates`
+   items (default 50) go to the reranker in one call. Raw evidence is sent as
+   `YYYY-MM-DD role: text` from its raw source, so the model sees when and who.
+   Derived memory is sent as its text. Those items are reordered by
+   descending relevance score, with ties keeping the fused order. Window items
+   the reranker did not score follow in fused order, and items past the window
+   keep their fused order after them. Item `score` values stay the fused scores;
+   rerank scores appear only in `trace.rerank`. If the call fails or times out,
+   the fused order stands and the `rerank_failed` warning is added.
+8. Pack items greedily in rank order into `budgetTokens` (default 4096),
    estimating each item as `ceil(text_bytes / 4.2) + 16` tokens; the overhead
    covers the rendered line prefix, date and speaker tags, and amortized session
    headers. Items that do not fit are skipped and counted in the trace.
-8. Split kept items into context sections and render the prompt from those sections.
+9. Split kept items into context sections and render the prompt from those sections.
 
 Retrieval must return scoped, evidence-backed, budgeted context packets rather
-than arbitrary top-k chunks; reranking can slot in between steps 3 and 6.
+than arbitrary top-k chunks. Reranking changes which items fit the budget, not
+how kept items are rendered.
 
 Forgetting a message, whether selected by qid, by a query selector, or through
 its `Session` / `Turn`, tombstones and redacts all of its chunks. A query

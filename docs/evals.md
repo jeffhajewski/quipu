@@ -385,7 +385,9 @@ $PY -m quipu_evals.sota_longmemeval run \
   --daemon-binary $A/sota/bin/baseline-a583bdc/bin/quipu \
   --run-name daemon-baseline-a583bdc --budgets 1024,4096 --workers 8
 # Lattice runs add: --lattice --embedding-provider-via-proxy [--vector-dimensions N] [--db-dir DIR]
-# Diagnostics: --needs raw, --mode fts|vector|hybrid|graph, --no-extract, --daemon-arg X
+# Reranked runs add: --reranker-url http://127.0.0.1:7341/v1/rerank (see "Rerank server" below)
+# Diagnostics: --needs raw, --mode fts|vector|hybrid|graph, --no-extract, --daemon-arg X,
+#   --answer-option KEY=JSON (e.g. rerank=false)
 
 # E1 raw-arm reference on the same slice (the parity target).
 python3 -m quipu_evals.longmemeval_study prepare \
@@ -421,6 +423,32 @@ Reruns reuse per-question results whose configuration hash matches; pass
 `--fresh` to recompute. Identical provider requests are served from
 `$A/sota/cache/` at no cost. `--offline` serves cache hits only. Caches and
 reports may contain benchmark text. Keep them in ignored `artifacts/`.
+
+**Rerank server.** `quipu_evals.rerank_server` serves the Cohere-compatible
+`POST /v1/rerank` that the daemon's `--reranker-url` expects. It is backed by a
+`sentence-transformers` CrossEncoder, `BAAI/bge-reranker-v2-m3` by default with
+a maximum length of 512. It needs torch, so it runs from its own venv. It picks
+mps, cuda or cpu, serializes scoring with one lock, and caches scores in
+`$A/sota/cache/rerank/scores.jsonl` keyed by sha256 of the model identity,
+query and document. A request that names another model gets a 400.
+
+```bash
+HF_HOME=$A/sota/hf-cache PYTHONPATH=evals/src $A/sota/rerank-venv/bin/python \
+  -m quipu_evals.rerank_server --port 7341 --cache-dir $A/sota/cache/rerank &
+
+$PY -m quipu_evals.sota_longmemeval run --daemon-binary $A/sota/bin/<name>/bin/quipu \
+  --run-name <run-name> --lattice --embedding-provider-via-proxy --vector-dimensions 1536 \
+  --reranker-url http://127.0.0.1:7341/v1/rerank
+# Same daemon, reranker bypassed per request: add --answer-option rerank=false
+```
+
+`--reranker-model` defaults to the server's model, read from its `/health`.
+The manifest records the model and the server's maximum length and device. The
+configuration hash covers the model and maximum length but not the URL. Rows
+keep each answer's rerank status and latency, and `report.md` gains a Rerank
+table. Expect a 50-document call to take about 1.5 to 3.5 s on Apple-silicon
+MPS. Concurrent workers queue on the scoring lock, and repeated documents are
+cache hits.
 
 ### Day-1 baseline, October 1, 2026
 

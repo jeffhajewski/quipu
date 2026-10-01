@@ -11,6 +11,11 @@ See [../SPEC.md](../SPEC.md) for the full design. This file tracks implemented p
 - `time.validAt` for temporal facts and procedures.
 - `time.eventWindowStart` / `time.eventWindowEnd` for timestamped raw and derived memories.
 - `options.includeDebug` or `options.logTrace` to include a retrieval trace with candidate, kept, and dropped counts.
+- `options.rerank` (default `true`) and `options.rerankCandidates` (default 50)
+  for the optional cross-encoder reranker. Both are ignored when no reranker is
+  configured. With one configured, the trace gains a `rerank` block and a
+  failed call adds the `rerank_failed` warning. See
+  [providers.md](providers.md#reranker).
 - Optional `mode` values `fts`, `vector`, `hybrid`, and `graph`. Retrieval
   defaults to lexical search unless the active storage backend advertises a
   non-hash embedding model, in which case it defaults to hybrid search.

@@ -333,6 +333,8 @@ Implemented:
   stream logging.
 - Reciprocal-rank hybrid retrieval, graph expansion over resolved entities, and
   provider-backed `memory.answer`.
+- Optional cross-encoder reranking through a Cohere/Jina-compatible endpoint,
+  switchable per request.
 - Python/TypeScript SDK validators and stdio clients.
 - Python/TypeScript `local` helpers that auto-start the core over stdio.
 - MCP tools, resources, and prompts.
@@ -348,7 +350,7 @@ Still in progress:
 - Long-running socket or HTTP daemon.
 - Release artifacts for Quipu itself.
 - Full migration runner and compatibility checks.
-- Learned reranking and scoring beyond deterministic RRF/graph boosts.
+- Learned scoring beyond deterministic RRF/graph boosts and the optional reranker.
 - LLM-backed extraction and consolidation workers.
 - Judge scoring for LoCoMo publication.
 - MemoryAgentBench adapter.
