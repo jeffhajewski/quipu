@@ -32,6 +32,19 @@ above, even when the page size is increased. For OpenRouter, Quipu therefore
 defaults the core adapter to 768-dimensional `openai/text-embedding-3-small`
 embeddings until the large-vector persistence issue is fixed.
 
+Provider embeddings are batched per `memory.remember` call. Before writing
+nodes, the runtime collects the index text of each vector-indexed node the call
+will write (unchunked messages, the chunks of long messages, and deterministic
+extractions) and calls `storage.Adapter.prefetchEmbeddings`. The Lattice adapter
+sends the distinct, non-blank texts in batched requests (`input` as an array, at
+most 128 inputs and 128 KiB of text each) and caches the vectors by exact text;
+`putNode` uses a cached vector only when the node's index text matches it
+byte for byte, and otherwise embeds the text in its own request as before. A
+failed batch only leaves its texts to that per-node path. The runtime clears the
+cache when the call returns. Model, dimensions and index text are unchanged, so
+a node's vector is the one the per-node path would request; forgetting removes
+it the same way. Hash embeddings and the in-memory adapter skip the prefetch.
+
 `system.health` reports the active storage backend and capability flags so SDKs,
 evals, and operators can tell whether durable storage and vector search are
 available without probing backend-specific APIs.

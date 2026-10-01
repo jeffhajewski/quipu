@@ -514,6 +514,9 @@ pub const Runtime = struct {
         const extract_enabled = boolField(params, "extract") orelse true;
         var derived_count: usize = 0;
 
+        try self.prefetchRememberEmbeddings(allocator, messages.items, extract_enabled);
+        defer self.store.clearPrefetchedEmbeddings();
+
         for (messages.items, 0..) |message_value, message_index| {
             const message = objectValue(message_value) orelse {
                 return errorResponse(allocator, id, "invalid_request", "each message must be an object");
@@ -1745,6 +1748,48 @@ pub const Runtime = struct {
             try related.append(allocator, try allocator.dupe(u8, node.qid));
         }
         return related.toOwnedSlice(allocator);
+    }
+
+    /// Embeds, in batched requests, the index text of each vector-indexed node
+    /// memory.remember will write for `messages`: unchunked messages, the
+    /// chunks of long ones and deterministic extractions. Stops at the first
+    /// invalid message, where the write loop stops too. Best effort: putNode
+    /// embeds any text the prefetch missed.
+    fn prefetchRememberEmbeddings(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        messages: []const Value,
+        extract_enabled: bool,
+    ) !void {
+        var texts = std.ArrayList([]const u8).empty;
+        defer texts.deinit(allocator);
+        for (messages) |message_value| {
+            const message = objectValue(message_value) orelse break;
+            if (stringField(&message, "role") == null) break;
+            const content = stringField(&message, "content") orelse break;
+            if (content.len == 0) break;
+
+            const chunk_ends = try messageChunkEnds(allocator, content);
+            defer allocator.free(chunk_ends);
+            if (chunk_ends.len > 1) {
+                var start: usize = 0;
+                for (chunk_ends) |end| {
+                    try texts.append(allocator, content[start..end]);
+                    start = end;
+                }
+            } else {
+                try texts.append(allocator, content);
+            }
+
+            if (extract_enabled) {
+                const extracted = providers.deterministicExtractor().extract(content);
+                for (extracted.items[0..extracted.len]) |candidate| {
+                    extractor.validateCandidate(candidate) catch continue;
+                    try texts.append(allocator, candidate.text);
+                }
+            }
+        }
+        self.store.prefetchEmbeddings(texts.items) catch {};
     }
 
     /// Writes one Chunk node per slice of `content`, linked by

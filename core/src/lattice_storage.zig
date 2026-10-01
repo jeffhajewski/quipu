@@ -25,6 +25,11 @@ const default_vector_dimensions: u16 = 128;
 const default_embedding_model = "lattice_hash_embed";
 const default_openrouter_embedding_url = "https://openrouter.ai/api/v1/embeddings";
 const default_openrouter_embedding_model = "openai/text-embedding-3-small";
+/// Most inputs one batched embedding request carries. OpenAI accepts 2048.
+const embedding_batch_max_inputs: usize = 128;
+/// Most text bytes one batched embedding request carries. Every token covers at
+/// least one byte, so a batch stays far under OpenAI's 300K-token request limit.
+const embedding_batch_max_bytes: usize = 128 * 1024;
 
 pub const EmbeddingProviderKind = enum {
     hash,
@@ -106,6 +111,9 @@ pub const LatticeAdapter = struct {
     skip_close: bool,
     next_tx_id: u64 = 1,
     next_runtime_id: u64 = 1,
+    /// Vectors from `prefetchEmbeddings`, keyed by the exact text embedded.
+    /// Keys and values are owned and live until `clearPrefetched`.
+    prefetched: std.StringHashMapUnmanaged([]f32) = .empty,
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8, options: Options) !LatticeAdapter {
         const owned_path = try allocator.dupe(u8, path);
@@ -166,6 +174,8 @@ pub const LatticeAdapter = struct {
     }
 
     pub fn deinit(self: *LatticeAdapter) void {
+        self.clearPrefetched();
+        self.prefetched.deinit(self.allocator);
         self.node_to_qid.deinit();
         var it = self.qid_to_node.iterator();
         while (it.next()) |entry| {
@@ -331,7 +341,12 @@ pub const LatticeAdapter = struct {
         plan.text = try searchTextFor(self.allocator, node.label, node.properties_json);
         if (plan.text) |text| {
             if (isVectorIndexedLabel(node.label)) {
-                const vector = try self.embed(self.allocator, text);
+                // A prefetched vector embeds this exact text with the same
+                // model and dimensions, so it is the vector embed would return.
+                const vector = if (self.prefetched.get(text)) |prefetched|
+                    try self.allocator.dupe(f32, prefetched)
+                else
+                    try self.embed(self.allocator, text);
                 if (vector.len == 0) {
                     self.allocator.free(vector);
                 } else {
@@ -635,6 +650,62 @@ pub const LatticeAdapter = struct {
         return self.embed(allocator, text);
     }
 
+    /// Embeds the distinct texts in batched provider requests and caches the
+    /// vectors by text for putNode. Hash embeddings are local and cheap, so
+    /// they are not prefetched. A failed batch is skipped: putNode embeds its
+    /// texts one request at a time, as it would without a prefetch.
+    fn prefetchEmbeddings(context: *anyopaque, texts: []const []const u8) !void {
+        const self = ctx(context);
+        if (self.embedding_provider != .openai_compatible) return;
+
+        var pending = std.ArrayList([]const u8).empty;
+        defer pending.deinit(self.allocator);
+        var seen = std.StringHashMapUnmanaged(void).empty;
+        defer seen.deinit(self.allocator);
+        for (texts) |text| {
+            // putNode never embeds blank text.
+            if (isBlank(text) or self.prefetched.contains(text)) continue;
+            if ((try seen.getOrPut(self.allocator, text)).found_existing) continue;
+            try pending.append(self.allocator, text);
+        }
+
+        var start: usize = 0;
+        while (start < pending.items.len) {
+            const end = embeddingBatchEnd(pending.items, start);
+            self.prefetchBatch(pending.items[start..end]) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {},
+            };
+            start = end;
+        }
+    }
+
+    fn prefetchBatch(self: *LatticeAdapter, texts: []const []const u8) !void {
+        const vectors = try self.openAiCompatibleEmbedBatch(self.allocator, texts);
+        defer self.allocator.free(vectors);
+        var stored: usize = 0;
+        defer for (vectors[stored..]) |vector| self.allocator.free(vector);
+        try self.prefetched.ensureUnusedCapacity(self.allocator, @intCast(texts.len));
+        for (texts, vectors) |text, vector| {
+            const key = try self.allocator.dupe(u8, text);
+            self.prefetched.putAssumeCapacityNoClobber(key, vector);
+            stored += 1;
+        }
+    }
+
+    fn clearPrefetchedEmbeddings(context: *anyopaque) void {
+        ctx(context).clearPrefetched();
+    }
+
+    fn clearPrefetched(self: *LatticeAdapter) void {
+        var it = self.prefetched.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.prefetched.clearRetainingCapacity();
+    }
+
     fn appendStream(context: *anyopaque, stream: []const u8, payload_json: []const u8) !storage.StreamEntry {
         const self = ctx(context);
         const tx = try self.beginWrite();
@@ -935,16 +1006,31 @@ pub const LatticeAdapter = struct {
     }
 
     fn openAiCompatibleEmbed(self: *LatticeAdapter, allocator: std.mem.Allocator, text: []const u8) ![]f32 {
+        const response = try self.postEmbeddings(allocator, text);
+        defer allocator.free(response);
+        return parseEmbeddingResponse(allocator, response, self.vector_dimensions);
+    }
+
+    /// One request for all of `texts`; the vectors come back in input order.
+    fn openAiCompatibleEmbedBatch(self: *LatticeAdapter, allocator: std.mem.Allocator, texts: []const []const u8) ![][]f32 {
+        const response = try self.postEmbeddings(allocator, texts);
+        defer allocator.free(response);
+        return parseBatchEmbeddingResponse(allocator, response, texts.len, self.vector_dimensions);
+    }
+
+    /// POSTs an embeddings request whose `input` is one string or an array of
+    /// strings, and returns the response body.
+    fn postEmbeddings(self: *LatticeAdapter, allocator: std.mem.Allocator, input: anytype) ![]u8 {
         const request_body = if (self.embedding_request_dimensions)
             try stringifyAlloc(allocator, .{
                 .model = self.embedding_model,
-                .input = text,
+                .input = input,
                 .dimensions = self.vector_dimensions,
             })
         else
             try stringifyAlloc(allocator, .{
                 .model = self.embedding_model,
-                .input = text,
+                .input = input,
             });
         defer allocator.free(request_body);
 
@@ -970,9 +1056,7 @@ pub const LatticeAdapter = struct {
             },
         });
         if (result.status.class() != .success) return error.EmbeddingProviderRequestFailed;
-        const response = try response_body.toOwnedSlice();
-        defer allocator.free(response);
-        return parseEmbeddingResponse(allocator, response, self.vector_dimensions);
+        return response_body.toOwnedSlice();
     }
 
     fn verifyDerivedNode(
@@ -1035,6 +1119,8 @@ pub const LatticeAdapter = struct {
         .find_edges = findEdges,
         .full_text_search = fullTextSearch,
         .embed_text = embedText,
+        .prefetch_embeddings = prefetchEmbeddings,
+        .clear_prefetched_embeddings = clearPrefetchedEmbeddings,
         .vector_search = vectorSearch,
         .append_stream = appendStream,
         .read_stream = readStream,
@@ -1224,11 +1310,52 @@ fn parseEmbeddingResponse(allocator: std.mem.Allocator, response: []const u8, ex
         else => return error.InvalidEmbeddingResponse,
     };
     if (data.items.len == 0) return error.InvalidEmbeddingResponse;
-    const first = switch (data.items[0]) {
+    return parseEmbeddingItem(allocator, data.items[0], expected_dimensions);
+}
+
+/// The vectors of a batched embeddings response, in input order. Items are
+/// placed by their `index` (their position when it is absent), so a provider
+/// may return them in any order, but every input must get exactly one vector.
+fn parseBatchEmbeddingResponse(allocator: std.mem.Allocator, response: []const u8, count: usize, expected_dimensions: u16) ![][]f32 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
         .object => |object| object,
         else => return error.InvalidEmbeddingResponse,
     };
-    const embedding_value = first.get("embedding") orelse return error.InvalidEmbeddingResponse;
+    const data = switch (root.get("data") orelse return error.InvalidEmbeddingResponse) {
+        .array => |array| array,
+        else => return error.InvalidEmbeddingResponse,
+    };
+    if (data.items.len != count) return error.InvalidEmbeddingResponse;
+
+    const slots = try allocator.alloc(?[]f32, count);
+    defer allocator.free(slots);
+    @memset(slots, null);
+    errdefer for (slots) |slot| if (slot) |vector| allocator.free(vector);
+    for (data.items, 0..) |item, position| {
+        const index: usize = switch (item) {
+            .object => |object| if (object.get("index")) |value| switch (value) {
+                .integer => |integer| std.math.cast(usize, integer) orelse return error.InvalidEmbeddingResponse,
+                else => return error.InvalidEmbeddingResponse,
+            } else position,
+            else => return error.InvalidEmbeddingResponse,
+        };
+        if (index >= count or slots[index] != null) return error.InvalidEmbeddingResponse;
+        slots[index] = try parseEmbeddingItem(allocator, item, expected_dimensions);
+    }
+
+    const vectors = try allocator.alloc([]f32, count);
+    for (vectors, slots) |*vector, slot| vector.* = slot.?;
+    return vectors;
+}
+
+fn parseEmbeddingItem(allocator: std.mem.Allocator, item: std.json.Value, expected_dimensions: u16) ![]f32 {
+    const object = switch (item) {
+        .object => |object| object,
+        else => return error.InvalidEmbeddingResponse,
+    };
+    const embedding_value = object.get("embedding") orelse return error.InvalidEmbeddingResponse;
     const embedding = switch (embedding_value) {
         .array => |array| array,
         else => return error.InvalidEmbeddingResponse,
@@ -1244,6 +1371,19 @@ fn parseEmbeddingResponse(allocator: std.mem.Allocator, response: []const u8, ex
         };
     }
     return vector;
+}
+
+/// End of the embedding batch that starts at `start`: at most
+/// `embedding_batch_max_inputs` texts and `embedding_batch_max_bytes` bytes,
+/// but always at least one text.
+fn embeddingBatchEnd(texts: []const []const u8, start: usize) usize {
+    var end = start;
+    var bytes: usize = 0;
+    while (end < texts.len and end - start < embedding_batch_max_inputs) : (end += 1) {
+        if (end > start and bytes + texts[end].len > embedding_batch_max_bytes) break;
+        bytes += texts[end].len;
+    }
+    return end;
 }
 
 fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
@@ -1989,4 +2129,386 @@ test "lattice adapter verify flags derived nodes without live evidence" {
         }
     }
     try std.testing.expect(saw_deleted and saw_missing);
+}
+
+/// A local OpenAI-compatible embeddings endpoint. Each text embeds to a
+/// pseudo-random vector derived from its hash, with components in eighths so
+/// they survive the JSON round trip exactly. Batched responses list their items
+/// in reverse order, so a client must place them by `index`.
+const FakeEmbeddingServer = struct {
+    server: std.Io.net.Server,
+    url: []u8,
+    thread: std.Thread,
+    /// Answer batched requests with HTTP 500, as a failing provider would.
+    fail_batches: bool,
+    stopping: std.atomic.Value(bool) = .init(false),
+    single_requests: std.atomic.Value(usize) = .init(0),
+    batch_requests: std.atomic.Value(usize) = .init(0),
+    batch_inputs: std.atomic.Value(usize) = .init(0),
+
+    const dimensions: u16 = 8;
+
+    fn start(self: *FakeEmbeddingServer, fail_batches: bool) !void {
+        const io = std.testing.io;
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        var server = try address.listen(io, .{ .reuse_address = true });
+        errdefer server.deinit(io);
+        const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/v1/embeddings", .{server.socket.address.getPort()});
+        errdefer std.testing.allocator.free(url);
+        self.* = .{ .server = server, .url = url, .thread = undefined, .fail_batches = fail_batches };
+        self.thread = try std.Thread.spawn(.{}, serve, .{self});
+    }
+
+    fn stop(self: *FakeEmbeddingServer) void {
+        const io = std.testing.io;
+        self.stopping.store(true, .release);
+        // Wake the accept the server thread is blocked in.
+        if (self.server.socket.address.connect(io, .{ .mode = .stream })) |stream| {
+            stream.close(io);
+        } else |_| {}
+        self.thread.join();
+        self.server.deinit(io);
+        std.testing.allocator.free(self.url);
+    }
+
+    fn options(self: *const FakeEmbeddingServer) Options {
+        return .{
+            .io = std.testing.io,
+            .vector_dimensions = dimensions,
+            .embedding_provider = .openai_compatible,
+            .embedding_url = self.url,
+            .embedding_model = "fake-embedding",
+        };
+    }
+
+    fn requests(self: *const FakeEmbeddingServer) usize {
+        return self.single_requests.load(.acquire) + self.batch_requests.load(.acquire);
+    }
+
+    fn embedding(text: []const u8) [dimensions]f32 {
+        var prng = std.Random.DefaultPrng.init(std.hash.Wyhash.hash(0, text));
+        const random = prng.random();
+        var vector: [dimensions]f32 = undefined;
+        for (&vector) |*value| {
+            const magnitude: f32 = @floatFromInt(random.intRangeAtMost(i32, 1, 64));
+            value.* = if (random.boolean()) magnitude / 8 else -magnitude / 8;
+        }
+        return vector;
+    }
+
+    fn serve(self: *FakeEmbeddingServer) void {
+        const io = std.testing.io;
+        while (true) {
+            const stream = self.server.accept(io) catch return;
+            defer stream.close(io);
+            if (self.stopping.load(.acquire)) return;
+            self.handle(stream) catch {};
+        }
+    }
+
+    const Item = struct { object: []const u8 = "embedding", index: usize, embedding: []const f32 };
+
+    fn handle(self: *FakeEmbeddingServer, stream: std.Io.net.Stream) !void {
+        const io = std.testing.io;
+        const allocator = std.testing.allocator;
+        var recv_buffer: [16 * 1024]u8 = undefined;
+        var send_buffer: [4 * 1024]u8 = undefined;
+        var connection_reader = stream.reader(io, &recv_buffer);
+        var connection_writer = stream.writer(io, &send_buffer);
+        var server = std.http.Server.init(&connection_reader.interface, &connection_writer.interface);
+        var request = try server.receiveHead();
+        var body_buffer: [4 * 1024]u8 = undefined;
+        const body_reader = try request.readerExpectContinue(&body_buffer);
+        const body = try body_reader.allocRemaining(allocator, .unlimited);
+        defer allocator.free(body);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+        defer parsed.deinit();
+
+        const input = parsed.value.object.get("input").?;
+        const inputs: []const std.json.Value = switch (input) {
+            .string => (&input)[0..1],
+            .array => |array| array.items,
+            else => return error.TestUnexpectedResult,
+        };
+        const json_headers = [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }};
+        if (input == .string) {
+            _ = self.single_requests.fetchAdd(1, .acq_rel);
+        } else {
+            _ = self.batch_requests.fetchAdd(1, .acq_rel);
+            _ = self.batch_inputs.fetchAdd(inputs.len, .acq_rel);
+            if (self.fail_batches) {
+                try request.respond("{\"error\":{\"message\":\"batch rejected\"}}", .{
+                    .status = .internal_server_error,
+                    .keep_alive = false,
+                    .extra_headers = &json_headers,
+                });
+                return;
+            }
+        }
+
+        const vectors = try allocator.alloc([dimensions]f32, inputs.len);
+        defer allocator.free(vectors);
+        const items = try allocator.alloc(Item, inputs.len);
+        defer allocator.free(items);
+        for (inputs, 0..) |text, index| {
+            vectors[index] = embedding(text.string);
+            items[inputs.len - 1 - index] = .{ .index = index, .embedding = &vectors[index] };
+        }
+        const response = try stringifyAlloc(allocator, .{ .object = "list", .data = items });
+        defer allocator.free(response);
+        try request.respond(response, .{ .keep_alive = false, .extra_headers = &json_headers });
+    }
+};
+
+/// Asserts that a vector search for the fake embedding of `text` finds exactly
+/// `expected`, each at distance zero.
+fn expectFakeVectorHits(store: storage.Adapter, text: []const u8, expected: []const []const u8) !void {
+    const vector = FakeEmbeddingServer.embedding(text);
+    const hits = try store.vectorSearch(std.testing.allocator, .{ .vector = &vector, .limit = expected.len + 1 });
+    defer freeTestHits(hits);
+    for (expected) |qid| {
+        var found = false;
+        for (hits) |hit| {
+            if (!std.mem.eql(u8, hit.qid, qid)) continue;
+            found = true;
+            try std.testing.expectApproxEqAbs(@as(f32, 1.0), hit.score, 1e-4);
+        }
+        if (!found) {
+            std.debug.print("vector search \"{s}\" did not find {s}\n", .{ text, qid });
+            return error.TestUnexpectedResult;
+        }
+    }
+    // Nothing else is an exact match.
+    for (hits) |hit| {
+        var is_expected = false;
+        for (expected) |qid| is_expected = is_expected or std.mem.eql(u8, hit.qid, qid);
+        if (!is_expected) try std.testing.expect(hit.score < 0.999);
+    }
+}
+
+test "lattice adapter prefetches provider embeddings in one batched request" {
+    var fake: FakeEmbeddingServer = undefined;
+    try fake.start(false);
+    defer fake.stop();
+    var store = try TestStore.init("prefetch.lattice");
+    defer store.deinit();
+    var state = try LatticeAdapter.open(std.testing.allocator, store.path, fake.options());
+    defer state.deinit();
+    const adapter = state.adapter();
+
+    // Duplicates and blank text are not sent.
+    try adapter.prefetchEmbeddings(&.{ "we adopted a beagle", "the quarterly budget", "we adopted a beagle", " \n", "a ferry to zanzibar" });
+    try std.testing.expectEqual(@as(usize, 1), fake.batch_requests.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), fake.batch_inputs.load(.acquire));
+
+    try testPut(adapter, "q_msg_1", "Message", "{\"content\":\"we adopted a beagle\"}");
+    try testPut(adapter, "q_msg_2", "Message", "{\"content\":\"the quarterly budget\"}");
+    try testPut(adapter, "q_chunk_3", "Chunk", "{\"kind\":\"chunk\",\"content\":\"a ferry to zanzibar\"}");
+    // A second node with the same text reuses the vector.
+    try testPut(adapter, "q_msg_4", "Message", "{\"content\":\"we adopted a beagle\"}");
+    try std.testing.expectEqual(@as(usize, 0), fake.single_requests.load(.acquire));
+    // Text that was not prefetched is embedded on its own.
+    try testPut(adapter, "q_msg_5", "Message", "{\"content\":\"a new espresso machine\"}");
+    try std.testing.expectEqual(@as(usize, 1), fake.single_requests.load(.acquire));
+
+    try expectFakeVectorHits(adapter, "we adopted a beagle", &.{ "q_msg_1", "q_msg_4" });
+    try expectFakeVectorHits(adapter, "the quarterly budget", &.{"q_msg_2"});
+    try expectFakeVectorHits(adapter, "a ferry to zanzibar", &.{"q_chunk_3"});
+    try expectFakeVectorHits(adapter, "a new espresso machine", &.{"q_msg_5"});
+
+    // Once cleared, the cache serves nothing.
+    adapter.clearPrefetchedEmbeddings();
+    try testPut(adapter, "q_msg_6", "Message", "{\"content\":\"the quarterly budget\"}");
+    try std.testing.expectEqual(@as(usize, 2), fake.single_requests.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), fake.batch_requests.load(.acquire));
+
+    // Forgetting drops a prefetched vector like any other.
+    const beagle = FakeEmbeddingServer.embedding("we adopted a beagle");
+    const forgotten = state.qid_to_node.get("q_msg_1").?.node_id;
+    try std.testing.expect(try rawVectorSearchHas(&state, &beagle, forgotten));
+    try testPut(adapter, "q_msg_1", "Message", "{\"kind\":\"tombstone\",\"deleted\":true}");
+    try std.testing.expect(!(try rawVectorSearchHas(&state, &beagle, forgotten)));
+    try expectFakeVectorHits(adapter, "we adopted a beagle", &.{"q_msg_4"});
+}
+
+test "lattice adapter embeds node by node when a batched request fails" {
+    var fake: FakeEmbeddingServer = undefined;
+    try fake.start(true);
+    defer fake.stop();
+    var store = try TestStore.init("prefetch-fallback.lattice");
+    defer store.deinit();
+    var state = try LatticeAdapter.open(std.testing.allocator, store.path, fake.options());
+    defer state.deinit();
+    const adapter = state.adapter();
+
+    try adapter.prefetchEmbeddings(&.{ "we adopted a beagle", "the quarterly budget" });
+    try std.testing.expectEqual(@as(usize, 1), fake.batch_requests.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), state.prefetched.count());
+
+    try testPut(adapter, "q_msg_1", "Message", "{\"content\":\"we adopted a beagle\"}");
+    try testPut(adapter, "q_msg_2", "Message", "{\"content\":\"the quarterly budget\"}");
+    try std.testing.expectEqual(@as(usize, 2), fake.single_requests.load(.acquire));
+    try expectFakeVectorHits(adapter, "we adopted a beagle", &.{"q_msg_1"});
+    try expectFakeVectorHits(adapter, "the quarterly budget", &.{"q_msg_2"});
+}
+
+test "lattice adapter hash embeddings skip the prefetch" {
+    var store = try TestStore.init("prefetch-hash.lattice");
+    defer store.deinit();
+    var state = try store.open();
+    defer state.deinit();
+    try state.adapter().prefetchEmbeddings(&.{"we adopted a beagle"});
+    try std.testing.expectEqual(@as(usize, 0), state.prefetched.count());
+}
+
+test "embedding batches split by input count and bytes" {
+    var texts: [300][]const u8 = undefined;
+    for (&texts) |*text| text.* = "short";
+    try std.testing.expectEqual(@as(usize, 128), embeddingBatchEnd(&texts, 0));
+    try std.testing.expectEqual(@as(usize, 256), embeddingBatchEnd(&texts, 128));
+    try std.testing.expectEqual(@as(usize, 300), embeddingBatchEnd(&texts, 256));
+
+    const large = "x" ** (50 * 1024);
+    const oversized = "y" ** (embedding_batch_max_bytes + 1);
+    const mixed = [_][]const u8{ large, large, large, oversized, "short" };
+    try std.testing.expectEqual(@as(usize, 2), embeddingBatchEnd(&mixed, 0));
+    try std.testing.expectEqual(@as(usize, 3), embeddingBatchEnd(&mixed, 2));
+    // A text over the byte budget still goes, alone.
+    try std.testing.expectEqual(@as(usize, 4), embeddingBatchEnd(&mixed, 3));
+    try std.testing.expectEqual(@as(usize, 5), embeddingBatchEnd(&mixed, 4));
+}
+
+test "batched embedding responses are placed by index and validated" {
+    const allocator = std.testing.allocator;
+    {
+        const vectors = try parseBatchEmbeddingResponse(allocator,
+            \\{"data":[{"index":1,"embedding":[3,4]},{"index":0,"embedding":[1.5,2]}]}
+        , 2, 2);
+        defer {
+            for (vectors) |vector| allocator.free(vector);
+            allocator.free(vectors);
+        }
+        try std.testing.expectEqualSlices(f32, &.{ 1.5, 2 }, vectors[0]);
+        try std.testing.expectEqualSlices(f32, &.{ 3, 4 }, vectors[1]);
+    }
+    const invalid = [_][]const u8{
+        // Too few items, a repeated index, an index out of range, wrong dimensions.
+        \\{"data":[{"index":0,"embedding":[1,2]}]}
+        ,
+        \\{"data":[{"index":0,"embedding":[1,2]},{"index":0,"embedding":[3,4]}]}
+        ,
+        \\{"data":[{"index":0,"embedding":[1,2]},{"index":2,"embedding":[3,4]}]}
+        ,
+        \\{"data":[{"index":0,"embedding":[1,2]},{"index":1,"embedding":[3]}]}
+        ,
+    };
+    for (invalid) |response| {
+        if (parseBatchEmbeddingResponse(allocator, response, 2, 2)) |vectors| {
+            for (vectors) |vector| allocator.free(vector);
+            allocator.free(vectors);
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}
+
+fn testChunkQid(buffer: []u8, message_qid: []const u8, index: usize) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "q_chunk_{s}_{d}", .{ message_qid["q_msg_".len..], index });
+}
+
+test "memory.remember embeds its messages, chunks and extractions in one request" {
+    const runtime_module = @import("runtime.zig");
+    const schema = @import("schema.zig");
+    const protocol = @import("protocol.zig");
+    const allocator = std.testing.allocator;
+
+    var fake: FakeEmbeddingServer = undefined;
+    try fake.start(false);
+    defer fake.stop();
+    var store = try TestStore.init("remember-batch.lattice");
+    defer store.deinit();
+    var state = try LatticeAdapter.open(allocator, store.path, fake.options());
+    defer state.deinit();
+    const adapter = state.adapter();
+    try schema.ensure(allocator, adapter);
+    var runtime = runtime_module.Runtime.init(adapter, protocol.Health.default());
+    defer runtime.deinit();
+
+    // 1734 bytes in three paragraphs, so the message is split into chunks.
+    const paragraph = "We walked the dog along the river trail today. " ** 12 ++ "End of part.\n\n";
+    const long = paragraph ++ paragraph ++ paragraph;
+    const request =
+        \\{"jsonrpc":"2.0","id":"r1","method":"memory.remember","params":{"scope":{"projectId":"repo:test"},"sessionId":"s1","messages":[
+    ++
+        \\{"role":"user","content":"We adopted a beagle named Biscuit."},
+    ++
+        \\{"role":"assistant","content":"
+    ++ long ++
+        \\"},
+    ++
+        \\{"role":"user","content":"I prefer concise responses."},
+    ++
+        \\{"role":"user","content":"We adopted a beagle named Biscuit."}]}}
+    ;
+    const escaped = try std.mem.replaceOwned(u8, allocator, request, "\n", "\\n");
+    defer allocator.free(escaped);
+    const response = try runtime.dispatch(allocator, escaped);
+    defer allocator.free(response);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"status\":\"stored\"") != null);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+    const qids = parsed.value.object.get("result").?.object.get("messageQids").?.array.items;
+    try std.testing.expectEqual(@as(usize, 4), qids.len);
+    const long_qid = qids[1].string;
+
+    var buffer: [64]u8 = undefined;
+    var chunk_count: usize = 0;
+    while (state.qid_to_node.contains(try testChunkQid(&buffer, long_qid, chunk_count))) chunk_count += 1;
+    try std.testing.expect(chunk_count >= 2);
+
+    // One request carries the distinct texts: the short message once though it
+    // was sent twice, each chunk, the other message, and the extracted
+    // preference text that its Preference and MemoryCard share.
+    try std.testing.expectEqual(@as(usize, 1), fake.requests());
+    try std.testing.expectEqual(@as(usize, 1), fake.batch_requests.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3 + chunk_count), fake.batch_inputs.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), state.prefetched.count());
+
+    try expectFakeVectorHits(adapter, "We adopted a beagle named Biscuit.", &.{ qids[0].string, qids[3].string });
+    try expectFakeVectorHits(adapter, "I prefer concise responses.", &.{qids[2].string});
+    const preference = FakeEmbeddingServer.embedding("The user prefers concise responses.");
+    const preference_hits = try adapter.vectorSearch(allocator, .{ .vector = &preference, .limit = 3 });
+    defer freeTestHits(preference_hits);
+    var exact_preference_hits: usize = 0;
+    for (preference_hits) |hit| {
+        if (hit.score > 0.9999) exact_preference_hits += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), exact_preference_hits);
+
+    var first_chunk_vector: [FakeEmbeddingServer.dimensions]f32 = undefined;
+    var offset: usize = 0;
+    for (0..chunk_count) |index| {
+        const chunk_qid = try testChunkQid(&buffer, long_qid, index);
+        const chunk = (try adapter.getNode(allocator, chunk_qid)).?;
+        defer adapter.freeNode(allocator, chunk);
+        const content = (try readOptionalString(allocator, chunk.properties_json, "content")).?;
+        defer allocator.free(content);
+        try std.testing.expectEqualStrings(long[offset .. offset + content.len], content);
+        offset += content.len;
+        try expectFakeVectorHits(adapter, content, &.{chunk_qid});
+        if (index == 0) first_chunk_vector = FakeEmbeddingServer.embedding(content);
+    }
+    try std.testing.expectEqual(long.len, offset);
+
+    // Forgetting the long message drops its chunks' vectors.
+    const first_chunk_node = state.qid_to_node.get(try testChunkQid(&buffer, long_qid, 0)).?.node_id;
+    try std.testing.expect(try rawVectorSearchHas(&state, &first_chunk_vector, first_chunk_node));
+    const forget = try std.fmt.allocPrint(allocator,
+        \\{{"jsonrpc":"2.0","id":"f1","method":"memory.forget","params":{{"mode":"hard_delete","selector":{{"qids":["{s}"]}},"dryRun":false,"reason":"test"}}}}
+    , .{long_qid});
+    defer allocator.free(forget);
+    const forget_response = try runtime.dispatch(allocator, forget);
+    defer allocator.free(forget_response);
+    try std.testing.expect(std.mem.indexOf(u8, forget_response, "\"error\"") == null);
+    try std.testing.expect(!(try rawVectorSearchHas(&state, &first_chunk_vector, first_chunk_node)));
+    try std.testing.expectEqual(@as(usize, 1), fake.requests());
 }

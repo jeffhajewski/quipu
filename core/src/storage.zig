@@ -83,6 +83,8 @@ pub const Adapter = struct {
         find_edges: *const fn (*anyopaque, std.mem.Allocator, EdgeQuery) anyerror![]Edge,
         full_text_search: *const fn (*anyopaque, std.mem.Allocator, FullTextQuery) anyerror![]SearchHit,
         embed_text: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror![]f32,
+        prefetch_embeddings: *const fn (*anyopaque, []const []const u8) anyerror!void,
+        clear_prefetched_embeddings: *const fn (*anyopaque) void,
         vector_search: *const fn (*anyopaque, std.mem.Allocator, VectorQuery) anyerror![]SearchHit,
         append_stream: *const fn (*anyopaque, []const u8, []const u8) anyerror!StreamEntry,
         read_stream: *const fn (*anyopaque, std.mem.Allocator, []const u8, u64, usize) anyerror![]StreamEntry,
@@ -135,6 +137,19 @@ pub const Adapter = struct {
 
     pub fn embedText(self: Adapter, allocator: std.mem.Allocator, text: []const u8) ![]f32 {
         return self.vtable.embed_text(self.context, allocator, text);
+    }
+
+    /// Embeds `texts` in batched requests ahead of the putNode calls that will
+    /// index them; a putNode whose index text exactly matches a prefetched text
+    /// reuses that vector instead of making its own request. Best effort: a
+    /// text left unembedded by an error is embedded by putNode as before.
+    /// Vectors stay cached until `clearPrefetchedEmbeddings`.
+    pub fn prefetchEmbeddings(self: Adapter, texts: []const []const u8) !void {
+        return self.vtable.prefetch_embeddings(self.context, texts);
+    }
+
+    pub fn clearPrefetchedEmbeddings(self: Adapter) void {
+        self.vtable.clear_prefetched_embeddings(self.context);
     }
 
     pub fn vectorSearch(self: Adapter, allocator: std.mem.Allocator, query: VectorQuery) ![]SearchHit {
