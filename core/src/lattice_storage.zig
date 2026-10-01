@@ -1836,6 +1836,99 @@ test "lattice adapter round-trips 64KB string properties" {
     try std.testing.expectEqualStrings(edge_properties, edges[0].properties_json);
 }
 
+fn slowTestsEnabled() !bool {
+    return std.testing.environ.containsUnempty(std.testing.allocator, "QUIPU_LATTICE_SLOW_TESTS");
+}
+
+/// Writes `count` vector-indexed messages with `dimensions`-wide hash vectors,
+/// reopens the store, and checks every 50th message is its own nearest
+/// neighbour.
+fn checkVectorPersistence(name: []const u8, dimensions: u16, page_size: u32, count: usize) !void {
+    const allocator = std.testing.allocator;
+    var store = try TestStore.init(name);
+    defer store.deinit();
+    const options = Options{ .io = std.testing.io, .vector_dimensions = dimensions, .page_size = page_size };
+
+    var text_buffer: [512]u8 = undefined;
+    var content_buffer: [600]u8 = undefined;
+    var qid_buffer: [32]u8 = undefined;
+    var before = std.ArrayList(u8).empty;
+    defer before.deinit(allocator);
+    {
+        var state = try LatticeAdapter.open(allocator, store.path, options);
+        defer state.deinit();
+        const adapter = state.adapter();
+        for (0..count) |index| {
+            const content = try std.fmt.bufPrint(&content_buffer, "{{\"content\":\"{s}\"}}", .{try fixtureText(&text_buffer, index)});
+            const qid = try std.fmt.bufPrint(&qid_buffer, "q_msg_{d}", .{index + 1});
+            try testPut(adapter, qid, "Message", content);
+        }
+        try sampleNearestNeighbours(&state, dimensions, count, &before);
+    }
+
+    var state = try LatticeAdapter.open(allocator, store.path, options);
+    defer state.deinit();
+    try std.testing.expectEqual(@as(u64, count + 1), state.nextRuntimeId());
+    var after = std.ArrayList(u8).empty;
+    defer after.deinit(allocator);
+    try sampleNearestNeighbours(&state, dimensions, count, &after);
+    // The reopened index answers exactly as the one that wrote it.
+    try std.testing.expectEqualStrings(before.items, after.items);
+}
+
+/// 48 words from a shared 400-word vocabulary, so hash embeddings overlap the
+/// way text embeddings do instead of being nearly orthogonal.
+fn fixtureText(buffer: []u8, index: usize) ![]const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    var seed: u64 = index *% 0x9E3779B97F4A7C15 +% 1;
+    for (0..48) |word| {
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        if (word > 0) try writer.writeByte(' ');
+        try writer.print("w{d}", .{(seed >> 33) % 400});
+    }
+    return writer.buffered();
+}
+
+/// Records the top five qids for every 50th fixture into `out`, and requires
+/// nearly every fixture to find itself first.
+fn sampleNearestNeighbours(state: *LatticeAdapter, dimensions: u16, count: usize, out: *std.ArrayList(u8)) !void {
+    const allocator = std.testing.allocator;
+    const adapter = state.adapter();
+    var text_buffer: [512]u8 = undefined;
+    var qid_buffer: [32]u8 = undefined;
+    var samples: usize = 0;
+    var found_self: usize = 0;
+    var index: usize = 0;
+    while (index < count) : (index += 50) {
+        const vector = try adapter.embedText(allocator, try fixtureText(&text_buffer, index));
+        defer allocator.free(vector);
+        try std.testing.expectEqual(@as(usize, dimensions), vector.len);
+        const hits = try adapter.vectorSearch(allocator, .{ .vector = vector, .limit = 5 });
+        defer freeTestHits(hits);
+        try std.testing.expectEqual(@as(usize, 5), hits.len);
+        for (hits) |hit| try out.print(allocator, "{s} ", .{hit.qid});
+        try out.append(allocator, '\n');
+        samples += 1;
+        if (std.mem.eql(u8, try std.fmt.bufPrint(&qid_buffer, "q_msg_{d}", .{index + 1}), hits[0].qid)) found_self += 1;
+    }
+    if (found_self * 10 < samples * 9) {
+        std.debug.print("only {d} of {d} fixtures were their own nearest neighbour\n", .{ found_self, samples });
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "lattice adapter persists 1536-dimension vectors across reopen on 8KB pages" {
+    if (!try slowTestsEnabled()) return error.SkipZigTest;
+    // The page size main.zig picks for 1536 dimensions.
+    try checkVectorPersistence("vectors-1536-8k.lattice", 1536, 8192, 2000);
+}
+
+test "lattice adapter persists 1536-dimension vectors across reopen on 4KB pages" {
+    if (!try slowTestsEnabled()) return error.SkipZigTest;
+    // A 6KB vector does not fit in a 4KB page.
+    try checkVectorPersistence("vectors-1536-4k.lattice", 1536, 4096, 2000);
+}
+
 test "lattice adapter verify flags derived nodes without live evidence" {
     var store = try TestStore.init("verify.lattice");
     defer store.deinit();
