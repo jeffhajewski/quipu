@@ -48,7 +48,7 @@ zig build -Denable-lattice=true \
 ./zig-out/bin/quipu --db /tmp/quipu.lattice serve-stdio   # or set QUIPU_DB_PATH
 ```
 
-Targets the published LatticeDB `0.5.0` C ABI.
+Targets the LatticeDB `0.15.0` C ABI (CI pins `v0.15.0`). Build LatticeDB with `-Doptimize=ReleaseSafe`; a Debug `liblattice` is roughly 35x slower to ingest, and Lattice-backed `zig build test` takes about a minute against it versus about 2 seconds against ReleaseSafe. Slow adapter tests (1536-dim persistence, write timing) run only with `QUIPU_LATTICE_SLOW_TESTS=1`.
 
 ## Non-obvious tooling behavior
 
