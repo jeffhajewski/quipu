@@ -457,7 +457,8 @@ def run_question(case: Mapping[str, Any], config: Mapping[str, Any], proxy: Any,
                 params: dict[str, Any] = {
                     "query": case["question"], "scope": case["scope"],
                     "time": {"validAt": case["questionTime"]}, "budgetTokens": budget,
-                    "options": {"includeDebug": True, "includeEvidence": True},
+                    "options": {**(config.get("answerOptions") or {}),
+                                "includeDebug": True, "includeEvidence": True},
                 }
                 if config.get("needs"):
                     params["needs"] = config["needs"]
@@ -731,7 +732,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         "embeddingViaProxy": args.embedding_provider_via_proxy, "embeddingModel": args.embedding_model,
         "vectorDimensions": args.vector_dimensions, "readerModel": args.reader_model,
         "budgets": args.budgets, "extract": not args.no_extract, "needs": args.needs, "mode": args.mode,
-        "daemonArgs": args.daemon_arg or [], "rememberTimeout": args.remember_timeout,
+        "daemonArgs": args.daemon_arg or [], "answerOptions": parse_answer_options(args.answer_option),
+        "rememberTimeout": args.remember_timeout,
         "answerTimeout": args.answer_timeout,
     }
     identity = {
@@ -989,6 +991,20 @@ def cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def parse_answer_options(pairs: list[str] | None) -> dict[str, Any]:
+    """Parse repeatable ``KEY=JSON`` flags into memory.answer options."""
+    options: dict[str, Any] = {}
+    for pair in pairs or []:
+        key, sep, raw = pair.partition("=")
+        if not sep or not key:
+            raise SystemExit(f"--answer-option expects KEY=JSON, got {pair!r}")
+        try:
+            options[key] = json.loads(raw)
+        except json.JSONDecodeError:
+            options[key] = raw
+    return options
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1027,6 +1043,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--needs", nargs="+", help="memory.answer needs (default: omitted)")
     run.add_argument("--mode", choices=["fts", "vector", "hybrid", "graph"], help="memory.answer mode (default: omitted)")
     run.add_argument("--daemon-arg", action="append", help="extra daemon CLI argument (repeatable)")
+    run.add_argument("--answer-option", action="append", metavar="KEY=JSON",
+                     help="extra memory.answer option, value parsed as JSON (repeatable)")
     run.add_argument("--questions", nargs="+", help="subset of selected question IDs")
     run.add_argument("--limit", type=int)
     run.add_argument("--fresh", action="store_true", help="ignore matching per-question results")

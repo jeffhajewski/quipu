@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "evals" / "src"))
 
 from quipu_evals.sota_longmemeval import (  # noqa: E402
-    build_case, coverage, item_turns, linked_message_qids, paired_comparison, percentile,
-    reader_context, render_context, select_dev,
+    build_case, coverage, item_turns, linked_message_qids, paired_comparison, parse_answer_options,
+    percentile, reader_context, render_context, select_dev,
 )
 
 
@@ -141,6 +141,19 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(percentile([1, 2, 3, 4], 0.5), 2)
         self.assertEqual(percentile(range(1, 101), 0.95), 95)
         self.assertIsNone(percentile([], 0.5))
+
+
+class AnswerOptionTests(unittest.TestCase):
+    def test_values_parse_as_json_with_string_fallback(self):
+        self.assertEqual(
+            parse_answer_options(["rerank=false", "topK=40", "label=plain"]),
+            {"rerank": False, "topK": 40, "label": "plain"},
+        )
+        self.assertEqual(parse_answer_options(None), {})
+
+    def test_rejects_pairs_without_equals(self):
+        with self.assertRaises(SystemExit):
+            parse_answer_options(["rerank"])
 
 
 if __name__ == "__main__":
