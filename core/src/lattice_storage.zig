@@ -1929,6 +1929,49 @@ test "lattice adapter persists 1536-dimension vectors across reopen on 4KB pages
     try checkVectorPersistence("vectors-1536-4k.lattice", 1536, 4096, 2000);
 }
 
+/// Writes `count` nodes and prints the mean write time of each tenth, so a
+/// write cost that grows with the store shows up as rising numbers.
+fn timeNodeWrites(name: []const u8, label: []const u8, count: usize) !void {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var store = try TestStore.init(name);
+    defer store.deinit();
+    var state = try store.open();
+    defer state.deinit();
+    const adapter = state.adapter();
+
+    var text_buffer: [512]u8 = undefined;
+    var content_buffer: [600]u8 = undefined;
+    var qid_buffer: [32]u8 = undefined;
+    var line = std.ArrayList(u8).empty;
+    defer line.deinit(allocator);
+    const tenth = count / 10;
+    const started = std.Io.Timestamp.now(io, .awake);
+    var bucket_start = started;
+    for (0..count) |index| {
+        const content = try std.fmt.bufPrint(&content_buffer, "{{\"content\":\"{s}\"}}", .{try fixtureText(&text_buffer, index)});
+        const qid = try std.fmt.bufPrint(&qid_buffer, "q_n_{d}", .{index + 1});
+        try testPut(adapter, qid, label, content);
+        if ((index + 1) % tenth == 0) {
+            const elapsed = bucket_start.untilNow(io, .awake);
+            try line.print(allocator, " {d:.2}", .{@as(f64, @floatFromInt(elapsed.toNanoseconds())) / @as(f64, @floatFromInt(tenth)) / 1e6});
+            bucket_start = std.Io.Timestamp.now(io, .awake);
+        }
+    }
+    const total = started.untilNow(io, .awake);
+    std.debug.print("\n{s} x{d}: total {d} ms; ms/node by tenth:{s}\n", .{ label, count, total.toMilliseconds(), line.items });
+}
+
+test "lattice adapter node write timing" {
+    if (!try slowTestsEnabled()) return error.SkipZigTest;
+    // Not searchable: node and properties only.
+    try timeNodeWrites("timing-session.lattice", "Session", 5000);
+    // Searchable, no vector.
+    try timeNodeWrites("timing-observation.lattice", "Observation", 5000);
+    // Searchable with a vector.
+    try timeNodeWrites("timing-message.lattice", "Message", 5000);
+}
+
 test "lattice adapter verify flags derived nodes without live evidence" {
     var store = try TestStore.init("verify.lattice");
     defer store.deinit();
