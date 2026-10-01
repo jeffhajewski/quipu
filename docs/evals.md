@@ -200,6 +200,15 @@ check retrieval/evidence cheaply, then `just benchmark-synthesis-lab-answer` to
 exercise LatticeDB graph retrieval with provider-backed answering and
 `abstainIfWeak`.
 
+Note on the synthesis lab: the daemon no longer has extractor rules or answer
+slot gates keyed to this lab's fixture sentences (Denver trip, Orion, Alpha/Beta
+sprints, retreat tickets, and so on). Those rules were benchmark-specific and
+have been removed. The lab now measures the general path: raw evidence plus the
+`memory.answer` reader, with heuristic aggregation no longer short-circuiting
+the model. Its scores are not comparable with runs from before this change, and
+the deterministic (no-provider) answer path is expected to score low on it. The
+suite is kept as a smoke test for the reader path.
+
 Failure reports can be generated from a benchmark directory or result JSON:
 
 ```bash
