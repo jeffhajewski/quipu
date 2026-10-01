@@ -5,13 +5,30 @@ const NodeRecord = struct {
     qid: []u8,
     label: []u8,
     properties_json: []u8,
+    /// Lexical index for this node. Empty when the node is not searchable.
+    index: IndexedText = .{},
 
     fn deinit(self: NodeRecord, allocator: std.mem.Allocator) void {
         allocator.free(self.qid);
         allocator.free(self.label);
         allocator.free(self.properties_json);
+        self.index.deinit(allocator);
     }
 };
+
+/// Tokenized index text for one node. `terms` slices point into `buffer`.
+const IndexedText = struct {
+    buffer: []u8 = &.{},
+    terms: []const []const u8 = &.{},
+
+    fn deinit(self: IndexedText, allocator: std.mem.Allocator) void {
+        if (self.terms.len > 0) allocator.free(self.terms);
+        if (self.buffer.len > 0) allocator.free(self.buffer);
+    }
+};
+
+const bm25_k1: f32 = 1.2;
+const bm25_b: f32 = 0.75;
 
 const EdgeRecord = struct {
     qid: []u8,
@@ -107,12 +124,20 @@ pub const InMemoryAdapter = struct {
         const self = ctx(context);
         const key = try self.allocator.dupe(u8, node.qid);
         errdefer self.allocator.free(key);
+        const index = try buildIndex(self.allocator, node.label, node.properties_json);
+        errdefer index.deinit(self.allocator);
+        const owned_qid = try self.allocator.dupe(u8, node.qid);
+        errdefer self.allocator.free(owned_qid);
+        const owned_label = try self.allocator.dupe(u8, node.label);
+        errdefer self.allocator.free(owned_label);
+        const owned_properties = try self.allocator.dupe(u8, node.properties_json);
+        errdefer self.allocator.free(owned_properties);
         const record = NodeRecord{
-            .qid = try self.allocator.dupe(u8, node.qid),
-            .label = try self.allocator.dupe(u8, node.label),
-            .properties_json = try self.allocator.dupe(u8, node.properties_json),
+            .qid = owned_qid,
+            .label = owned_label,
+            .properties_json = owned_properties,
+            .index = index,
         };
-        errdefer record.deinit(self.allocator);
 
         const entry = try self.nodes.getOrPut(key);
         if (entry.found_existing) {
@@ -183,21 +208,116 @@ pub const InMemoryAdapter = struct {
         return edges.toOwnedSlice(allocator);
     }
 
+    /// BM25 (k1=1.2, b=0.75) over each searchable node's index text.
+    /// An empty query enumerates every node, including unsearchable ones.
     fn fullTextSearch(context: *anyopaque, allocator: std.mem.Allocator, query: storage.FullTextQuery) ![]storage.SearchHit {
         const self = ctx(context);
         var hits = std.ArrayList(storage.SearchHit).empty;
-        var node_it = self.nodes.iterator();
-        while (node_it.next()) |entry| {
-            const score = scoreRecord(entry.value_ptr.*, query.text);
-            if (score > 0) {
+        errdefer {
+            for (hits.items) |hit| allocator.free(hit.qid);
+            hits.deinit(allocator);
+        }
+        if (query.limit == 0) return hits.toOwnedSlice(allocator);
+
+        if (query.text.len == 0) {
+            var node_it = self.nodes.iterator();
+            while (node_it.next()) |entry| {
                 try hits.append(allocator, .{
                     .qid = try allocator.dupe(u8, entry.value_ptr.qid),
-                    .score = score,
+                    .score = 1.0,
                 });
                 if (hits.items.len >= query.limit) break;
             }
+            return hits.toOwnedSlice(allocator);
+        }
+
+        const query_index = try tokenize(allocator, query.text);
+        defer query_index.deinit(allocator);
+        const query_terms = try uniqueTerms(allocator, query_index.terms);
+        defer allocator.free(query_terms);
+        if (query_terms.len == 0) return hits.toOwnedSlice(allocator);
+
+        // Pass 1: corpus statistics and per-document term frequencies.
+        const term_count = query_terms.len;
+        var records = std.ArrayList(*const NodeRecord).empty;
+        defer records.deinit(allocator);
+        var frequencies = std.ArrayList(u32).empty;
+        defer frequencies.deinit(allocator);
+        const document_frequency = try allocator.alloc(u32, term_count);
+        defer allocator.free(document_frequency);
+        @memset(document_frequency, 0);
+        var corpus_size: usize = 0;
+        var total_length: usize = 0;
+
+        var node_it = self.nodes.iterator();
+        while (node_it.next()) |entry| {
+            const record = entry.value_ptr;
+            const terms = record.index.terms;
+            if (terms.len == 0) continue;
+            corpus_size += 1;
+            total_length += terms.len;
+
+            const start = frequencies.items.len;
+            try frequencies.appendNTimes(allocator, 0, term_count);
+            const row = frequencies.items[start..];
+            var matched = false;
+            for (terms) |term| {
+                for (query_terms, 0..) |query_term, term_index| {
+                    if (std.mem.eql(u8, term, query_term)) {
+                        row[term_index] += 1;
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            if (!matched) {
+                frequencies.shrinkRetainingCapacity(start);
+                continue;
+            }
+            for (row, 0..) |count, term_index| {
+                if (count > 0) document_frequency[term_index] += 1;
+            }
+            try records.append(allocator, record);
+        }
+        if (records.items.len == 0) return hits.toOwnedSlice(allocator);
+
+        // Pass 2: score matching documents.
+        const n: f32 = @floatFromInt(corpus_size);
+        const average_length: f32 = @as(f32, @floatFromInt(total_length)) / n;
+        const idf = try allocator.alloc(f32, term_count);
+        defer allocator.free(idf);
+        for (document_frequency, 0..) |df_count, term_index| {
+            const df: f32 = @floatFromInt(df_count);
+            idf[term_index] = @log(1.0 + (n - df + 0.5) / (df + 0.5));
+        }
+        for (records.items, 0..) |record, record_index| {
+            const row = frequencies.items[record_index * term_count .. (record_index + 1) * term_count];
+            const length: f32 = @floatFromInt(record.index.terms.len);
+            const norm = bm25_k1 * (1.0 - bm25_b + bm25_b * length / average_length);
+            var score: f32 = 0;
+            for (row, 0..) |count, term_index| {
+                if (count == 0) continue;
+                const tf: f32 = @floatFromInt(count);
+                score += idf[term_index] * tf * (bm25_k1 + 1.0) / (tf + norm);
+            }
+            if (score <= 0) continue;
+            try hits.append(allocator, .{
+                .qid = try allocator.dupe(u8, record.qid),
+                .score = score,
+            });
+        }
+
+        std.mem.sort(storage.SearchHit, hits.items, {}, hitRanksBefore);
+        if (hits.items.len > query.limit) {
+            for (hits.items[query.limit..]) |hit| allocator.free(hit.qid);
+            hits.shrinkRetainingCapacity(query.limit);
         }
         return hits.toOwnedSlice(allocator);
+    }
+
+    fn hitRanksBefore(_: void, left: storage.SearchHit, right: storage.SearchHit) bool {
+        if (left.score != right.score) return left.score > right.score;
+        return std.mem.order(u8, left.qid, right.qid) == .lt;
     }
 
     fn vectorSearch(_: *anyopaque, allocator: std.mem.Allocator, _: storage.VectorQuery) ![]storage.SearchHit {
@@ -356,30 +476,6 @@ pub const InMemoryAdapter = struct {
         }
     }
 
-    fn scoreRecord(record: NodeRecord, query: []const u8) f32 {
-        if (query.len == 0) return 1.0;
-
-        var score: f32 = 0;
-        var tokens = std.mem.tokenizeAny(u8, query, " \t\r\n.,?!:;\"'()[]{}<>/\\|");
-        while (tokens.next()) |token| {
-            if (token.len < 2) continue;
-            if (containsIgnoreCase(record.properties_json, token) or containsIgnoreCase(record.label, token)) {
-                score += 1.0;
-            }
-        }
-        return score;
-    }
-
-    fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-        if (needle.len == 0) return true;
-        if (needle.len > haystack.len) return false;
-        var index: usize = 0;
-        while (index + needle.len <= haystack.len) : (index += 1) {
-            if (std.ascii.eqlIgnoreCase(haystack[index .. index + needle.len], needle)) return true;
-        }
-        return false;
-    }
-
     fn appendIssue(
         allocator: std.mem.Allocator,
         issues: *std.ArrayList(storage.VerificationIssue),
@@ -479,6 +575,113 @@ pub const InMemoryAdapter = struct {
     };
 };
 
+/// Labels that are never full-text hits: bookkeeping nodes and the
+/// Session/Turn containers, which carry no searchable text of their own.
+fn isExcludedSearchLabel(label: []const u8) bool {
+    const excluded = [_][]const u8{ "Job", "Idempotency", "Schema", "Migration", "Session", "Turn" };
+    for (excluded) |name| {
+        if (std.mem.eql(u8, label, name)) return true;
+    }
+    return false;
+}
+
+/// Index text is `searchText` ?? `content` ?? `text` ?? `name` from the
+/// properties JSON; nodes with `searchable:false` and excluded labels get none.
+fn buildIndex(allocator: std.mem.Allocator, label: []const u8, properties_json: []const u8) !IndexedText {
+    if (isExcludedSearchLabel(label)) return .{};
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, properties_json, .{}) catch return .{};
+    defer parsed.deinit();
+    const object = switch (parsed.value) {
+        .object => |object| object,
+        else => return .{},
+    };
+    if (object.get("searchable")) |value| {
+        switch (value) {
+            .bool => |searchable| if (!searchable) return .{},
+            else => {},
+        }
+    }
+    const fields = [_][]const u8{ "searchText", "content", "text", "name" };
+    for (fields) |field| {
+        const value = object.get(field) orelse continue;
+        switch (value) {
+            .string => |text| return tokenize(allocator, text),
+            else => continue,
+        }
+    }
+    return .{};
+}
+
+/// Lowercased alphanumeric tokens (non-ASCII bytes stay inside tokens so
+/// UTF-8 words are kept whole), minus a small stopword list.
+fn tokenize(allocator: std.mem.Allocator, text: []const u8) !IndexedText {
+    const buffer = try allocator.alloc(u8, text.len);
+    errdefer allocator.free(buffer);
+    for (text, 0..) |byte, index| buffer[index] = std.ascii.toLower(byte);
+
+    var terms = std.ArrayList([]const u8).empty;
+    errdefer terms.deinit(allocator);
+    var start: ?usize = null;
+    for (buffer, 0..) |byte, index| {
+        if (isTokenByte(byte)) {
+            if (start == null) start = index;
+            continue;
+        }
+        if (start) |token_start| {
+            try appendTerm(allocator, &terms, buffer[token_start..index]);
+            start = null;
+        }
+    }
+    if (start) |token_start| {
+        try appendTerm(allocator, &terms, buffer[token_start..]);
+    }
+    if (terms.items.len == 0) {
+        terms.deinit(allocator);
+        allocator.free(buffer);
+        return .{};
+    }
+    return .{ .buffer = buffer, .terms = try terms.toOwnedSlice(allocator) };
+}
+
+/// Drops stopwords and folds simple plurals ("responses" -> "response").
+fn appendTerm(allocator: std.mem.Allocator, terms: *std.ArrayList([]const u8), token: []const u8) !void {
+    if (isStopWord(token)) return;
+    var term = token;
+    if (term.len > 3 and term[term.len - 1] == 's' and term[term.len - 2] != 's') {
+        term = term[0 .. term.len - 1];
+    }
+    try terms.append(allocator, term);
+}
+
+fn isTokenByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte >= 0x80;
+}
+
+fn uniqueTerms(allocator: std.mem.Allocator, terms: []const []const u8) ![]const []const u8 {
+    var unique = std.ArrayList([]const u8).empty;
+    errdefer unique.deinit(allocator);
+    outer: for (terms) |term| {
+        for (unique.items) |existing| {
+            if (std.mem.eql(u8, existing, term)) continue :outer;
+        }
+        try unique.append(allocator, term);
+    }
+    return unique.toOwnedSlice(allocator);
+}
+
+fn isStopWord(token: []const u8) bool {
+    const stop_words = [_][]const u8{
+        "a",   "an",  "and",  "as",     "at",    "be",    "before", "did",
+        "do",  "for", "her",  "his",    "i",     "in",    "is",     "it",
+        "of",  "on",  "or",   "should", "that",  "the",   "this",   "to",
+        "was", "we",  "what", "when",   "where", "which", "who",    "with",
+    };
+    for (stop_words) |word| {
+        if (std.mem.eql(u8, token, word)) return true;
+    }
+    return false;
+}
+
 test "in-memory adapter stores nodes and searches text" {
     var adapter_state = InMemoryAdapter.init(std.testing.allocator);
     defer adapter_state.deinit();
@@ -498,6 +701,100 @@ test "in-memory adapter stores nodes and searches text" {
 
     try std.testing.expectEqual(@as(usize, 1), hits.len);
     try std.testing.expectEqualStrings("q_msg_1", hits[0].qid);
+}
+
+test "in-memory search indexes text fields, not property keys" {
+    var adapter_state = InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    const adapter = adapter_state.adapter();
+
+    try adapter.putNode(.{
+        .qid = "q_msg_1",
+        .label = "Message",
+        .properties_json = "{\"kind\":\"message\",\"content\":\"Bring the snacks\",\"sessionQid\":\"q_sess_1\"}",
+    });
+    try adapter.putNode(.{
+        .qid = "q_note_1",
+        .label = "Observation",
+        .properties_json = "{\"searchText\":\"zulu\",\"content\":\"yankee\"}",
+    });
+
+    for ([_][]const u8{ "kind", "session", "message", "yankee" }) |text| {
+        const hits = try adapter.fullTextSearch(std.testing.allocator, .{ .text = text, .limit = 10 });
+        defer freeTestHits(hits);
+        try std.testing.expectEqual(@as(usize, 0), hits.len);
+    }
+    const snack_hits = try adapter.fullTextSearch(std.testing.allocator, .{ .text = "snack", .limit = 10 });
+    defer freeTestHits(snack_hits);
+    try std.testing.expectEqual(@as(usize, 1), snack_hits.len);
+    try std.testing.expectEqualStrings("q_msg_1", snack_hits[0].qid);
+    const zulu_hits = try adapter.fullTextSearch(std.testing.allocator, .{ .text = "zulu", .limit = 10 });
+    defer freeTestHits(zulu_hits);
+    try std.testing.expectEqual(@as(usize, 1), zulu_hits.len);
+    try std.testing.expectEqualStrings("q_note_1", zulu_hits[0].qid);
+}
+
+test "in-memory BM25 ranks rare and dense matches first and truncates after sorting" {
+    var adapter_state = InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    const adapter = adapter_state.adapter();
+
+    const docs = [_][2][]const u8{
+        .{ "q_doc_1", "apple pie recipe from grandma" },
+        .{ "q_doc_2", "apple tart" },
+        .{ "q_doc_3", "apple juice" },
+        .{ "q_doc_4", "zebra crossing near the market" },
+        .{ "q_doc_5", "pie" },
+    };
+    for (docs) |doc| {
+        const props = try std.fmt.allocPrint(std.testing.allocator, "{{\"content\":\"{s}\"}}", .{doc[1]});
+        defer std.testing.allocator.free(props);
+        try adapter.putNode(.{ .qid = doc[0], .label = "Message", .properties_json = props });
+    }
+
+    const all = try adapter.fullTextSearch(std.testing.allocator, .{ .text = "apple zebra", .limit = 10 });
+    defer freeTestHits(all);
+    try std.testing.expectEqual(@as(usize, 4), all.len);
+    try std.testing.expectEqualStrings("q_doc_4", all[0].qid);
+    for (all[1..], 1..) |hit, index| {
+        try std.testing.expect(hit.score <= all[index - 1].score);
+    }
+
+    const top = try adapter.fullTextSearch(std.testing.allocator, .{ .text = "apple zebra", .limit = 1 });
+    defer freeTestHits(top);
+    try std.testing.expectEqual(@as(usize, 1), top.len);
+    try std.testing.expectEqualStrings("q_doc_4", top[0].qid);
+
+    const pie = try adapter.fullTextSearch(std.testing.allocator, .{ .text = "pie", .limit = 10 });
+    defer freeTestHits(pie);
+    try std.testing.expectEqual(@as(usize, 2), pie.len);
+    try std.testing.expectEqualStrings("q_doc_5", pie[0].qid);
+    try std.testing.expect(pie[0].score > pie[1].score);
+}
+
+test "in-memory search skips unsearchable nodes but empty query enumerates them" {
+    var adapter_state = InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    const adapter = adapter_state.adapter();
+
+    try adapter.putNode(.{ .qid = "q_msg_1", .label = "Message", .properties_json = "{\"content\":\"alpha long message\",\"searchable\":false}" });
+    try adapter.putNode(.{ .qid = "q_chunk_1_0", .label = "Chunk", .properties_json = "{\"content\":\"alpha chunk\"}" });
+    try adapter.putNode(.{ .qid = "q_sess_1", .label = "Session", .properties_json = "{\"content\":\"alpha\"}" });
+    try adapter.putNode(.{ .qid = "q_turn_1", .label = "Turn", .properties_json = "{\"text\":\"alpha\"}" });
+    try adapter.putNode(.{ .qid = "q_job_1", .label = "Job", .properties_json = "{\"text\":\"alpha\"}" });
+
+    const hits = try adapter.fullTextSearch(std.testing.allocator, .{ .text = "alpha", .limit = 10 });
+    defer freeTestHits(hits);
+    try std.testing.expectEqual(@as(usize, 1), hits.len);
+    try std.testing.expectEqualStrings("q_chunk_1_0", hits[0].qid);
+
+    const all = try adapter.fullTextSearch(std.testing.allocator, .{ .text = "", .limit = 100 });
+    defer freeTestHits(all);
+    try std.testing.expectEqual(@as(usize, 5), all.len);
+
+    const stop_only = try adapter.fullTextSearch(std.testing.allocator, .{ .text = "what is the", .limit = 10 });
+    defer freeTestHits(stop_only);
+    try std.testing.expectEqual(@as(usize, 0), stop_only.len);
 }
 
 test "in-memory adapter reports storage capabilities" {
@@ -609,4 +906,9 @@ fn freeVerificationIssues(allocator: std.mem.Allocator, issues: []const storage.
         if (issue.qid) |qid| allocator.free(qid);
     }
     allocator.free(issues);
+}
+
+fn freeTestHits(hits: []const storage.SearchHit) void {
+    for (hits) |hit| std.testing.allocator.free(hit.qid);
+    std.testing.allocator.free(hits);
 }
