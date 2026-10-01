@@ -138,6 +138,59 @@ Current date: 2023-05-30 (Tuesday)          <- retrieve only, when time.validAt 
   date or chunk marker, plus a share of its session header. This fits inside the
   per-item allowance of the budget estimator.
 
+### Temporal hints
+
+`options.temporalHints` (on `memory.retrieve` and `memory.answer`, default
+`false`) adds two deterministic hints computed from `time.validAt`. Without a
+parseable `validAt`, nothing changes. The hints never affect retrieval.
+
+1. Each dated session header ends with its offset from the question date. The
+   offset is in days under 60 days (`today`, `1 day ago`, `10 days ago`), then
+   approximate months under two years, then years. Both larger forms keep the
+   exact day count:
+
+   ```text
+   ## session s01 2023-01-13 (Fri), ~5 months (144 days) ago
+   ## session s07 2023-02-11 (Sat), ~4 months (115 days) ago
+   ## session s25 2023-04-19 (Wed), 48 days ago
+   ## session s40 2023-05-30 (Tue), 7 days ago
+   ```
+
+2. A fixed phrase grammar (`core/src/temporal.zig`) resolves relative time
+   expressions in the query against the question date. The result is rendered
+   as `Time references: "last month" = 2023-04-01 to 2023-04-30; ...` right
+   after `Current date:`. In `memory.retrieve` it goes in `prompt`. In
+   `memory.answer` it goes in the reader's user turn and in
+   `answerTrace.timeReferences`. If nothing matches, the line is omitted.
+   Matching is case-insensitive over word tokens, in question order, with
+   repeats dropped. N is 1 to 999 or one to twelve. Weeks start on Monday.
+
+   | Phrase | Resolves to |
+   | --- | --- |
+   | `today`, `yesterday`, `day before yesterday`, `last night` | that day |
+   | `N days ago` | that day |
+   | `N weeks/months/years ago`, `a week ago` | `around` that day (months clamp to month end) |
+   | `past/last/previous N days/weeks/months/years` | N units back to today |
+   | `past week/month/year`, `the last week/month/year` | one unit back to today |
+   | `last/previous week`, `last weekend` | the previous Monday to Sunday, or its Saturday and Sunday |
+   | `last/previous month`, `last/previous year` | the previous calendar month or year |
+   | `this week/month/year` | period start to today |
+   | `since the start/beginning of the year/month/week`, `since <Month>` | that start to today |
+   | `earlier this year/month/week` | period start to yesterday |
+   | `last <weekday>` | the most recent such day before today |
+   | `last <Month>` | the most recent such month before the current month |
+   | `in/during <Month>` | the most recent such month not after the current month |
+   | `in/during <Month> [of] <year>`, `<Month> <year>`, `in <year>` | that month or year |
+
+   `last/this/past` + unit is not resolved before `of` ("the last week of
+   June"). Month-end and leap-year arithmetic is exact. For example,
+   2024-03-31 minus one month is 2024-02-29, and "last month" on 2024-03-01 is
+   2024-02-01 to 2024-02-29.
+
+Header offsets add a few tokens per session that the budget estimator does not
+count. In a six-question LongMemEval-S smoke run at a 4K budget, they added 16
+to 94 context tokens per question, about 50 on average.
+
 ### Answering
 
 `memory.answer` runs the same retrieval path and has exactly one answer path.
@@ -150,6 +203,19 @@ It never routes on question wording.
    is described in [providers.md](providers.md#memoryanswer-reader).
 3. Without a provider (deterministic/no-key mode), the answer is the value of
    the top current derived fact, or else the top raw evidence text.
+
+Two per-request reader options are off by default, so they can be A/B tested
+without changing the default path:
+
+- `options.readerReasoning` uses the reasoning reader prompt (see
+  [providers.md](providers.md#optional-reader-modes)). The reader lists the
+  relevant lines by qid, date, and speaker, takes the latest value of a changed
+  attribute, enumerates before counting, does date math step by step, treats
+  its own earlier replies as evidence, grounds recommendations in stated
+  preferences, and checks the question's premise. It writes this review in a
+  leading `reasoning` field before `answer`.
+- `options.temporalHints` adds session offsets and resolved time references
+  (see [Temporal hints](#temporal-hints)).
 
 The reader must return
 `{"answer":"...","answerable":true|false,"supportQids":[...],"confidence":0..1}`.
@@ -169,11 +235,22 @@ The runtime parses it, tolerating code fences, surrounding prose, an
   value, it defaults to 0.5 for answerable answers and 0 otherwise. The
   deterministic fallback reports 0.5 for a derived fact and 0.25 for raw
   evidence.
+- In reasoning mode, `reasoning` must be a non-empty string. It is trimmed and
+  returned only as `answerTrace.reasoning`, never in `answer`. A missing, empty,
+  or null value adds `missing_reasoning`, and any other type adds
+  `invalid_reasoning`. Unparseable output adds `missing_reasoning` next to
+  `parse_error`. None of these discards the answer or changes the validation
+  status. In direct mode a volunteered `reasoning` field is ignored.
 
 `answerTrace.strategy` only describes which path ran: `llm_reader`,
-`deterministic_fallback`, or `abstain`. With `options.includeDebug`, the
-response also carries `prompt`, the exact memory context string the reader
-received.
+`deterministic_fallback`, or `abstain`. `answerTrace.readerMode` is `none` when
+no reader was called, else `direct` or `reasoning`. `answerTrace.temporalHints`
+is true when hints were applied (requested, with a parseable `validAt`), and
+`answerTrace.timeReferences` holds the `Time references:` payload the reader
+received, if any. With `options.includeDebug`, the response also carries
+`prompt`, the exact memory context string the reader received. With temporal
+hints that includes the header offsets. The `Current date:` and
+`Time references:` lines are in the user turn, not in `prompt`.
 
 ## Entity Resolution V0
 
