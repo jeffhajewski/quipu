@@ -34,6 +34,10 @@ const message_chunk_boundary_window = 200;
 const default_budget_tokens: i64 = 4096;
 /// Candidate items kept per retrieval; enough chunks to fill the default budget.
 const retrieval_candidate_limit: usize = 80;
+/// Leading candidates sent to a configured reranker (`options.rerankCandidates`).
+const default_rerank_candidates: usize = 50;
+/// Rerank scores listed in the retrieval trace.
+const rerank_trace_top_scores: usize = 10;
 
 const Scope = struct {
     tenant_id: ?[]const u8 = null,
@@ -210,6 +214,45 @@ const RetrievalTrace = struct {
     scoreBreakdowns: []const ScoreBreakdown = &.{},
     scoringDetails: []const ScoringDetail = &.{},
     droppedItemReasons: []const DroppedItemReason = &.{},
+    /// Present only when a reranker is configured.
+    rerank: ?RerankTrace = null,
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        inline for (std.meta.fields(@This())) |field| {
+            const value = @field(self, field.name);
+            if (comptime std.mem.eql(u8, field.name, "rerank")) {
+                if (value) |rerank| {
+                    try jw.objectField(field.name);
+                    try jw.write(rerank);
+                }
+            } else {
+                try jw.objectField(field.name);
+                try jw.write(value);
+            }
+        }
+        try jw.endObject();
+    }
+};
+
+const RerankTrace = struct {
+    model: ?[]const u8,
+    /// `applied`, `failed` (fused order kept), `disabled` (`options.rerank`
+    /// false), or `skipped` (no candidates).
+    status: []const u8,
+    /// Leading candidates sent to the reranker.
+    windowSize: usize = 0,
+    /// Candidates the reranker returned a score for.
+    rerankedCount: usize = 0,
+    latencyMs: f64 = 0,
+    /// Best scores first, at most `rerank_trace_top_scores`.
+    topScores: []const RerankScore = &.{},
+    @"error": ?[]const u8 = null,
+};
+
+const RerankScore = struct {
+    qid: []const u8,
+    score: f64,
 };
 
 const CandidateSources = struct {
@@ -315,6 +358,8 @@ pub const RuntimeOptions = struct {
     io: ?std.Io = null,
     answer_provider: providers.ProviderEndpoint = .{},
     entity_provider: providers.ProviderEndpoint = .{},
+    /// Optional cross-encoder stage of memory.retrieve and memory.answer.
+    reranker: providers.ProviderEndpoint = .{},
 };
 
 pub const Runtime = struct {
@@ -410,6 +455,12 @@ pub const Runtime = struct {
                     .consolidator = "unavailable",
                     .entityResolver = if (self.options.entity_provider.kind == .none) "unavailable" else "running",
                     .answerer = if (self.options.answer_provider.kind == .none) "unavailable" else "running",
+                },
+                .capabilities = .{
+                    .reranker = .{
+                        .configured = self.options.reranker.kind != .none,
+                        .model = if (self.options.reranker.kind != .none) self.options.reranker.model else null,
+                    },
                 },
             },
         };
@@ -748,6 +799,9 @@ pub const Runtime = struct {
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
         };
+        const rerank_settings = parseRerankSettings(options) orelse {
+            return errorResponse(allocator, id, "invalid_request", "options.rerankCandidates must be a positive integer");
+        };
 
         var results = try self.collectItems(allocator, query, retrieve_mode, retrieval_candidate_limit, scope, false, null, valid_at, event_window, include_evidence, include_trace);
         defer results.deinit();
@@ -757,6 +811,8 @@ pub const Runtime = struct {
         const candidate_count = results.items.items.len;
         const dropped_for_needs = results.filterByNeeds(needs_value);
         results.applyRawEvidencePolicy();
+        var rerank = try self.rerankItems(allocator, query, &results, rerank_settings);
+        defer if (rerank) |*stage| stage.deinit();
         const dropped_for_budget = results.applyTokenBudget(@intCast(budget));
 
         var warnings = std.ArrayList([]const u8).empty;
@@ -766,6 +822,9 @@ pub const Runtime = struct {
         }
         if (results.items.items.len == 0) {
             try warnings.append(allocator, "no_memory_items");
+        }
+        if (rerank) |*stage| {
+            if (stage.failed()) try warnings.append(allocator, "rerank_failed");
         }
         try appendRetrievalWarnings(allocator, &warnings, results.items.items, include_evidence);
 
@@ -797,6 +856,7 @@ pub const Runtime = struct {
             .scoreBreakdowns = score_breakdowns,
             .scoringDetails = scoring_details,
             .droppedItemReasons = dropped_item_reasons,
+            .rerank = if (rerank) |*stage| stage.view() else null,
         };
 
         const item_qids = try allocator.alloc([]const u8, results.items.items.len);
@@ -872,6 +932,9 @@ pub const Runtime = struct {
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
         };
+        const rerank_settings = parseRerankSettings(options) orelse {
+            return errorResponse(allocator, id, "invalid_request", "options.rerankCandidates must be a positive integer");
+        };
 
         var results = try self.collectItems(allocator, query, retrieve_mode, retrieval_candidate_limit, scope, false, null, valid_at, event_window, include_evidence, include_trace);
         defer results.deinit();
@@ -881,12 +944,17 @@ pub const Runtime = struct {
         const candidate_count = results.items.items.len;
         const dropped_for_needs = results.filterByNeeds(needs_value);
         results.applyRawEvidencePolicy();
+        var rerank = try self.rerankItems(allocator, query, &results, rerank_settings);
+        defer if (rerank) |*stage| stage.deinit();
         const dropped_for_budget = results.applyTokenBudget(@intCast(budget));
 
         var warnings = std.ArrayList([]const u8).empty;
         defer warnings.deinit(allocator);
         if (dropped_for_budget > 0) try warnings.append(allocator, "token_budget_truncated");
         if (results.items.items.len == 0) try warnings.append(allocator, "no_memory_items");
+        if (rerank) |*stage| {
+            if (stage.failed()) try warnings.append(allocator, "rerank_failed");
+        }
 
         try appendRetrievalWarnings(allocator, &warnings, results.items.items, include_evidence);
 
@@ -923,6 +991,7 @@ pub const Runtime = struct {
             .scoreBreakdowns = score_breakdowns,
             .scoringDetails = scoring_details,
             .droppedItemReasons = dropped_item_reasons,
+            .rerank = if (rerank) |*stage| stage.view() else null,
         };
 
         // One answer path: with a reader configured, every non-empty context
@@ -2044,6 +2113,78 @@ pub const Runtime = struct {
         return std.fmt.allocPrint(allocator, "q_{s}_{d}", .{ prefix, id });
     }
 
+    /// Optional cross-encoder stage between the raw-evidence policy and budget
+    /// packing. The leading `settings.window` items go to the reranker and are
+    /// reordered by descending relevance (ties keep fused order); window items
+    /// the reranker did not score follow, then the rest in fused order. A
+    /// failed call keeps the fused order. Returns null when no reranker is
+    /// configured, so the response is unchanged.
+    fn rerankItems(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        query: []const u8,
+        results: *OwnedItems,
+        settings: RerankSettings,
+    ) !?OwnedRerankTrace {
+        const endpoint = self.options.reranker;
+        if (endpoint.kind == .none) return null;
+        var stage = OwnedRerankTrace{ .allocator = allocator, .trace = .{ .model = endpoint.model, .status = "applied" } };
+        errdefer stage.deinit();
+        if (!settings.enabled) {
+            stage.trace.status = "disabled";
+            return stage;
+        }
+        const window = @min(settings.window, results.items.items.len);
+        stage.trace.windowSize = window;
+        if (window == 0) {
+            stage.trace.status = "skipped";
+            return stage;
+        }
+
+        const documents = try allocator.alloc([]const u8, window);
+        var built: usize = 0;
+        defer {
+            for (documents[0..built]) |document| allocator.free(document);
+            allocator.free(documents);
+        }
+        for (results.items.items[0..window]) |item| {
+            documents[built] = try rerankDocument(allocator, item);
+            built += 1;
+        }
+
+        const started = if (self.options.io) |io| std.Io.Timestamp.now(io, .awake) else null;
+        const reranked = providers.rerank(allocator, self.options.io, endpoint, .{
+            .query = query,
+            .documents = documents,
+            .top_n = window,
+        });
+        if (started) |timestamp| {
+            const elapsed_ns: f64 = @floatFromInt(timestamp.untilNow(self.options.io.?, .awake).toNanoseconds());
+            stage.trace.latencyMs = @round(elapsed_ns / 1000) / 1000;
+        }
+        const scores = reranked catch |err| {
+            if (err == error.OutOfMemory) return err;
+            stage.trace.status = "failed";
+            stage.trace.@"error" = @errorName(err);
+            return stage;
+        };
+        defer allocator.free(scores);
+        stage.trace.rerankedCount = scores.len;
+
+        const order = try rerankOrder(allocator, window, scores);
+        defer allocator.free(order);
+        const score_by_index = try allocator.alloc(f64, window);
+        defer allocator.free(score_by_index);
+        for (scores) |score| score_by_index[score.index] = score.relevance_score;
+        for (order[0..@min(scores.len, rerank_trace_top_scores)]) |index| {
+            const qid = try allocator.dupe(u8, results.items.items[index].qid);
+            errdefer allocator.free(qid);
+            try stage.top_scores.append(allocator, .{ .qid = qid, .score = score_by_index[index] });
+        }
+        try applyItemOrder(allocator, results.items.items[0..window], order);
+        return stage;
+    }
+
     fn collectItems(
         self: *Runtime,
         allocator: std.mem.Allocator,
@@ -2515,6 +2656,106 @@ pub const Runtime = struct {
             }
             try self.putDeterministicEdge(allocator, source_qid, entity_qid, "MENTIONS");
         }
+    }
+};
+
+const RerankSettings = struct {
+    enabled: bool = true,
+    window: usize = default_rerank_candidates,
+};
+
+/// `options.rerank` (default true) and `options.rerankCandidates` (default
+/// 50). Null when `rerankCandidates` is not a positive integer.
+fn parseRerankSettings(options: ?ObjectMap) ?RerankSettings {
+    var settings = RerankSettings{};
+    const opts = options orelse return settings;
+    if (boolField(&opts, "rerank")) |enabled| settings.enabled = enabled;
+    if (opts.get("rerankCandidates")) |value| switch (value) {
+        .null => {},
+        .integer => |count| {
+            if (count < 1) return null;
+            settings.window = std.math.cast(usize, count) orelse return null;
+        },
+        else => return null,
+    };
+    return settings;
+}
+
+/// What the reranker scores for one item: raw evidence as
+/// `YYYY-MM-DD role: text` from its raw source, so the cross-encoder sees when
+/// and who; derived memory as its text.
+fn rerankDocument(allocator: std.mem.Allocator, item: MessageResult) ![]u8 {
+    const source = item.raw_source orelse return allocator.dupe(u8, item.text);
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    errdefer writer.deinit();
+    if (source.created_at) |created_at| {
+        if (parseIsoDate(created_at)) |_| {
+            try writer.writer.print("{s} ", .{created_at[0..10]});
+        } else |_| {}
+    }
+    if (source.role) |role| try writer.writer.print("{s}: ", .{role});
+    try writer.writer.writeAll(item.text);
+    return writer.toOwnedSlice();
+}
+
+/// New order of the first `window` items: scored items by descending score,
+/// ties in fused order, then unscored items in fused order. `scores` must be
+/// validated (unique indices below `window`).
+fn rerankOrder(allocator: std.mem.Allocator, window: usize, scores: []const providers.RerankResult) ![]usize {
+    const ranked = try allocator.dupe(providers.RerankResult, scores);
+    defer allocator.free(ranked);
+    std.mem.sort(providers.RerankResult, ranked, {}, rerankRanksBefore);
+    const placed = try allocator.alloc(bool, window);
+    defer allocator.free(placed);
+    @memset(placed, false);
+    const order = try allocator.alloc(usize, window);
+    errdefer allocator.free(order);
+    var next: usize = 0;
+    for (ranked) |result| {
+        order[next] = result.index;
+        placed[result.index] = true;
+        next += 1;
+    }
+    for (placed, 0..) |was_placed, index| {
+        if (was_placed) continue;
+        order[next] = index;
+        next += 1;
+    }
+    return order;
+}
+
+fn rerankRanksBefore(_: void, left: providers.RerankResult, right: providers.RerankResult) bool {
+    if (left.relevance_score != right.relevance_score) return left.relevance_score > right.relevance_score;
+    return left.index < right.index;
+}
+
+/// Rearranges `items` so position `i` holds the item previously at `order[i]`.
+fn applyItemOrder(allocator: std.mem.Allocator, items: []MessageResult, order: []const usize) !void {
+    const reordered = try allocator.alloc(MessageResult, order.len);
+    defer allocator.free(reordered);
+    for (order, 0..) |source, target| reordered[target] = items[source];
+    @memcpy(items[0..order.len], reordered);
+}
+
+/// The rerank stage's trace; owns the qids in its top scores.
+const OwnedRerankTrace = struct {
+    allocator: std.mem.Allocator,
+    trace: RerankTrace,
+    top_scores: std.ArrayList(RerankScore) = .empty,
+
+    fn failed(self: *const OwnedRerankTrace) bool {
+        return std.mem.eql(u8, self.trace.status, "failed");
+    }
+
+    fn view(self: *const OwnedRerankTrace) RerankTrace {
+        var trace = self.trace;
+        trace.topScores = self.top_scores.items;
+        return trace;
+    }
+
+    fn deinit(self: *OwnedRerankTrace) void {
+        for (self.top_scores.items) |entry| self.allocator.free(entry.qid);
+        self.top_scores.deinit(self.allocator);
     }
 };
 
@@ -5032,6 +5273,234 @@ test "runtime answer keeps reader answers with invalid support unless abstainIfW
     defer std.testing.allocator.free(abstained);
     try std.testing.expect(std.mem.indexOf(u8, abstained, "\"answer\":\"[abstain]\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, abstained, "\"status\":\"abstained\"") != null);
+}
+
+/// In-process cross-encoder for rerank tests. Scores rise with fused
+/// position, so a fully reranked window comes back reversed.
+const TestReranker = struct {
+    calls: usize = 0,
+    fail: bool = false,
+    last_top_n: usize = 0,
+    documents: std.ArrayList([]u8) = .empty,
+
+    fn endpoint(self: *TestReranker) providers.ProviderEndpoint {
+        return .{
+            .kind = .callback,
+            .name = "test-reranker",
+            .model = "test-cross-encoder",
+            .rerank_callback = .{ .context = self, .rerank = rerank },
+        };
+    }
+
+    fn rerank(context: ?*anyopaque, allocator: std.mem.Allocator, request: providers.RerankRequest) anyerror![]providers.RerankResult {
+        const self: *TestReranker = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        self.clearDocuments();
+        for (request.documents) |document| {
+            try self.documents.append(std.testing.allocator, try std.testing.allocator.dupe(u8, document));
+        }
+        self.last_top_n = request.top_n;
+        if (self.fail) return error.ProviderRequestFailed;
+        const results = try allocator.alloc(providers.RerankResult, request.documents.len);
+        for (results, 0..) |*result, index| result.* = .{ .index = index, .relevance_score = @floatFromInt(index) };
+        return results;
+    }
+
+    fn clearDocuments(self: *TestReranker) void {
+        for (self.documents.items) |document| std.testing.allocator.free(document);
+        self.documents.clearRetainingCapacity();
+    }
+
+    fn deinit(self: *TestReranker) void {
+        self.clearDocuments();
+        self.documents.deinit(std.testing.allocator);
+    }
+};
+
+const ResponseQids = struct {
+    parsed: std.json.Parsed(Value),
+    qids: [][]const u8,
+
+    fn deinit(self: *ResponseQids) void {
+        std.testing.allocator.free(self.qids);
+        self.parsed.deinit();
+    }
+};
+
+/// Item qids of a retrieve/answer response, in rank order.
+fn responseItemQids(response: []const u8) !ResponseQids {
+    var parsed = try std.json.parseFromSlice(Value, std.testing.allocator, response, .{});
+    errdefer parsed.deinit();
+    const items = parsed.value.object.get("result").?.object.get("items").?.array.items;
+    const qids = try std.testing.allocator.alloc([]const u8, items.len);
+    for (items, 0..) |item, index| qids[index] = item.object.get("qid").?.string;
+    return .{ .parsed = parsed, .qids = qids };
+}
+
+fn retrievePets(runtime: *Runtime, options_json: []const u8) ![]u8 {
+    const request = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"q\",\"method\":\"memory.retrieve\",\"params\":{{\"query\":\"cat dog Miso Rex\",\"scope\":{{\"userId\":\"u1\"}},\"needs\":[\"raw\"],\"options\":{{\"includeDebug\":true,\"logRetrieval\":false,\"logAudit\":false{s}}}}}}}",
+        .{options_json},
+    );
+    defer std.testing.allocator.free(request);
+    return runtime.dispatch(std.testing.allocator, request);
+}
+
+test "rerank order sorts scored items by score with ties in fused order" {
+    const scores = [_]providers.RerankResult{
+        .{ .index = 3, .relevance_score = 0.2 },
+        .{ .index = 1, .relevance_score = 0.9 },
+        .{ .index = 0, .relevance_score = 0.2 },
+    };
+    // Index 2 was not scored: it follows the scored items.
+    const order = try rerankOrder(std.testing.allocator, 4, &scores);
+    defer std.testing.allocator.free(order);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 0, 3, 2 }, order);
+}
+
+test "runtime rerank reorders the candidate window before budget packing" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var reranker = TestReranker{};
+    defer reranker.deinit();
+    var runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{ .io = std.testing.io, .reranker = reranker.endpoint() });
+    defer runtime.deinit();
+    try rememberPetSessions(&runtime);
+
+    const bypass = try retrievePets(&runtime, ",\"rerank\":false");
+    defer std.testing.allocator.free(bypass);
+    try std.testing.expectEqual(@as(usize, 0), reranker.calls);
+    try std.testing.expect(std.mem.indexOf(u8, bypass, "\"rerank\":{\"model\":\"test-cross-encoder\",\"status\":\"disabled\",\"windowSize\":0,\"rerankedCount\":0") != null);
+    var fused = try responseItemQids(bypass);
+    defer fused.deinit();
+    const count = fused.qids.len;
+    try std.testing.expect(count >= 3);
+
+    const full = try retrievePets(&runtime, "");
+    defer std.testing.allocator.free(full);
+    try std.testing.expectEqual(@as(usize, 1), reranker.calls);
+    try std.testing.expectEqual(count, reranker.last_top_n);
+    try std.testing.expectEqual(count, reranker.documents.items.len);
+    var reranked = try responseItemQids(full);
+    defer reranked.deinit();
+    try std.testing.expectEqual(count, reranked.qids.len);
+    for (reranked.qids, 0..) |qid, index| try std.testing.expectEqualStrings(fused.qids[count - 1 - index], qid);
+    try std.testing.expect(std.mem.indexOf(u8, full, "\"warnings\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, full, "\"status\":\"applied\"") != null);
+    const top = try std.fmt.allocPrint(std.testing.allocator, "\"topScores\":[{{\"qid\":\"{s}\",\"score\":{d}}}", .{ fused.qids[count - 1], count - 1 });
+    defer std.testing.allocator.free(top);
+    try std.testing.expect(std.mem.indexOf(u8, full, top) != null);
+
+    // Raw evidence is scored as `YYYY-MM-DD role: text`.
+    var saw_document = false;
+    for (reranker.documents.items) |document| {
+        if (std.mem.eql(u8, document, "2023-05-22 user: I adopted a cat named Miso.")) saw_document = true;
+    }
+    try std.testing.expect(saw_document);
+
+    // Only the window is reordered; later items keep fused order.
+    const windowed = try retrievePets(&runtime, ",\"rerankCandidates\":2");
+    defer std.testing.allocator.free(windowed);
+    try std.testing.expectEqual(@as(usize, 2), reranker.last_top_n);
+    var window_qids = try responseItemQids(windowed);
+    defer window_qids.deinit();
+    try std.testing.expectEqualStrings(fused.qids[1], window_qids.qids[0]);
+    try std.testing.expectEqualStrings(fused.qids[0], window_qids.qids[1]);
+    for (2..count) |index| try std.testing.expectEqualStrings(fused.qids[index], window_qids.qids[index]);
+    try std.testing.expect(std.mem.indexOf(u8, windowed, "\"windowSize\":2,\"rerankedCount\":2") != null);
+
+    const invalid = try retrievePets(&runtime, ",\"rerankCandidates\":0");
+    defer std.testing.allocator.free(invalid);
+    try std.testing.expect(std.mem.indexOf(u8, invalid, "\"code\":\"invalid_request\"") != null);
+}
+
+test "runtime rerank failure keeps fused order and warns" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var reranker = TestReranker{ .fail = true };
+    defer reranker.deinit();
+    var reader = TestReader{};
+    defer reader.deinit();
+    var runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{
+        .answer_provider = reader.endpoint(),
+        .reranker = reranker.endpoint(),
+    });
+    defer runtime.deinit();
+    try rememberPetSessions(&runtime);
+
+    const bypass = try retrievePets(&runtime, ",\"rerank\":false");
+    defer std.testing.allocator.free(bypass);
+    var fused = try responseItemQids(bypass);
+    defer fused.deinit();
+
+    const failed = try retrievePets(&runtime, "");
+    defer std.testing.allocator.free(failed);
+    try std.testing.expectEqual(@as(usize, 1), reranker.calls);
+    var kept = try responseItemQids(failed);
+    defer kept.deinit();
+    try std.testing.expectEqual(fused.qids.len, kept.qids.len);
+    for (fused.qids, kept.qids) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+    try std.testing.expect(std.mem.indexOf(u8, failed, "\"warnings\":[\"rerank_failed\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, failed, "\"status\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, failed, "\"error\":\"ProviderRequestFailed\"") != null);
+
+    // memory.answer reranks too, and a failed rerank never fails the answer.
+    const answer = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What is my cat called?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"options\":{\"includeDebug\":true,\"logRetrieval\":false}}}",
+    );
+    defer std.testing.allocator.free(answer);
+    try std.testing.expectEqual(@as(usize, 2), reranker.calls);
+    try std.testing.expectEqual(@as(usize, 1), reader.calls);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"answer\":\"Miso\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"rerank_failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"status\":\"failed\"") != null);
+
+    reranker.fail = false;
+    const reranked_answer = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a2\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What is my cat called?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"options\":{\"includeDebug\":true,\"logRetrieval\":false,\"rerankCandidates\":1}}}",
+    );
+    defer std.testing.allocator.free(reranked_answer);
+    try std.testing.expectEqual(@as(usize, 3), reranker.calls);
+    try std.testing.expect(std.mem.indexOf(u8, reranked_answer, "\"rerank_failed\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, reranked_answer, "\"status\":\"applied\",\"windowSize\":1,\"rerankedCount\":1") != null);
+}
+
+test "runtime without a reranker leaves retrieval unchanged" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
+    defer runtime.deinit();
+    try rememberPetSessions(&runtime);
+
+    const plain = try retrievePets(&runtime, "");
+    defer std.testing.allocator.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "rerank") == null);
+    var plain_qids = try responseItemQids(plain);
+    defer plain_qids.deinit();
+
+    // Rerank options are accepted and ignored when nothing is configured.
+    const requested = try retrievePets(&runtime, ",\"rerank\":true,\"rerankCandidates\":2");
+    defer std.testing.allocator.free(requested);
+    try std.testing.expect(std.mem.indexOf(u8, requested, "rerank") == null);
+    var requested_qids = try responseItemQids(requested);
+    defer requested_qids.deinit();
+    try std.testing.expectEqual(plain_qids.qids.len, requested_qids.qids.len);
+    for (plain_qids.qids, requested_qids.qids) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+
+    const health = try runtime.dispatch(std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
+    defer std.testing.allocator.free(health);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"capabilities\":{\"reranker\":{\"configured\":false,\"model\":null}}") != null);
+
+    var reranker = TestReranker{};
+    defer reranker.deinit();
+    var configured = Runtime.initWithOptions(harness.adapter(), harness.health(), .{ .reranker = reranker.endpoint() });
+    defer configured.deinit();
+    const configured_health = try configured.dispatch(std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
+    defer std.testing.allocator.free(configured_health);
+    try std.testing.expect(std.mem.indexOf(u8, configured_health, "\"reranker\":{\"configured\":true,\"model\":\"test-cross-encoder\"}") != null);
 }
 
 test "prompt renderer orders sessions, items and derived memory deterministically" {

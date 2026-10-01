@@ -17,6 +17,8 @@ const LatticeEmbeddingProviderKind = if (build_options.enable_lattice) lattice_s
 };
 /// Native width of `text-embedding-3-small`, the default hosted embedding model.
 const default_hosted_embedding_dimensions: u16 = 1536;
+/// A rerank call past this deadline is abandoned and retrieval keeps fused order.
+const default_reranker_timeout_ms: u32 = 30_000;
 
 const RuntimeConfig = struct {
     command_index: usize = 1,
@@ -39,6 +41,10 @@ const RuntimeConfig = struct {
     entity_provider: ?[]const u8 = null,
     entity_url: ?[]const u8 = null,
     entity_model: ?[]const u8 = null,
+    reranker_url: ?[]const u8 = null,
+    reranker_model: ?[]const u8 = null,
+    reranker_api_key: ?[]const u8 = null,
+    reranker_timeout_ms: ?u32 = null,
 };
 
 const FileConfig = struct {
@@ -393,6 +399,42 @@ fn parseRuntimeConfig(args: []const [:0]const u8) RuntimeConfig {
             config.command_index += 1;
             break;
         }
+        if (std.mem.eql(u8, arg, "--reranker-url")) {
+            if (config.command_index + 1 < args.len) {
+                config.reranker_url = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--reranker-model")) {
+            if (config.command_index + 1 < args.len) {
+                config.reranker_model = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--reranker-api-key")) {
+            if (config.command_index + 1 < args.len) {
+                config.reranker_api_key = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--reranker-timeout-ms")) {
+            if (config.command_index + 1 < args.len) {
+                config.reranker_timeout_ms = std.fmt.parseInt(u32, args[config.command_index + 1], 10) catch null;
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
         break;
     }
     return config;
@@ -573,6 +615,25 @@ fn runtimeOptionsFromConfig(
             "OPENROUTER_ENTITY_MODEL",
             "openai/gpt-4o-mini",
         ),
+        .reranker = rerankerEndpointFromConfig(environ_map, config),
+    };
+}
+
+/// The optional cross-encoder reranker: a Cohere/Jina-compatible `/rerank`
+/// endpoint, off unless `--reranker-url` or `QUIPU_RERANKER_URL` is set. The
+/// API key, when present, is sent as a Bearer token.
+fn rerankerEndpointFromConfig(environ_map: *std.process.Environ.Map, config: RuntimeConfig) providers.ProviderEndpoint {
+    const url = config.reranker_url orelse environ_map.get("QUIPU_RERANKER_URL") orelse return .{};
+    if (url.len == 0) return .{};
+    return .{
+        .kind = .http,
+        .name = "reranker",
+        .url = url,
+        .model = config.reranker_model orelse environ_map.get("QUIPU_RERANKER_MODEL"),
+        .api_key = config.reranker_api_key orelse environ_map.get("QUIPU_RERANKER_API_KEY"),
+        .timeout_ms = config.reranker_timeout_ms orelse
+            envU32(environ_map, "QUIPU_RERANKER_TIMEOUT_MS") orelse
+            default_reranker_timeout_ms,
     };
 }
 
@@ -1261,7 +1322,7 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
