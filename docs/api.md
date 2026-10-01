@@ -19,21 +19,29 @@ The prompt is assembled from the structured context sections, so callers that ne
 
 `memory.answer` accepts the same retrieval fields, runs the same scoped context
 assembly, and returns `answer`, `provider`, optional `model`, `items`, `context`,
-warnings, and optional trace output. When `options.includeDebug` or
-`options.logTrace` is true, answer responses also include `answerTrace` with the
-chosen synthesis strategy, answerability, support qids, candidate answers, raw
-provider text when present, normalized answer, and validation status.
+`confidence`, warnings, and optional trace output. When `options.includeDebug`
+is true, the response also includes `prompt`, the exact memory context string
+sent to the reader. Otherwise `prompt` is `null`. When `options.includeDebug`
+or `options.logTrace` is true, answer responses also include `answerTrace`:
+the answer path (`llm_reader`, `deterministic_fallback`, or `abstain`),
+answerability, support qids, `supportValid`, candidate answers, raw provider
+text when present, normalized answer, and validation status.
+
+There is one answer path. With an answer provider configured, every non-empty
+context goes to the reader along with the question date. With no retrieved
+items, the answer is `[abstain]` and no provider is called. With no provider,
+a deterministic fallback returns the top current derived fact's value, or else
+the top raw evidence text. Reader support qids are checked against the
+retrieved items. Unknown qids are dropped and set `supportValid: false` with an
+`invalid_support` warning, but the reader's answer is kept. An honest
+`answerable: false` answer is also kept. `confidence` comes from the reader's
+value, clamped to `[0, 1]`.
 
 `options.abstainIfWeak` is supported on `memory.answer`. The default is
-backward-compatible (`false`). When set to `true`, unsupported or invalidly
-supported answers return exactly `[abstain]`.
-
-Answer providers are asked for strict JSON internally, but `answer` remains the
-public string result. The runtime validates provider support qids against the
-retrieved evidence packet and falls back to conservative heuristic synthesis
-when provider JSON is malformed. It uses a deterministic local fallback when no
-answer provider is configured, or an OpenRouter-compatible chat model when the
-process is started with `--answer-provider openrouter`.
+backward-compatible (`false`). When set to `true`, unanswerable, unsupported, or
+unparseable answers return exactly `[abstain]`. Reader prompt, JSON mode, and
+provider wire formats are documented in
+[providers.md](providers.md#memoryanswer-reader).
 
 ## Search V0
 

@@ -85,20 +85,40 @@ Current date: 2023-05-30 (Tuesday)          <- retrieve only, when time.validAt 
 
 ### Answering
 
-`memory.answer` runs the same retrieval path, builds an evidence packet from
-retrieved qids, and routes the query to a synthesis strategy:
-`span_extract`, `preference`, `knowledge_update`, `temporal`,
-`multi_session`, or `abstain`. The runtime first creates obvious heuristic
-candidates from retrieved preferences, current facts, temporal items, direct
-spans, and simple quantities.
+`memory.answer` runs the same retrieval path and has exactly one answer path.
+It never routes on question wording.
 
-When a configured answer provider is needed, the provider is prompted to return
-strict JSON containing `answer`, `answerable`, `supportQids`, `strategy`, and
-`confidence`. The runtime validates that every support qid exists in the
-evidence packet, normalizes concise answers, and exposes the validation details
-through optional `answerTrace`. If `options.abstainIfWeak` is true and the
-answer is unsupported or invalidly supported, the public answer string is
-exactly `[abstain]`.
+1. If retrieval kept no items, the answer is `[abstain]` and no reader is called.
+2. If an answer provider is configured, it is always called. The reader gets
+   the rendered context and, when `time.validAt` is set, a trusted
+   `Current date: YYYY-MM-DD (Weekday)` line in its user turn. The reader prompt
+   is described in [providers.md](providers.md#memoryanswer-reader).
+3. Without a provider (deterministic/no-key mode), the answer is the value of
+   the top current derived fact, or else the top raw evidence text.
+
+The reader must return
+`{"answer":"...","answerable":true|false,"supportQids":[...],"confidence":0..1}`.
+The runtime parses it, tolerating code fences, surrounding prose, an
+`abstained` flag, and extra keys. It then validates support:
+
+- `supportQids` that are not in the context (item qids or their evidence qids)
+  are dropped and the `invalid_support` warning is added. An answerable answer
+  with no support adds `missing_support`. In both cases
+  `answerTrace.supportValid` is `false`, and the reader's answer is still
+  returned. The daemon never invents support qids.
+- `answerable: false` keeps the reader's explanation of what is unknown as the
+  answer. Unparseable output keeps the raw text with status `parse_error`.
+- Only `options.abstainIfWeak: true` replaces an unanswerable, unsupported, or
+  unparseable answer with exactly `[abstain]`.
+- `confidence` is the reader's value clamped to `[0, 1]`. If the reader gives no
+  value, it defaults to 0.5 for answerable answers and 0 otherwise. The
+  deterministic fallback reports 0.5 for a derived fact and 0.25 for raw
+  evidence.
+
+`answerTrace.strategy` only describes which path ran: `llm_reader`,
+`deterministic_fallback`, or `abstain`. With `options.includeDebug`, the
+response also carries `prompt`, the exact memory context string the reader
+received.
 
 ## Entity Resolution V0
 

@@ -894,24 +894,19 @@ pub const Runtime = struct {
         if (dropped_for_budget > 0) try warnings.append(allocator, "token_budget_truncated");
         if (results.items.items.len == 0) try warnings.append(allocator, "no_memory_items");
 
-        const pre_gate_packet = try buildAnswerEvidencePacket(allocator, results.items.items);
-        defer freeAnswerEvidencePacket(allocator, pre_gate_packet);
-        var evidence_gate = try answer_synthesis.gateEvidence(allocator, query, valid_at, pre_gate_packet);
-        defer evidence_gate.deinit();
-        if (evidence_gate.items.len > 0) {
-            _ = results.filterByQids(evidence_gate.trace.keptQids);
-        }
-        for (evidence_gate.trace.warnings) |warning| {
-            if (!containsWarning(warnings.items, warning)) try warnings.append(allocator, warning);
-        }
         try appendRetrievalWarnings(allocator, &warnings, results.items.items, include_evidence);
 
+        // Reserve room for answer warnings so the context packet's view of
+        // `warnings.items` is never invalidated by a later append.
+        try warnings.ensureUnusedCapacity(allocator, 8);
         var context = try OwnedContextPacket.fromItems(allocator, results.items.items, warnings.items);
         defer context.deinit();
 
         const retrieval_id = try self.nextQid(allocator, "retr");
         defer allocator.free(retrieval_id);
-        const prompt = try promptFromContext(allocator, self.store, context.view(), .{ .current_date = valid_at });
+        // The question date travels in the reader's user turn, not inside the
+        // untrusted memory block.
+        const prompt = try promptFromContext(allocator, self.store, context.view(), .{});
         defer allocator.free(prompt);
         const token_estimate = @max(@as(usize, 1), prompt.len / 4);
         const score_breakdowns = try buildScoreBreakdowns(allocator, results.items.items);
@@ -936,14 +931,24 @@ pub const Runtime = struct {
             .droppedItemReasons = dropped_item_reasons,
         };
 
+        // One answer path: with a reader configured, every non-empty context
+        // goes to it; with no evidence nothing is called and the answer abstains;
+        // with no reader the synthesizer uses its deterministic fallback.
         const endpoint = if (self.options.answer_provider.kind == .none)
             providers.ProviderEndpoint{ .kind = .deterministic, .name = "deterministic_prompt" }
         else
             self.options.answer_provider;
-        const raw_provider_answer = if (evidence_gate.items.len == 0 or answer_synthesis.hasStrongHeuristic(query, evidence_gate.items))
+        const reader_configured = endpoint.kind != .none and endpoint.kind != .deterministic;
+        const current_date = if (valid_at) |timestamp| try formatCurrentDate(allocator, timestamp) else null;
+        defer if (current_date) |value| allocator.free(value);
+        const raw_provider_answer = if (!reader_configured or results.items.items.len == 0)
             null
         else
-            providers.generateAnswer(allocator, self.options.io, endpoint, query, prompt) catch |err| {
+            providers.generateAnswer(allocator, self.options.io, endpoint, .{
+                .question = query,
+                .context = prompt,
+                .current_date = current_date,
+            }) catch |err| {
                 const message = if (err == error.MissingProviderApiKey)
                     try std.fmt.allocPrint(
                         allocator,
@@ -958,15 +963,16 @@ pub const Runtime = struct {
                 return errorResponse(allocator, id, "provider_error", message);
             };
         defer if (raw_provider_answer) |value| allocator.free(value);
-        var synthesized = try answer_synthesis.synthesize(
-            allocator,
-            query,
-            evidence_gate.items,
-            raw_provider_answer,
-            abstain_if_weak,
-            evidence_gate.trace,
-        );
+
+        const evidence_packet = try buildAnswerEvidencePacket(allocator, results.items.items);
+        defer freeAnswerEvidencePacket(allocator, evidence_packet);
+        var synthesized = try answer_synthesis.synthesize(allocator, evidence_packet, raw_provider_answer, .{
+            .abstain_if_weak = abstain_if_weak,
+        });
         defer synthesized.deinit();
+        for (synthesized.trace.validation.warnings) |warning| {
+            if (!containsWarning(warnings.items, warning)) try warnings.append(allocator, warning);
+        }
 
         const item_qids = try allocator.alloc([]const u8, results.items.items.len);
         defer allocator.free(item_qids);
@@ -985,6 +991,7 @@ pub const Runtime = struct {
                 .model = endpoint.model,
                 .strategy = synthesized.trace.strategy,
                 .answerable = synthesized.trace.answerable,
+                .supportValid = synthesized.trace.supportValid,
             });
             defer allocator.free(event_payload);
             if (self.publishEvent(streams.retrieval_logged, event_payload)) |_| {} else |_| {
@@ -994,6 +1001,7 @@ pub const Runtime = struct {
             }
         }
 
+        const include_debug = if (options) |opts| boolField(&opts, "includeDebug") orelse false else false;
         const response = .{
             .jsonrpc = "2.0",
             .id = id,
@@ -1002,10 +1010,11 @@ pub const Runtime = struct {
                 .answer = synthesized.answer,
                 .provider = endpoint.name,
                 .model = endpoint.model,
+                .prompt = if (include_debug) prompt else null,
                 .context = context.view(),
                 .items = results.items.items,
                 .tokenEstimate = token_estimate,
-                .confidence = if (results.items.items.len > 0) @as(f32, 0.72) else @as(f32, 0.0),
+                .confidence = synthesized.confidence,
                 .warnings = warnings.items,
                 .trace = if (include_trace) trace else null,
                 .answerTrace = if (include_trace) synthesized.trace else null,
@@ -2488,6 +2497,9 @@ const OwnedItems = struct {
     }
 };
 
+/// Evidence handed to answer synthesis, in retrieval rank order. Texts are the
+/// same strings the renderer shows (minus raw-cache date annotations) and
+/// `evidenceQids` let readers cite either a chunk/derived qid or its source.
 fn buildAnswerEvidencePacket(allocator: std.mem.Allocator, items: []const MessageResult) ![]answer_synthesis.EvidenceItem {
     const packet = try allocator.alloc(answer_synthesis.EvidenceItem, items.len);
     errdefer allocator.free(packet);
@@ -2497,26 +2509,16 @@ fn buildAnswerEvidencePacket(allocator: std.mem.Allocator, items: []const Messag
     }
     for (items, 0..) |item, index| {
         const evidence_qids = try allocator.alloc([]const u8, item.evidence.len);
-        errdefer allocator.free(evidence_qids);
         for (item.evidence, 0..) |evidence, evidence_index| {
             evidence_qids[evidence_index] = evidence.qid;
         }
         packet[index] = .{
             .qid = item.qid,
             .type = item.type,
-            .text = item.text,
-            .score = item.score,
+            .text = std.mem.trim(u8, stripRawDateAnnotation(item.text), " \t\r\n"),
             .state = item.state,
-            .validFrom = item.validFrom,
-            .validTo = item.validTo,
-            .evidenceQids = evidence_qids,
-            .slotKey = item.slotKey,
-            .subject = item.subject,
-            .attribute = item.attribute,
             .value = item.value,
-            .numericValue = item.numericValue,
-            .unit = item.unit,
-            .aggregationMode = item.aggregationMode,
+            .evidenceQids = evidence_qids,
         };
         written += 1;
     }
@@ -4645,6 +4647,75 @@ test "runtime extracts current package manager facts" {
     try std.testing.expect(std.mem.indexOf(u8, historical, "The repo uses pnpm as its package manager.") == null);
 }
 
+test "runtime answer deterministic fallback returns the current derived fact" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
+    defer runtime.deinit();
+
+    const first = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"This repo uses npm.\",\"createdAt\":\"2026-01-01T10:00:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(first);
+    const second = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"We migrated this repo to pnpm. Use pnpm now.\",\"createdAt\":\"2026-02-01T10:00:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(second);
+
+    const answer = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"Which package manager does this repo use?\",\"scope\":{\"projectId\":\"repo:test\"},\"options\":{\"includeDebug\":true,\"logRetrieval\":false}}}",
+    );
+    defer std.testing.allocator.free(answer);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"answer\":\"pnpm\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"strategy\":\"deterministic_fallback\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"supportValid\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"confidence\":0.5") != null);
+}
+
+const TestReader = struct {
+    calls: usize = 0,
+    last_user: ?[]u8 = null,
+    cite_invalid: bool = false,
+
+    fn endpoint(self: *TestReader) providers.ProviderEndpoint {
+        return .{
+            .kind = .callback,
+            .name = "test-reader",
+            .model = "test-model",
+            .callback = .{ .context = self, .respond = respond },
+        };
+    }
+
+    fn respond(context: ?*anyopaque, allocator: std.mem.Allocator, turn: providers.ChatTurn) anyerror![]u8 {
+        const self: *TestReader = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        if (self.last_user) |previous| std.testing.allocator.free(previous);
+        self.last_user = try std.testing.allocator.dupe(u8, turn.user_content);
+        const qid = if (self.cite_invalid) "q_msg_999" else lineQid(turn.user_content, "I adopted a cat") orelse "q_missing";
+        return std.fmt.allocPrint(
+            allocator,
+            "{{\"answer\":\"Miso\",\"answerable\":true,\"supportQids\":[\"{s}\"],\"confidence\":0.75}}",
+            .{qid},
+        );
+    }
+
+    fn deinit(self: *TestReader) void {
+        if (self.last_user) |previous| std.testing.allocator.free(previous);
+    }
+};
+
+/// The bracketed qid at the start of the line that contains `needle`.
+fn lineQid(text: []const u8, needle: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, text, needle) orelse return null;
+    const line_start = std.mem.lastIndexOfScalar(u8, text[0..at], '\n') orelse 0;
+    const open = std.mem.indexOfScalarPos(u8, text, line_start, '[') orelse return null;
+    const close = std.mem.indexOfScalarPos(u8, text, open, ']') orelse return null;
+    return text[open + 1 .. close];
+}
+
 fn rememberPetSessions(runtime: *Runtime) !void {
     const late = try runtime.dispatch(
         std.testing.allocator,
@@ -4712,6 +4783,95 @@ test "runtime retrieve prompt groups sessions chronologically with dates and spe
     try std.testing.expect(std.mem.indexOf(u8, structural, "\"text\":\"Session\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, structural, "\"text\":\"Turn\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, structural, "I adopted a cat named Miso.") != null);
+}
+
+test "runtime answer sends the rendered context and question date to the reader" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var reader = TestReader{};
+    defer reader.deinit();
+    var runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{ .answer_provider = reader.endpoint() });
+    defer runtime.deinit();
+    try rememberPetSessions(&runtime);
+
+    const answer = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What is my cat's name?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"time\":{\"validAt\":\"2023-05-30T23:40:00Z\"},\"options\":{\"includeDebug\":true,\"logRetrieval\":false}}}",
+    );
+    defer std.testing.allocator.free(answer);
+
+    try std.testing.expectEqual(@as(usize, 1), reader.calls);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"answer\":\"Miso\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"provider\":\"test-reader\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"strategy\":\"llm_reader\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"supportValid\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"confidence\":0.75") != null);
+
+    const prompt = try resultStringField(std.testing.allocator, answer, "prompt");
+    defer std.testing.allocator.free(prompt);
+    try std.testing.expect(std.mem.startsWith(u8, prompt, "<memory>\n<sessions>\n## session s-early 2023-05-20 (Sat)\n"));
+    try expectInOrder(prompt, &.{ "## session s-late 2023-05-22 (Mon)\n", "] user: I adopted a cat named Miso.\n" });
+    const user_turn = reader.last_user.?;
+    try std.testing.expect(std.mem.startsWith(u8, user_turn, "Current date: 2023-05-30 (Tuesday)\n\nQuestion:\nWhat is my cat's name?\n\nMemory context:\n"));
+    // `prompt` is exactly the memory context the reader received.
+    try std.testing.expect(std.mem.endsWith(u8, user_turn, prompt));
+
+    const quiet = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a2\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What is my cat's name?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"options\":{\"logRetrieval\":false}}}",
+    );
+    defer std.testing.allocator.free(quiet);
+    try std.testing.expect(std.mem.indexOf(u8, quiet, "\"prompt\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reader.last_user.?, "Current date:") == null);
+}
+
+test "runtime answer abstains without calling the reader when nothing is retrieved" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var reader = TestReader{};
+    defer reader.deinit();
+    var runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{ .answer_provider = reader.endpoint() });
+    defer runtime.deinit();
+    try rememberPetSessions(&runtime);
+
+    const answer = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"zebra quantum\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"options\":{\"includeDebug\":true,\"logRetrieval\":false}}}",
+    );
+    defer std.testing.allocator.free(answer);
+    try std.testing.expectEqual(@as(usize, 0), reader.calls);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"answer\":\"[abstain]\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"strategy\":\"abstain\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"confidence\":0") != null);
+}
+
+test "runtime answer keeps reader answers with invalid support unless abstainIfWeak" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var reader = TestReader{ .cite_invalid = true };
+    defer reader.deinit();
+    var runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{ .answer_provider = reader.endpoint() });
+    defer runtime.deinit();
+    try rememberPetSessions(&runtime);
+
+    const kept = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What is my cat's name?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"options\":{\"includeDebug\":true,\"logRetrieval\":false}}}",
+    );
+    defer std.testing.allocator.free(kept);
+    try std.testing.expect(std.mem.indexOf(u8, kept, "\"answer\":\"Miso\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, kept, "\"supportValid\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, kept, "\"invalid_support\"") != null);
+    // The invented qid stays only in the raw reader output, never in support.
+    try std.testing.expect(std.mem.indexOf(u8, kept, "\"supportQids\":[]") != null);
+
+    const abstained = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a2\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What is my cat's name?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"options\":{\"includeDebug\":true,\"abstainIfWeak\":true,\"logRetrieval\":false}}}",
+    );
+    defer std.testing.allocator.free(abstained);
+    try std.testing.expect(std.mem.indexOf(u8, abstained, "\"answer\":\"[abstain]\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, abstained, "\"status\":\"abstained\"") != null);
 }
 
 test "prompt renderer orders sessions, items and derived memory deterministically" {
@@ -4968,6 +5128,7 @@ test "runtime answer uses retrieved context with deterministic provider fallback
 
     try std.testing.expect(std.mem.indexOf(u8, answer, "\"answer\":\"Run just test before committing.\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, answer, "\"provider\":\"deterministic_prompt\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"strategy\":\"deterministic_fallback\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, answer, "\"trace\":{") != null);
 }
 

@@ -76,17 +76,23 @@ test("success conformance fixtures validate", () => {
   }
 });
 
-test("memory.answer fixture includes optional answerTrace", () => {
+test("memory.answer fixture includes optional answerTrace and debug prompt", () => {
   const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.answer.success.json"), "utf8"));
-  assert.equal(fixture.response.result.answerTrace.strategy, "span_extract");
+  assert.equal(fixture.response.result.answerTrace.strategy, "deterministic_fallback");
+  assert.equal(fixture.response.result.answerTrace.supportValid, true);
   assert.equal(fixture.response.result.answerTrace.validation.status, "accepted");
   assert.equal(fixture.request.params.options.includeDebug, true);
+  assert.equal(typeof fixture.response.result.prompt, "string");
+  assert.ok(fixture.response.result.prompt.startsWith("<memory>"));
 });
 
-test("method schema accepts slot metadata and evidence gate fields", () => {
+test("method schema accepts slot metadata, support validity, and answer prompt", () => {
   const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
   assert.ok(schema.$defs.memoryItem.properties.slotKey);
-  assert.ok(schema.$defs.answerTrace.properties.evidenceGate);
+  assert.ok(schema.$defs.answerTrace.properties.supportValid);
+  assert.ok(schema.$defs.answerTrace.required.includes("supportValid"));
+  assert.equal(schema.$defs.answerTrace.properties.evidenceGate, undefined);
+  assert.deepEqual(schema.$defs.memoryAnswerResult.properties.prompt.type, ["string", "null"]);
 });
 
 test("invalid request fixture is rejected", () => {

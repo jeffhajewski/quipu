@@ -163,6 +163,7 @@
         "strategy",
         "answerable",
         "supportQids",
+        "supportValid",
         "candidateAnswers",
         "normalizedAnswer",
         "validation"
@@ -171,12 +172,17 @@
       "properties": {
         "strategy": {
           "type": "string",
-          "enum": ["span_extract", "preference", "knowledge_update", "temporal", "multi_session", "abstain"]
+          "description": "Describes which answer path ran; it never routes the question.",
+          "enum": ["llm_reader", "deterministic_fallback", "abstain"]
         },
         "answerable": { "type": "boolean" },
         "supportQids": {
           "type": "array",
           "items": { "$ref": "#/$defs/qid" }
+        },
+        "supportValid": {
+          "type": "boolean",
+          "description": "False when the reader cited qids missing from the context, or cited none for an answerable answer."
         },
         "candidateAnswers": {
           "type": "array",
@@ -202,43 +208,12 @@
           "required": ["status", "warnings"],
           "additionalProperties": false,
           "properties": {
-            "status": { "type": "string", "enum": ["accepted", "fallback", "abstained", "parse_error", "invalid_support"] },
+            "status": { "type": "string", "enum": ["accepted", "abstained", "parse_error", "invalid_support"] },
             "warnings": {
               "type": "array",
               "items": { "type": "string" }
             }
           }
-        },
-        "evidenceGate": {
-          "anyOf": [
-            {
-              "type": "object",
-              "required": ["querySlots", "keptQids", "rejectedQids", "warnings"],
-              "additionalProperties": false,
-              "properties": {
-                "querySlots": {
-                  "type": "array",
-                  "items": { "type": "string" }
-                },
-                "keptQids": {
-                  "type": "array",
-                  "items": { "$ref": "#/$defs/qid" }
-                },
-                "rejectedQids": {
-                  "type": "array",
-                  "items": { "$ref": "#/$defs/qid" }
-                },
-                "warnings": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "enum": ["slot_mismatch", "weak_slot_support", "stale_candidate", "temporal_mismatch"]
-                  }
-                }
-              }
-            },
-            { "type": "null" }
-          ]
         }
       }
     },
@@ -480,6 +455,10 @@
         "answer": { "type": "string" },
         "provider": { "type": "string" },
         "model": { "type": ["string", "null"] },
+        "prompt": {
+          "type": ["string", "null"],
+          "description": "Exact memory context string sent to the reader; present when options.includeDebug is true."
+        },
         "context": {
           "type": "object",
           "required": ["core", "currentFacts", "preferences", "procedural", "episodes", "warnings"],
