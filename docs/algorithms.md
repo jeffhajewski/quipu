@@ -106,8 +106,8 @@ Current date: 2023-05-30 (Tuesday)          <- retrieve only, when time.validAt 
 [q_msg_3] user: My dog Rex likes the park.
 [q_msg_4] 2023-05-21 user: Follow-up written the next day.
 ## session s-late 2023-05-22 (Mon)
-[q_chunk_11] assistant (1/2): first 1,200-character chunk
-[q_chunk_12] assistant (2/2): second chunk
+[q_chunk_10_0] assistant (1/2): first 1,200-byte chunk
+[q_chunk_10_1] assistant (2/2): second chunk
 ## other
 [q_obs_7] 2023-05-21 observation: Observed build failure
 </sessions>
@@ -123,10 +123,14 @@ Current date: 2023-05-30 (Tuesday)          <- retrieve only, when time.validAt 
   qid, `messageIndex`, `chunkIndex`, then `createdAt`. A line repeats its date
   only when it differs from the session date. Items without a session go last
   under `## other`.
-- Session, role, and index metadata is read from node properties
-  (`sessionQid`, `sessionId`, `messageIndex`, `chunkIndex`, `chunkCount`). For
-  older nodes it is recovered through the owning Turn's `HAS_*` edge.
-  Session and Turn nodes never render as items.
+- Message and chunk items supply role, date, session, and index metadata
+  through their raw source (the node's `role`, `createdAt`, `sessionQid`,
+  `sessionId`, `messageIndex`, `chunkIndex`, `chunkCount`). Other raw items
+  read the same properties from their node. If a session id is missing, it is
+  looked up on the Session node. Nodes written before these properties existed
+  are placed through the owning Turn's `HAS_*` edge. Qids are compared in
+  natural order (`q_chunk_9_1` before `q_chunk_10_0`). Session and Turn nodes
+  never render as items.
 - Text is written on one line with whitespace collapsed. Context section tags
   inside stored text are defanged (`</memory>` becomes `[/memory]`), so memory
   cannot close or forge a section.
