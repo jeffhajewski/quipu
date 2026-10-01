@@ -1,5 +1,10 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
+# SOTA sprint harness (docs/evals.md). Set QUIPU_ARTIFACTS when running from a worktree.
+sota_artifacts := env_var_or_default("QUIPU_ARTIFACTS", justfile_directory() + "/artifacts")
+sota_python := sota_artifacts + "/experiments/venv/bin/python"
+sota_env := "QUIPU_ARTIFACTS=" + sota_artifacts + " TIKTOKEN_CACHE_DIR=" + sota_artifacts + "/experiments/tokenizer-cache PYTHONPATH=evals/src"
+
 fmt:
     python3 scripts/check_format.py --fix
 
@@ -27,6 +32,27 @@ experiment-e1-smoke:
 
 experiment-e1-test:
     python3 -m unittest discover -s evals/tests -p test_representation_experiment.py
+
+sota-test:
+    cd evals/tests && PYTHONPATH=../src python3 -m unittest test_sota_longmemeval test_caching_proxy test_core_runner test_longmemeval_study test_study_analysis
+
+# Build core into artifacts/sota/bin/<name>; pass --lattice --lattice-include ... --lattice-lib ... for Lattice.
+sota-build name *flags:
+    {{sota_env}} python3 -m quipu_evals.sota_longmemeval build --out {{sota_artifacts}}/sota/bin/{{name}} {{flags}}
+
+# Run the daemon built by sota-build on the frozen dev slice (both budgets by default).
+sota-run name run_name *flags:
+    {{sota_env}} {{sota_python}} -m quipu_evals.sota_longmemeval run --daemon-binary {{sota_artifacts}}/sota/bin/{{name}}/bin/quipu --run-name {{run_name}} {{flags}}
+
+# E1 raw-arm reference (the target the daemon must match) on the same slice.
+sota-e1-reference:
+    {{sota_env}} python3 -m quipu_evals.longmemeval_study prepare --dataset {{sota_artifacts}}/experiments/upstream/longmemeval_s_cleaned.json --selection evals/experiments/sota-dev-selection.json --output {{sota_artifacts}}/sota/e1-splits
+    {{sota_env}} {{sota_python}} -m quipu_evals.longmemeval_study evaluate --suite {{sota_artifacts}}/sota/e1-splits/sota-dev.json --cache {{sota_artifacts}}/sota/cache/study --output {{sota_artifacts}}/sota/e1-raw-reference --arms raw --budgets 1024 4096 --workers 8 --upstream {{sota_artifacts}}/experiments/LongMemEval-upstream/src/evaluation/evaluate_qa.py
+    {{sota_env}} {{sota_python}} -m quipu_evals.sota_longmemeval summarize-e1 --report {{sota_artifacts}}/sota/e1-raw-reference/report.json
+
+# Paired comparison, B versus A (each a run report.json or an E1 study report.json).
+sota-compare a b out:
+    {{sota_env}} {{sota_python}} -m quipu_evals.sota_longmemeval compare --a {{a}} --b {{b}} --output {{out}}
 
 eval-core-smoke:
     PYTHONPATH=evals/src python3 -m quipu_evals.core_runner evals/suites/quipu_synthetic.yaml --strict
