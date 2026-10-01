@@ -2247,6 +2247,13 @@ LLM/cross-encoder reranker is optional behind config:
 enable_llm_reranker = false
 ```
 
+Implemented today: a cross-encoder reranker behind `--reranker-url` (a
+Cohere/Jina-compatible `/rerank` endpoint, off by default). It reorders the
+leading `rerank_top_n` candidates (`options.rerankCandidates`, default 50)
+after the raw-evidence policy and before budget packing, and can be bypassed per
+request with `options.rerank: false`. A failed call keeps the fused order and
+adds the `rerank_failed` warning. See `docs/providers.md#reranker`.
+
 ### 10.13 Context assembly
 
 Context assembly must be deterministic and budget-aware.
