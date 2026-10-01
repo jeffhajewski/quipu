@@ -37,6 +37,10 @@ pub const ProviderEndpoint = struct {
     max_tokens: ?u32 = null,
     capabilities: ProviderCapabilities = .{},
     callback: ?ProviderCallback = null,
+    /// In-process reranker used when `kind` is `.callback`.
+    rerank_callback: ?RerankCallback = null,
+    /// Deadline for one HTTP call, where the call honors it (the reranker).
+    timeout_ms: ?u32 = null,
 };
 
 /// The exact chat turn sent to a provider: one system prompt and one user turn.
@@ -49,6 +53,25 @@ pub const ChatTurn = struct {
 pub const ProviderCallback = struct {
     context: ?*anyopaque = null,
     respond: *const fn (context: ?*anyopaque, allocator: std.mem.Allocator, turn: ChatTurn) anyerror![]u8,
+};
+
+/// One rerank call: score every document against the query.
+pub const RerankRequest = struct {
+    query: []const u8,
+    documents: []const []const u8,
+    /// Number of results requested; Quipu asks for every document it sends.
+    top_n: usize,
+};
+
+/// One scored document; `index` points into `RerankRequest.documents`.
+pub const RerankResult = struct {
+    index: usize,
+    relevance_score: f64,
+};
+
+pub const RerankCallback = struct {
+    context: ?*anyopaque = null,
+    rerank: *const fn (context: ?*anyopaque, allocator: std.mem.Allocator, request: RerankRequest) anyerror![]RerankResult,
 };
 
 /// A `memory.answer` reader request. `context` is the rendered memory context;
@@ -234,9 +257,162 @@ fn validateEndpoint(endpoint: ProviderEndpoint) !void {
             if (endpoint.url == null or endpoint.url.?.len == 0) return error.InvalidProviderConfig;
         },
         .callback => {
-            if (endpoint.callback == null) return error.InvalidProviderConfig;
+            if (endpoint.callback == null and endpoint.rerank_callback == null) return error.InvalidProviderConfig;
         },
     }
+}
+
+/// Scores documents with a cross-encoder reranker. HTTP endpoints speak the
+/// Cohere/Jina rerank wire format. Results are validated before they are
+/// returned: every index is in range and appears once, and every score is
+/// finite. The caller owns the returned slice.
+pub fn rerank(
+    allocator: std.mem.Allocator,
+    io: ?std.Io,
+    endpoint: ProviderEndpoint,
+    request: RerankRequest,
+) ![]RerankResult {
+    const results = switch (endpoint.kind) {
+        .none => return error.ProviderUnavailable,
+        .deterministic, .command => return error.UnsupportedProviderKind,
+        .callback => blk: {
+            const callback = endpoint.rerank_callback orelse return error.InvalidProviderConfig;
+            break :blk try callback.rerank(callback.context, allocator, request);
+        },
+        .http => try rerankHttp(allocator, io orelse return error.ProviderUnavailable, endpoint, request),
+    };
+    errdefer allocator.free(results);
+    try validateRerankResults(allocator, results, request.documents.len);
+    return results;
+}
+
+fn rerankHttp(allocator: std.mem.Allocator, io: std.Io, endpoint: ProviderEndpoint, request: RerankRequest) ![]RerankResult {
+    const url = endpoint.url orelse return error.InvalidProviderConfig;
+    const body = try buildRerankRequestBody(allocator, endpoint.model, request);
+    defer allocator.free(body);
+    const response = try postJsonWithDeadline(allocator, io, url, endpoint.api_key, body, endpoint.timeout_ms);
+    defer allocator.free(response);
+    return parseRerankResponse(allocator, response);
+}
+
+/// `{"model":...,"query":...,"documents":[...],"top_n":N,"return_documents":false}`;
+/// `model` is omitted when unset.
+pub fn buildRerankRequestBody(allocator: std.mem.Allocator, model: ?[]const u8, request: RerankRequest) ![]u8 {
+    return stringifyRequest(allocator, .{
+        .model = model,
+        .query = request.query,
+        .documents = request.documents,
+        .top_n = request.top_n,
+        .return_documents = false,
+    });
+}
+
+/// Parses `{"results":[{"index":i,"relevance_score":s},...]}`. Extra keys are
+/// ignored; a missing or mistyped index or score is an invalid response.
+pub fn parseRerankResponse(allocator: std.mem.Allocator, response_json: []const u8) ![]RerankResult {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response_json, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.InvalidProviderResponse,
+    };
+    const results = switch (root.get("results") orelse return error.InvalidProviderResponse) {
+        .array => |array| array,
+        else => return error.InvalidProviderResponse,
+    };
+    const parsed_results = try allocator.alloc(RerankResult, results.items.len);
+    errdefer allocator.free(parsed_results);
+    for (results.items, 0..) |value, position| {
+        const object = switch (value) {
+            .object => |object| object,
+            else => return error.InvalidProviderResponse,
+        };
+        const index = switch (object.get("index") orelse return error.InvalidProviderResponse) {
+            .integer => |integer| std.math.cast(usize, integer) orelse return error.InvalidProviderResponse,
+            else => return error.InvalidProviderResponse,
+        };
+        const score: f64 = switch (object.get("relevance_score") orelse return error.InvalidProviderResponse) {
+            .float => |float| float,
+            .integer => |integer| @floatFromInt(integer),
+            else => return error.InvalidProviderResponse,
+        };
+        parsed_results[position] = .{ .index = index, .relevance_score = score };
+    }
+    return parsed_results;
+}
+
+fn validateRerankResults(allocator: std.mem.Allocator, results: []const RerankResult, document_count: usize) !void {
+    const seen = try allocator.alloc(bool, document_count);
+    defer allocator.free(seen);
+    @memset(seen, false);
+    for (results) |result| {
+        if (result.index >= document_count or seen[result.index]) return error.InvalidProviderResponse;
+        if (!std.math.isFinite(result.relevance_score)) return error.InvalidProviderResponse;
+        seen[result.index] = true;
+    }
+}
+
+/// POSTs a JSON body and returns the response body of a 2xx reply. Sends
+/// `Authorization: Bearer <key>` when a key is set.
+fn postJson(allocator: std.mem.Allocator, io: std.Io, url: []const u8, api_key: ?[]const u8, body: []const u8) anyerror![]u8 {
+    const authorization = if (api_key) |key| try std.fmt.allocPrint(allocator, "Bearer {s}", .{key}) else null;
+    defer if (authorization) |value| allocator.free(value);
+    var client = std.http.Client{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    var response_body: std.Io.Writer.Allocating = .init(allocator);
+    defer response_body.deinit();
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = body,
+        .response_writer = &response_body.writer,
+        .headers = .{
+            .authorization = if (authorization) |value| .{ .override = value } else .omit,
+            .content_type = .{ .override = "application/json" },
+            .user_agent = .{ .override = "quipu/0.1.0" },
+        },
+    });
+    if (result.status.class() != .success) return error.ProviderRequestFailed;
+    return response_body.toOwnedSlice();
+}
+
+const PostOutcome = union(enum) {
+    response: anyerror![]u8,
+    deadline: std.Io.Cancelable!void,
+};
+
+/// `postJson` raced against a timer: past `timeout_ms` the request is
+/// canceled and `error.ProviderTimeout` returned. Without a timeout, or when
+/// the Io cannot run the race concurrently, the request simply blocks.
+fn postJsonWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    url: []const u8,
+    api_key: ?[]const u8,
+    body: []const u8,
+    timeout_ms: ?u32,
+) ![]u8 {
+    const limit = timeout_ms orelse return postJson(allocator, io, url, api_key, body);
+    var buffer: [2]PostOutcome = undefined;
+    var select = std.Io.Select(PostOutcome).init(io, &buffer);
+    defer drainPostOutcomes(&select, allocator);
+    select.concurrent(.response, postJson, .{ allocator, io, url, api_key, body }) catch
+        return postJson(allocator, io, url, api_key, body);
+    // Without a timer the request simply runs to completion.
+    select.concurrent(.deadline, std.Io.sleep, .{ io, std.Io.Duration.fromMilliseconds(limit), .awake }) catch {};
+    return switch (try select.await()) {
+        .response => |response| response,
+        .deadline => error.ProviderTimeout,
+    };
+}
+
+/// Cancels whichever task is still running and frees a response that
+/// finished after the race was decided.
+fn drainPostOutcomes(select: *std.Io.Select(PostOutcome), allocator: std.mem.Allocator) void {
+    while (select.cancel()) |outcome| switch (outcome) {
+        .response => |response| if (response) |bytes| allocator.free(bytes) else |_| {},
+        .deadline => {},
+    };
 }
 
 pub fn apiKeyEnvName(provider_name: []const u8) ?[]const u8 {
@@ -903,4 +1079,90 @@ test "callback provider receives the reader turn" {
     try std.testing.expect(std.mem.indexOf(u8, answer, "Harbor Inn") != null);
     try std.testing.expect(captured.json_mode);
     try std.testing.expect(std.mem.startsWith(u8, captured.user_content.?, "Current date: 2023-05-30 (Tuesday)\n\nQuestion:\nWhere am I staying?"));
+}
+
+test "rerank request body uses the Cohere wire format" {
+    const documents = [_][]const u8{ "2023-05-20 user: My dog Rex likes the park.", "The repo uses pnpm." };
+    const body = try buildRerankRequestBody(std.testing.allocator, "BAAI/bge-reranker-v2-m3", .{
+        .query = "What is my dog called?",
+        .documents = &documents,
+        .top_n = 2,
+    });
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings(
+        "{\"model\":\"BAAI/bge-reranker-v2-m3\",\"query\":\"What is my dog called?\",\"documents\":[\"2023-05-20 user: My dog Rex likes the park.\",\"The repo uses pnpm.\"],\"top_n\":2,\"return_documents\":false}",
+        body,
+    );
+
+    const no_model = try buildRerankRequestBody(std.testing.allocator, null, .{ .query = "q", .documents = documents[0..1], .top_n = 1 });
+    defer std.testing.allocator.free(no_model);
+    try std.testing.expect(std.mem.indexOf(u8, no_model, "\"model\"") == null);
+}
+
+test "rerank response parser and validator reject malformed results" {
+    const parsed = try parseRerankResponse(
+        std.testing.allocator,
+        "{\"id\":\"x\",\"results\":[{\"index\":1,\"relevance_score\":0.875},{\"index\":0,\"relevance_score\":0}],\"meta\":{}}",
+    );
+    defer std.testing.allocator.free(parsed);
+    try std.testing.expectEqual(@as(usize, 2), parsed.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed[0].index);
+    try std.testing.expectEqual(@as(f64, 0.875), parsed[0].relevance_score);
+    try std.testing.expectEqual(@as(f64, 0), parsed[1].relevance_score);
+    try validateRerankResults(std.testing.allocator, parsed, 2);
+
+    try std.testing.expectError(error.InvalidProviderResponse, parseRerankResponse(std.testing.allocator, "{\"data\":[]}"));
+    try std.testing.expectError(error.InvalidProviderResponse, parseRerankResponse(std.testing.allocator, "{\"results\":[{\"index\":-1,\"relevance_score\":1}]}"));
+    try std.testing.expectError(error.InvalidProviderResponse, parseRerankResponse(std.testing.allocator, "{\"results\":[{\"index\":0,\"relevance_score\":\"high\"}]}"));
+
+    const out_of_range = [_]RerankResult{.{ .index = 2, .relevance_score = 1 }};
+    try std.testing.expectError(error.InvalidProviderResponse, validateRerankResults(std.testing.allocator, &out_of_range, 2));
+    const duplicate = [_]RerankResult{ .{ .index = 0, .relevance_score = 1 }, .{ .index = 0, .relevance_score = 0.5 } };
+    try std.testing.expectError(error.InvalidProviderResponse, validateRerankResults(std.testing.allocator, &duplicate, 2));
+    const not_finite = [_]RerankResult{.{ .index = 0, .relevance_score = std.math.nan(f64) }};
+    try std.testing.expectError(error.InvalidProviderResponse, validateRerankResults(std.testing.allocator, &not_finite, 2));
+}
+
+fn reverseRerank(_: ?*anyopaque, allocator: std.mem.Allocator, request: RerankRequest) anyerror![]RerankResult {
+    const results = try allocator.alloc(RerankResult, request.documents.len);
+    for (results, 0..) |*result, index| result.* = .{ .index = index, .relevance_score = @floatFromInt(index) };
+    return results;
+}
+
+fn invalidRerank(_: ?*anyopaque, allocator: std.mem.Allocator, request: RerankRequest) anyerror![]RerankResult {
+    const results = try allocator.alloc(RerankResult, 1);
+    results[0] = .{ .index = request.documents.len, .relevance_score = 1 };
+    return results;
+}
+
+test "callback reranker results are validated" {
+    const documents = [_][]const u8{ "a", "b", "c" };
+    const request = RerankRequest{ .query = "q", .documents = &documents, .top_n = 3 };
+    const endpoint = ProviderEndpoint{ .kind = .callback, .name = "test", .rerank_callback = .{ .rerank = reverseRerank } };
+    try validateEndpoint(endpoint);
+    const results = try rerank(std.testing.allocator, null, endpoint, request);
+    defer std.testing.allocator.free(results);
+    try std.testing.expectEqual(@as(usize, 3), results.len);
+
+    const invalid = ProviderEndpoint{ .kind = .callback, .name = "test", .rerank_callback = .{ .rerank = invalidRerank } };
+    try std.testing.expectError(error.InvalidProviderResponse, rerank(std.testing.allocator, null, invalid, request));
+    try std.testing.expectError(error.InvalidProviderConfig, rerank(std.testing.allocator, null, .{ .kind = .callback, .name = "chat-only", .callback = .{ .respond = captureTurn } }, request));
+    try std.testing.expectError(error.ProviderUnavailable, rerank(std.testing.allocator, null, .{}, request));
+}
+
+test "http reranker gives up at its deadline" {
+    const io = std.testing.io;
+    // The kernel completes the TCP handshake for a listening socket, but the
+    // server never accepts or replies, so only the deadline can end the call.
+    var address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/v1/rerank", .{server.socket.address.getPort()});
+    defer std.testing.allocator.free(url);
+
+    const documents = [_][]const u8{"a"};
+    const endpoint = ProviderEndpoint{ .kind = .http, .name = "reranker", .url = url, .model = "m", .timeout_ms = 150 };
+    const started = std.Io.Timestamp.now(io, .awake);
+    try std.testing.expectError(error.ProviderTimeout, rerank(std.testing.allocator, io, endpoint, .{ .query = "q", .documents = &documents, .top_n = 1 }));
+    try std.testing.expect(started.untilNow(io, .awake).toMilliseconds() < 5000);
 }

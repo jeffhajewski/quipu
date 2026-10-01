@@ -32,6 +32,8 @@ import threading
 import time
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping, Sequence
+import urllib.parse
+import urllib.request
 
 from .core_client import render_context
 from .longmemeval import _parse_datetime, _role
@@ -339,8 +341,38 @@ def daemon_command(config: Mapping[str, Any], *, answer_url: str, embedding_url:
                     "--embedding-model", config["embeddingModel"]]
     if config.get("vectorDimensions"):
         command += ["--vector-dimensions", str(config["vectorDimensions"])]
+    if config.get("rerankerUrl"):
+        command += ["--reranker-url", config["rerankerUrl"]]
+        if config.get("rerankerModel"):
+            command += ["--reranker-model", config["rerankerModel"]]
     command += list(config.get("daemonArgs") or [])
     return [*command, "serve-stdio"]
+
+
+def reranker_health(url: str | None, timeout: float = 5.0) -> dict[str, Any] | None:
+    """``GET /health`` of a ``rerank_server`` (model, max length, device); None if absent."""
+    if not url:
+        return None
+    parts = urllib.parse.urlsplit(url)
+    health_url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, "/health", "", ""))
+    try:
+        with urllib.request.urlopen(health_url, timeout=timeout) as response:
+            info = json.loads(response.read())
+    except (OSError, ValueError):
+        return None
+    return info if isinstance(info, dict) else None
+
+
+def rerank_summary(trace: Any) -> dict[str, Any] | None:
+    """The daemon's retrieval-trace rerank block, minus per-item scores."""
+    rerank = trace.get("rerank") if isinstance(trace, Mapping) else None
+    if not isinstance(rerank, Mapping):
+        return None
+    top = rerank.get("topScores") or []
+    return {"status": rerank.get("status"), "model": rerank.get("model"), "windowSize": rerank.get("windowSize"),
+            "rerankedCount": rerank.get("rerankedCount"), "latencyMs": rerank.get("latencyMs"),
+            "topScore": top[0].get("score") if top and isinstance(top[0], Mapping) else None,
+            "error": rerank.get("error")}
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +533,7 @@ def run_question(case: Mapping[str, Any], config: Mapping[str, Any], proxy: Any,
                     **coverage(case, all_turns),
                     "rawOnly": coverage(case, raw_turns),
                     "warnings": result.get("warnings"),
+                    "rerank": rerank_summary(result.get("trace")),
                     "tokenEstimate": result.get("tokenEstimate"),
                     "context": context,
                     "itemRefs": [{"qid": item.get("qid"), "type": item.get("type"), "score": item.get("score"),
@@ -567,7 +600,19 @@ def summarize_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "answerNominalCostUsd": sum(call.get("nominalCostUsd", 0.0) for call in calls),
         "judgeCostUsd": sum(row.get("judgeCostUsd") or 0.0 for row in rows),
         "judgeNominalCostUsd": sum(row.get("judgeNominalCostUsd") or 0.0 for row in rows),
+        **summarize_rerank(ok),
     }
+
+
+def summarize_rerank(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Rerank stage outcomes; empty when no row carries a rerank trace."""
+    reranks = [row["rerank"] for row in rows if isinstance(row.get("rerank"), Mapping)]
+    if not reranks:
+        return {}
+    applied = [r for r in reranks if r.get("status") == "applied"]
+    return {"rerankStatuses": dict(Counter(str(r.get("status")) for r in reranks)),
+            "rerankLatencyMsP50": percentile((r.get("latencyMs") for r in applied if r.get("latencyMs") is not None), .5),
+            "rerankLatencyMsP95": percentile((r.get("latencyMs") for r in applied if r.get("latencyMs") is not None), .95)}
 
 
 def summarize_ingest(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -664,6 +709,12 @@ def markdown(report: Mapping[str, Any]) -> str:
                      f"{fmt(s['goldSessionCoverage'], 'pct')} | {fmt(s['goldTurnCoverage'], 'pct')} | {fmt(s['allGoldTurnsRate'], 'pct')} | "
                      f"{fmt(s['contextTokensMean'])} / {fmt(s['contextTokensMax'])} | {fmt(s['answerLatencyMsP50'], 'ms')} / {fmt(s['answerLatencyMsP95'], 'ms')} | "
                      f"{fmt(s['llmAnsweredRate'], 'pct')} | {fmt(s['answerCostUsd'], 'usd')} | {fmt(s['judgeCostUsd'], 'usd')} |")
+    reranked = {budget: s for budget, s in report["summary"].items() if s.get("rerankStatuses")}
+    if reranked:
+        lines += ["", "## Rerank", "", "| Budget | Statuses | Rerank p50 / p95 ms |", "| ---: | --- | ---: |"]
+        for budget, s in reranked.items():
+            lines.append(f"| {budget} | {json.dumps(s['rerankStatuses'], sort_keys=True)} | "
+                         f"{fmt(s.get('rerankLatencyMsP50'), 'ms')} / {fmt(s.get('rerankLatencyMsP95'), 'ms')} |")
     for budget, categories in report["byCategory"].items():
         lines += ["", f"## By category, {budget} tokens", "",
                   "| Category | Correct | Accuracy | Errors | Gold-session cov. | Gold-turn cov. | Context tokens | LLM-answered |",
@@ -733,9 +784,21 @@ def cmd_run(args: argparse.Namespace) -> int:
         "vectorDimensions": args.vector_dimensions, "readerModel": args.reader_model,
         "budgets": args.budgets, "extract": not args.no_extract, "needs": args.needs, "mode": args.mode,
         "daemonArgs": args.daemon_arg or [], "answerOptions": parse_answer_options(args.answer_option),
+        "rerankerUrl": args.reranker_url, "rerankerModel": args.reranker_model,
         "rememberTimeout": args.remember_timeout,
         "answerTimeout": args.answer_timeout,
     }
+    reranker = reranker_health(args.reranker_url)
+    if args.reranker_url:
+        if reranker is None:
+            print(f"warning: no rerank_server health at {args.reranker_url}; "
+                  "answers will carry rerank_failed if it is unreachable", file=sys.stderr)
+        elif not args.reranker_model:
+            config["rerankerModel"] = reranker.get("model")
+        elif reranker.get("model") != args.reranker_model:
+            print(f"--reranker-model {args.reranker_model!r} does not match the server's "
+                  f"{reranker.get('model')!r}", file=sys.stderr)
+            return 2
     identity = {
         "runName": args.run_name, "startedAt": datetime.now(timezone.utc).isoformat(),
         "harnessGit": git_identity(ROOT),
@@ -743,6 +806,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         "binaryBuildInfo": json.loads(build_info_path.read_text()) if build_info_path.exists() else None,
         "readerModel": args.reader_model, "judgeModel": JUDGE_MODEL,
         "embeddingModel": args.embedding_model if args.embedding_provider_via_proxy else None,
+        "rerankerModel": config["rerankerModel"] if args.reranker_url else None,
+        "rerankerServer": ({k: reranker.get(k) for k in ("model", "maxLength", "device")} if reranker else None),
         "tokenizer": TOKENIZER, "budgets": args.budgets,
         "selection": str(args.selection), "selectionSha256": sha256_file(args.selection),
         "selectionSeed": json.loads(args.selection.read_text()).get("seed") if args.selection.suffix == ".json" else None,
@@ -751,8 +816,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         "judge": "official LongMemEval get_anscheck_prompt (upstream 9e0b455f), via longmemeval_study.official_judge",
         "daemonConfig": {k: v for k, v in config.items() if k not in ("daemonBinary",)},
     }
+    # The reranker URL only locates the server; its model and max length decide the scores.
     config_hash = digest([identity["binarySha256"], identity["datasetSha256"], identity["graderSha256"],
-                          {k: v for k, v in config.items() if k not in ("dbDir", "rememberTimeout", "answerTimeout")}])
+                          {k: v for k, v in config.items()
+                           if k not in ("dbDir", "rememberTimeout", "answerTimeout", "rerankerUrl")},
+                          *([{"rerankerMaxLength": reranker.get("maxLength")}] if reranker else [])])
     identity["configHash"] = config_hash
     write_json(run_dir / "manifest.json", identity)
     formatter = load_formatter(args.upstream)
@@ -1045,6 +1113,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--daemon-arg", action="append", help="extra daemon CLI argument (repeatable)")
     run.add_argument("--answer-option", action="append", metavar="KEY=JSON",
                      help="extra memory.answer option, value parsed as JSON (repeatable)")
+    run.add_argument("--reranker-url", help="Cohere-compatible rerank endpoint for the daemon, "
+                     "e.g. http://127.0.0.1:7341/v1/rerank (see quipu_evals.rerank_server)")
+    run.add_argument("--reranker-model", help="model sent to the reranker (default: the rerank_server's model)")
     run.add_argument("--questions", nargs="+", help="subset of selected question IDs")
     run.add_argument("--limit", type=int)
     run.add_argument("--fresh", action="store_true", help="ignore matching per-question results")

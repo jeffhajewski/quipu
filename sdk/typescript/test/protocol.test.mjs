@@ -95,6 +95,24 @@ test("method schema accepts slot metadata, support validity, and answer prompt",
   assert.deepEqual(schema.$defs.memoryAnswerResult.properties.prompt.type, ["string", "null"]);
 });
 
+test("rerank options are part of the retrieve and answer contract", () => {
+  const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
+  for (const def of ["memoryRetrieveParams", "memoryAnswerParams"]) {
+    const options = schema.$defs[def].properties.options.properties;
+    assert.equal(options.rerank.type, "boolean");
+    assert.equal(options.rerankCandidates.minimum, 1);
+  }
+  assert.ok(schema.$defs.retrievalTrace.properties.rerank);
+  assert.ok(schema.$defs.systemHealthResult.properties.capabilities.properties.reranker);
+
+  for (const method of ["memory.retrieve", "memory.answer"]) {
+    validateRpcParams(method, { query: "q", options: { rerank: false, rerankCandidates: 20 } });
+    for (const options of [{ rerank: "no" }, { rerankCandidates: 0 }, { rerankCandidates: 2.5 }, { rerankCandidates: "5" }]) {
+      assert.throws(() => validateRpcParams(method, { query: "q", options }), QuipuProtocolError);
+    }
+  }
+});
+
 test("invalid request fixture is rejected", () => {
   const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.retrieve.invalid_request.json"), "utf8"));
   assert.throws(() => validateJsonRpcRequest(fixture.request), QuipuProtocolError);

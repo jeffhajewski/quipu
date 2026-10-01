@@ -8,9 +8,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "evals" / "src"))
 
+from quipu_evals.rerank_server import RerankServer, RerankService, ScoreCache  # noqa: E402
 from quipu_evals.sota_longmemeval import (  # noqa: E402
-    build_case, coverage, item_turns, linked_message_qids, paired_comparison, parse_answer_options,
-    percentile, reader_context, render_context, select_dev,
+    build_case, coverage, daemon_command, item_turns, linked_message_qids, paired_comparison, parse_answer_options,
+    percentile, reader_context, render_context, rerank_summary, reranker_health, select_dev, summarize_rows,
 )
 
 
@@ -154,6 +155,42 @@ class AnswerOptionTests(unittest.TestCase):
     def test_rejects_pairs_without_equals(self):
         with self.assertRaises(SystemExit):
             parse_answer_options(["rerank"])
+
+
+class RerankerTests(unittest.TestCase):
+    CONFIG = {"daemonBinary": "/bin/quipu", "readerModel": "reader", "embeddingModel": "embed",
+              "daemonArgs": ["--page-size", "8192"]}
+
+    def test_daemon_gets_reranker_flags_only_when_configured(self):
+        plain = daemon_command(self.CONFIG, answer_url="http://proxy/chat", embedding_url=None, db_path=None)
+        self.assertNotIn("--reranker-url", plain)
+        command = daemon_command({**self.CONFIG, "rerankerUrl": "http://127.0.0.1:7341/v1/rerank",
+                                  "rerankerModel": "BAAI/bge-reranker-v2-m3"},
+                                 answer_url="http://proxy/chat", embedding_url=None, db_path=None)
+        self.assertEqual(command[-7:], ["--reranker-url", "http://127.0.0.1:7341/v1/rerank",
+                                        "--reranker-model", "BAAI/bge-reranker-v2-m3",
+                                        "--page-size", "8192", "serve-stdio"])
+
+    def test_rows_summarize_rerank_outcomes(self):
+        trace = {"rerank": {"model": "m", "status": "applied", "windowSize": 50, "rerankedCount": 50,
+                            "latencyMs": 812.5, "topScores": [{"qid": "q_msg_1", "score": 0.97}], "error": None}}
+        summary = rerank_summary(trace)
+        self.assertEqual(summary["topScore"], 0.97)
+        self.assertNotIn("topScores", summary)
+        self.assertIsNone(rerank_summary({"query": "q"}))
+        rows = [{"status": "ok", "correct": True, "rerank": summary},
+                {"status": "ok", "correct": False, "rerank": {**summary, "status": "failed", "latencyMs": 30000}}]
+        stats = summarize_rows(rows)
+        self.assertEqual(stats["rerankStatuses"], {"applied": 1, "failed": 1})
+        self.assertEqual(stats["rerankLatencyMsP50"], 812.5)
+        self.assertNotIn("rerankStatuses", summarize_rows([{"status": "ok", "correct": True}]))
+
+    def test_reranker_health_reads_the_rerank_server(self):
+        service = RerankService("fake-model", lambda pairs: [0.0] * len(pairs), ScoreCache(None), max_length=256)
+        with RerankServer(service) as server:
+            info = reranker_health(server.url)
+        self.assertEqual((info["model"], info["maxLength"]), ("fake-model", 256))
+        self.assertIsNone(reranker_health(None))
 
 
 if __name__ == "__main__":

@@ -154,7 +154,38 @@
               "count": { "type": "integer", "minimum": 0 }
             }
           }
-        }
+        },
+        "rerank": { "$ref": "#/$defs/rerankTrace" }
+      }
+    },
+    "rerankTrace": {
+      "type": "object",
+      "description": "Present only when the daemon has a reranker configured.",
+      "required": ["model", "status", "windowSize", "rerankedCount", "latencyMs", "topScores"],
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": ["string", "null"] },
+        "status": {
+          "type": "string",
+          "enum": ["applied", "failed", "disabled", "skipped"],
+          "description": "failed keeps the fused order and adds the rerank_failed warning; disabled means options.rerank was false; skipped means there were no candidates."
+        },
+        "windowSize": { "type": "integer", "minimum": 0 },
+        "rerankedCount": { "type": "integer", "minimum": 0 },
+        "latencyMs": { "type": "number", "minimum": 0 },
+        "topScores": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["qid", "score"],
+            "additionalProperties": false,
+            "properties": {
+              "qid": { "$ref": "#/$defs/qid" },
+              "score": { "type": "number" }
+            }
+          }
+        },
+        "error": { "type": ["string", "null"] }
       }
     },
     "answerTrace": {
@@ -237,6 +268,21 @@
         "workers": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/workerState" }
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "reranker": {
+              "type": "object",
+              "required": ["configured", "model"],
+              "additionalProperties": false,
+              "properties": {
+                "configured": { "type": "boolean" },
+                "model": { "type": ["string", "null"] }
+              }
+            }
+          }
         }
       }
     },
@@ -345,7 +391,16 @@
             "logTrace": { "type": "boolean" },
             "logRetrieval": { "type": "boolean" },
             "abstainIfWeak": { "type": "boolean" },
-            "format": { "type": "string", "enum": ["prompt", "json"] }
+            "format": { "type": "string", "enum": ["prompt", "json"] },
+            "rerank": {
+              "type": "boolean",
+              "description": "Set false to bypass a configured reranker for this request. Default true."
+            },
+            "rerankCandidates": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Leading candidates sent to a configured reranker. Default 50."
+            }
           }
         }
       }
@@ -441,7 +496,16 @@
             "logTrace": { "type": "boolean" },
             "logRetrieval": { "type": "boolean" },
             "abstainIfWeak": { "type": "boolean" },
-            "format": { "type": "string", "enum": ["prompt", "json"] }
+            "format": { "type": "string", "enum": ["prompt", "json"] },
+            "rerank": {
+              "type": "boolean",
+              "description": "Set false to bypass a configured reranker for this request. Default true."
+            },
+            "rerankCandidates": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Leading candidates sent to a configured reranker. Default 50."
+            }
           }
         }
       }

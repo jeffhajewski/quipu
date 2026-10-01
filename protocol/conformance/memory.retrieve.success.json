@@ -23,7 +23,8 @@
         "includeDebug": false,
         "logTrace": true,
         "abstainIfWeak": true,
-        "format": "prompt"
+        "format": "prompt",
+        "rerankCandidates": 50
       }
     }
   },
@@ -109,7 +110,21 @@
             "confidence": 0.94,
             "recency": 0.75
           }
-        ]
+        ],
+        "rerank": {
+          "model": "BAAI/bge-reranker-v2-m3",
+          "status": "applied",
+          "windowSize": 1,
+          "rerankedCount": 1,
+          "latencyMs": 41.5,
+          "topScores": [
+            {
+              "qid": "q_fact_local1",
+              "score": 0.97
+            }
+          ],
+          "error": null
+        }
       }
     }
   }

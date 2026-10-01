@@ -103,6 +103,24 @@ class ProtocolFixtureTests(unittest.TestCase):
         self.assertEqual(result["answerTrace"]["validation"]["status"], "accepted")
         self.assertTrue(result["prompt"].startswith("<memory>"))
 
+    def test_rerank_options_are_validated(self):
+        methods_schema = json.loads((SCHEMA_DIR / "methods.schema.json").read_text())
+        defs = methods_schema["$defs"]
+        for method in ("memoryRetrieveParams", "memoryAnswerParams"):
+            options = defs[method]["properties"]["options"]["properties"]
+            self.assertEqual(options["rerank"]["type"], "boolean")
+            self.assertEqual(options["rerankCandidates"]["minimum"], 1)
+        self.assertIn("rerank", defs["retrievalTrace"]["properties"])
+        self.assertIn("reranker", defs["systemHealthResult"]["properties"]["capabilities"]["properties"])
+
+        for method in ("memory.retrieve", "memory.answer"):
+            with self.subTest(method=method):
+                validate_rpc_params(method, {"query": "q", "options": {"rerank": False, "rerankCandidates": 20}})
+                for options in ({"rerank": "no"}, {"rerankCandidates": 0}, {"rerankCandidates": 2.5},
+                                {"rerankCandidates": True}):
+                    with self.assertRaises(QuipuProtocolError):
+                        validate_rpc_params(method, {"query": "q", "options": options})
+
     def test_error_fixture_rejects_bad_request(self):
         fixture = json.loads((FIXTURE_DIR / "memory.retrieve.invalid_request.json").read_text())
         with self.assertRaises(QuipuProtocolError):

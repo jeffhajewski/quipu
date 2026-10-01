@@ -142,6 +142,54 @@ Embedding Zig hosts and tests can supply an in-process reader with
 `ProviderKind.callback` and a `ProviderCallback`. The callback receives the
 same system prompt and user turn that would go over HTTP.
 
+## Reranker
+
+An optional cross-encoder reranker reorders retrieval candidates before budget
+packing (see [algorithms.md](algorithms.md#retrieval-v0), step 7). It is off
+unless a URL is configured:
+
+```bash
+quipu --reranker-url http://127.0.0.1:7341/v1/rerank \
+  --reranker-model BAAI/bge-reranker-v2-m3 serve-stdio
+```
+
+| Flag | Environment | Default |
+| --- | --- | --- |
+| `--reranker-url URL` | `QUIPU_RERANKER_URL` | unset: no reranking |
+| `--reranker-model MODEL` | `QUIPU_RERANKER_MODEL` | unset: `model` is omitted |
+| `--reranker-api-key KEY` | `QUIPU_RERANKER_API_KEY` | unset: no `Authorization` header |
+| `--reranker-timeout-ms N` | `QUIPU_RERANKER_TIMEOUT_MS` | `30000` |
+
+The endpoint speaks the Cohere/Jina rerank wire format, so hosted Cohere or
+Jina rerankers, a local server, or the eval harness's
+`quipu_evals.rerank_server` all work. A key is sent as
+`Authorization: Bearer <key>`.
+
+```text
+POST {url}
+{"model":"...","query":"...","documents":["...", ...],"top_n":N,"return_documents":false}
+-> {"results":[{"index":i,"relevance_score":s}, ...]}
+```
+
+The daemon validates each reply: every `index` must point into `documents`
+and appear once, and every score must be finite. A non-2xx status, a
+connection error, a timeout, or an invalid reply leaves the fused order in
+place. The response gets the `rerank_failed` warning, and the request still
+succeeds. `system.health` reports
+`capabilities.reranker: {"configured": bool, "model": string|null}`.
+
+Per request, `options.rerank: false` bypasses the reranker, which is useful for
+A/B runs against one daemon. `options.rerankCandidates` (default 50) sets how
+many leading candidates are sent. With `options.includeDebug`, `trace.rerank`
+reports the model, status (`applied`, `failed`, `disabled` or `skipped`), the
+window size, how many items were scored, latency in milliseconds, the top 10
+scores by qid, and the error name on failure. With no reranker configured,
+responses carry no `trace.rerank` and are unchanged.
+
+Embedding Zig hosts and tests can supply an in-process reranker with
+`ProviderKind.callback` and a `RerankCallback`, which receives the same query
+and documents that would go over HTTP.
+
 ## Connectivity Checks
 
 Run a dry provider probe without writing memory:
