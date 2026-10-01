@@ -539,12 +539,14 @@ fn trimOwned(allocator: std.mem.Allocator, owned: []u8) ![]u8 {
     return result;
 }
 
+/// Offline probe used by `quipu llm-check` when no provider is configured:
+/// echoes the text of the first rendered context line.
 fn deterministicAnswer(allocator: std.mem.Allocator, context_prompt: []const u8) ![]u8 {
     var lines = std.mem.splitScalar(u8, context_prompt, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
-        if (!std.mem.startsWith(u8, trimmed, "- (")) continue;
-        const close = std.mem.indexOf(u8, trimmed, ") ") orelse continue;
+        if (!std.mem.startsWith(u8, trimmed, "[q_")) continue;
+        const close = std.mem.indexOf(u8, trimmed, "] ") orelse continue;
         const answer = std.mem.trim(u8, trimmed[close + 2 ..], " \t\r\n");
         if (answer.len > 0) return allocator.dupe(u8, answer);
     }

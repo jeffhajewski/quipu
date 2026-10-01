@@ -37,6 +37,54 @@ advertises a non-hash embedding model. Callers can override this with
 
 This gives later provider-embedding, BM25, and reranking work a stable behavioral surface: retrieval must return scoped, evidence-backed, budgeted context packets rather than arbitrary top-k chunks.
 
+### Context rendering
+
+`memory.retrieve` and `memory.answer` render `prompt` with one deterministic
+renderer. Retrieval rank decides which items are kept; it does not decide the
+order they are shown in.
+
+```text
+Current date: 2023-05-30 (Tuesday)          <- retrieve only, when time.validAt is set
+<memory>
+<facts>
+[q_fact_2] (superseded, 2023-05-01 to 2023-05-22) The repo uses npm.
+[q_fact_9] (current, from 2023-05-22) The repo uses pnpm.
+</facts>
+<sessions>
+## session s-early 2023-05-20 (Sat)
+[q_msg_3] user: My dog Rex likes the park.
+[q_msg_4] 2023-05-21 user: Follow-up written the next day.
+## session s-late 2023-05-22 (Mon)
+[q_chunk_11] assistant (1/2): first 1,200-character chunk
+[q_chunk_12] assistant (2/2): second chunk
+## other
+[q_obs_7] 2023-05-21 observation: Observed build failure
+</sessions>
+</memory>
+```
+
+- Derived memory (`core`, `facts`, `preferences`, `procedures`) is rendered in
+  its own sections as `[qid] (state, validity) text`, ordered by `validFrom`.
+- Raw evidence (messages, chunks, episodes, observations) is grouped by
+  session. The header shows the caller's `sessionId` when present, otherwise
+  the session qid, plus the session's earliest ISO date and weekday. Sessions
+  are ordered chronologically. Items within a session are ordered by session
+  qid, `messageIndex`, `chunkIndex`, then `createdAt`. A line repeats its date
+  only when it differs from the session date. Items without a session go last
+  under `## other`.
+- Session, role, and index metadata is read from node properties
+  (`sessionQid`, `sessionId`, `messageIndex`, `chunkIndex`, `chunkCount`). For
+  older nodes it is recovered through the owning Turn's `HAS_*` edge.
+  Session and Turn nodes never render as items.
+- Text is written on one line with whitespace collapsed. Context section tags
+  inside stored text are defanged (`</memory>` becomes `[/memory]`), so memory
+  cannot close or forge a section.
+- Fixed overhead per item is the bracketed qid, the speaker, and an optional
+  date or chunk marker, plus a share of its session header. This fits inside the
+  per-item allowance of the budget estimator.
+
+### Answering
+
 `memory.answer` runs the same retrieval path, builds an evidence packet from
 retrieved qids, and routes the query to a synthesis strategy:
 `span_extract`, `preference`, `knowledge_update`, `temporal`,

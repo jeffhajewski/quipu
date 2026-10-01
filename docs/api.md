@@ -15,7 +15,7 @@ See [../SPEC.md](../SPEC.md) for the full design. This file tracks implemented p
   defaults to lexical search unless the active storage backend advertises a
   non-hash embedding model, in which case it defaults to hybrid search.
 
-The prompt is assembled from the structured context sections, so callers that need typed memory should use `result.context` and callers that need direct model input can use `result.prompt`.
+The prompt is assembled from the structured context sections, so callers that need typed memory should use `result.context` and callers that need direct model input can use `result.prompt`. Derived memory renders in its own sections with state and validity dates. Raw evidence is grouped by session in chronological order, with dated session headers and `[qid] speaker: text` lines. When `time.validAt` is set, the prompt starts with `Current date: YYYY-MM-DD (Weekday)`. See [algorithms.md](algorithms.md#context-rendering).
 
 `memory.answer` accepts the same retrieval fields, runs the same scoped context
 assembly, and returns `answer`, `provider`, optional `model`, `items`, `context`,

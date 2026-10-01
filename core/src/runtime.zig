@@ -774,7 +774,7 @@ pub const Runtime = struct {
 
         const retrieval_id = try self.nextQid(allocator, "retr");
         defer allocator.free(retrieval_id);
-        const prompt = try promptFromContext(allocator, context.view());
+        const prompt = try promptFromContext(allocator, self.store, context.view(), .{ .current_date = valid_at });
         defer allocator.free(prompt);
         const token_estimate = @max(@as(usize, 1), prompt.len / 4);
         const score_breakdowns = try buildScoreBreakdowns(allocator, results.items.items);
@@ -911,7 +911,7 @@ pub const Runtime = struct {
 
         const retrieval_id = try self.nextQid(allocator, "retr");
         defer allocator.free(retrieval_id);
-        const prompt = try promptFromContext(allocator, context.view());
+        const prompt = try promptFromContext(allocator, self.store, context.view(), .{ .current_date = valid_at });
         defer allocator.free(prompt);
         const token_estimate = @max(@as(usize, 1), prompt.len / 4);
         const score_breakdowns = try buildScoreBreakdowns(allocator, results.items.items);
@@ -3110,6 +3110,14 @@ fn propertyStringArrayContains(allocator: std.mem.Allocator, properties_json: []
 }
 
 fn textForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
+    // Session and Turn nodes are structure, not memory text; callers skip them
+    // instead of surfacing "Session"/"Turn" placeholders.
+    if (std.mem.eql(u8, node.label, "Session") or std.mem.eql(u8, node.label, "Turn")) {
+        return error.NoRenderableText;
+    }
+    if (std.mem.eql(u8, node.label, "Chunk")) {
+        return readPropertyString(allocator, node.properties_json, "content");
+    }
     if (std.mem.eql(u8, node.label, "Core")) {
         return readPropertyString(allocator, node.properties_json, "text");
     }
@@ -3146,6 +3154,10 @@ const CivilDate = struct {
     day: u8,
 };
 
+/// Raw-cache text appends this annotation so date words are lexically
+/// searchable; the prompt renderer strips it because session headers carry the date.
+const raw_date_annotation_prefix = " [message date: ";
+
 fn rawMessageText(allocator: std.mem.Allocator, content: []const u8, properties_json: []const u8) ![]u8 {
     const created_at = try readOptionalPropertyString(allocator, properties_json, "createdAt");
     defer if (created_at) |value| allocator.free(value);
@@ -3158,7 +3170,7 @@ fn rawMessageText(allocator: std.mem.Allocator, content: []const u8, properties_
 
     const message_date = try formatHumanDate(allocator, date);
     defer allocator.free(message_date);
-    try writer.writer.print(" [message date: {s}", .{message_date});
+    try writer.writer.print(raw_date_annotation_prefix ++ "{s}", .{message_date});
     if (containsWordIgnoreCase(content, "today")) {
         try appendTemporalAnnotation(&writer.writer, allocator, "today", date);
     }
@@ -3190,6 +3202,31 @@ fn parseIsoDate(timestamp: []const u8) !CivilDate {
 
 fn formatHumanDate(allocator: std.mem.Allocator, date: CivilDate) ![]u8 {
     return std.fmt.allocPrint(allocator, "{d} {s} {d}", .{ date.day, monthName(date.month), date.year });
+}
+
+/// `YYYY-MM-DD (Weekday)` for a trusted current-date line; unparseable
+/// timestamps are passed through unchanged.
+fn formatCurrentDate(allocator: std.mem.Allocator, timestamp: []const u8) ![]u8 {
+    const date = parseIsoDate(timestamp) catch return allocator.dupe(u8, timestamp);
+    return std.fmt.allocPrint(allocator, "{s} ({s})", .{ timestamp[0..10], weekdayName(date) });
+}
+
+/// Days since 1970-01-01 in the proleptic Gregorian calendar.
+fn daysFromCivil(date: CivilDate) i64 {
+    const month: i64 = date.month;
+    const year: i64 = if (month <= 2) @as(i64, date.year) - 1 else date.year;
+    const era = @divFloor(year, 400);
+    const year_of_era = year - era * 400;
+    const shifted_month = @mod(month + 9, 12);
+    const day_of_year = @divFloor(153 * shifted_month + 2, 5) + @as(i64, date.day) - 1;
+    const day_of_era = year_of_era * 365 + @divFloor(year_of_era, 4) - @divFloor(year_of_era, 100) + day_of_year;
+    return era * 146097 + day_of_era - 719468;
+}
+
+fn weekdayName(date: CivilDate) []const u8 {
+    const names = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+    // 1970-01-01 was a Thursday.
+    return names[@intCast(@mod(daysFromCivil(date) + 4, 7))];
 }
 
 fn shiftCivilDate(date: CivilDate, delta_days: i32) CivilDate {
@@ -3574,26 +3611,418 @@ fn estimateItemTokens(item: MessageResult) usize {
     return @max(@as(usize, 1), item.text.len / 4 + 8);
 }
 
-fn promptFromContext(allocator: std.mem.Allocator, context: ContextPacket) ![]u8 {
+const PromptOptions = struct {
+    /// Trusted question date (`time.validAt`). When set, a `Current date:` line
+    /// is rendered above the untrusted memory block.
+    current_date: ?[]const u8 = null,
+};
+
+/// Per-item rendering metadata read from the item's node. Every field is
+/// optional so older nodes (no session or index properties) still render.
+const RenderMeta = struct {
+    role: ?[]const u8 = null,
+    created_at: ?[]const u8 = null,
+    session_qid: ?[]const u8 = null,
+    session_id: ?[]const u8 = null,
+    message_index: ?i64 = null,
+    chunk_index: ?i64 = null,
+    chunk_count: ?i64 = null,
+};
+
+const RenderEntry = struct {
+    item: MessageResult,
+    rank: usize,
+    meta: RenderMeta = .{},
+};
+
+const RenderGroup = struct {
+    key: ?[]const u8,
+    members: std.ArrayList(usize) = .empty,
+    date: ?[]const u8 = null,
+    first_session_qid: ?[]const u8 = null,
+    first_rank: usize,
+};
+
+/// Renders the reader-facing memory context. Derived memory (core, facts,
+/// preferences, procedures) gets its own sections with state and validity
+/// dates; raw evidence is grouped by session, sessions in chronological order,
+/// items by message index then chunk index. Output is deterministic for a
+/// given context. `store` supplies session/role/index metadata; without it the
+/// renderer falls back to what the items carry.
+fn promptFromContext(allocator: std.mem.Allocator, store: ?storage.Adapter, context: ContextPacket, options: PromptOptions) ![]u8 {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const entries = try arena.alloc(RenderEntry, context.episodes.len);
+    var session_ids = std.StringHashMap(?[]const u8).init(arena);
+    for (context.episodes, 0..) |item, rank| {
+        entries[rank] = .{
+            .item = item,
+            .rank = rank,
+            .meta = if (store) |adapter| try loadRenderMeta(arena, adapter, item, &session_ids) else .{ .created_at = item.validFrom },
+        };
+    }
+    return renderPrompt(allocator, arena, context, entries, options);
+}
+
+fn renderPrompt(
+    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    context: ContextPacket,
+    entries: []const RenderEntry,
+    options: PromptOptions,
+) ![]u8 {
     var writer: std.Io.Writer.Allocating = .init(allocator);
     errdefer writer.deinit();
-    try writer.writer.writeAll("<memory>");
-    try writePromptSection(&writer.writer, "core", context.core);
-    try writePromptSection(&writer.writer, "facts", context.currentFacts);
-    try writePromptSection(&writer.writer, "preferences", context.preferences);
-    try writePromptSection(&writer.writer, "procedures", context.procedural);
-    try writePromptSection(&writer.writer, "episodes", context.episodes);
-    try writer.writer.writeAll("\n</memory>");
+    const out = &writer.writer;
+    if (options.current_date) |timestamp| {
+        const formatted = try formatCurrentDate(arena, timestamp);
+        try out.print("Current date: {s}\n", .{formatted});
+    }
+    try out.writeAll("<memory>");
+    try writePromptSection(arena, out, "core", context.core);
+    try writePromptSection(arena, out, "facts", context.currentFacts);
+    try writePromptSection(arena, out, "preferences", context.preferences);
+    try writePromptSection(arena, out, "procedures", context.procedural);
+    try writeSessionSection(arena, out, entries);
+    try out.writeAll("\n</memory>");
     return writer.toOwnedSlice();
 }
 
-fn writePromptSection(writer: *std.Io.Writer, name: []const u8, items: []const MessageResult) !void {
+/// Derived items: `[qid] (state, from A to B) text`, oldest validity first.
+fn writePromptSection(arena: std.mem.Allocator, out: *std.Io.Writer, name: []const u8, items: []const MessageResult) !void {
     if (items.len == 0) return;
-    try writer.print("\n<{s}>", .{name});
-    for (items) |item| {
-        try writer.print("\n- ({s}) {s}", .{ item.qid, item.text });
+    const order = try arena.alloc(usize, items.len);
+    for (order, 0..) |*slot, index| slot.* = index;
+    std.mem.sort(usize, order, items, derivedRendersBefore);
+
+    try out.print("\n<{s}>", .{name});
+    for (order) |index| {
+        const item = items[index];
+        try out.print("\n[{s}] ({s}", .{ item.qid, item.state });
+        if (item.validFrom) |from| {
+            if (item.validTo) |to| {
+                try out.print(", {s} to {s}", .{ dateKey(from), dateKey(to) });
+            } else {
+                try out.print(", from {s}", .{dateKey(from)});
+            }
+        } else if (item.validTo) |to| {
+            try out.print(", until {s}", .{dateKey(to)});
+        }
+        try out.writeAll(") ");
+        try writeItemText(out, item.text);
     }
-    try writer.print("\n</{s}>", .{name});
+    try out.print("\n</{s}>", .{name});
+}
+
+fn derivedRendersBefore(items: []const MessageResult, left: usize, right: usize) bool {
+    const left_from = items[left].validFrom;
+    const right_from = items[right].validFrom;
+    if (left_from == null and right_from != null) return true;
+    if (left_from != null and right_from == null) return false;
+    if (left_from != null and right_from != null and !std.mem.eql(u8, left_from.?, right_from.?)) {
+        return std.mem.order(u8, left_from.?, right_from.?) == .lt;
+    }
+    return left < right;
+}
+
+/// Raw evidence grouped by session:
+/// `## session <id> YYYY-MM-DD (Ddd)` then `[qid] speaker: text` lines. A line
+/// repeats its date only when it differs from the session date. Items without
+/// a session go last under `## other`.
+fn writeSessionSection(arena: std.mem.Allocator, out: *std.Io.Writer, entries: []const RenderEntry) !void {
+    if (entries.len == 0) return;
+    var groups = std.ArrayList(RenderGroup).empty;
+    for (entries, 0..) |entry, index| {
+        const key = entry.meta.session_id orelse entry.meta.session_qid;
+        const group = for (groups.items) |*existing| {
+            if (optionalStringsEqual(existing.key, key)) break existing;
+        } else blk: {
+            try groups.append(arena, .{ .key = key, .first_rank = entry.rank });
+            break :blk &groups.items[groups.items.len - 1];
+        };
+        try group.members.append(arena, index);
+        group.first_rank = @min(group.first_rank, entry.rank);
+        if (entry.meta.created_at) |created_at| {
+            if (group.date == null or std.mem.order(u8, created_at, group.date.?) == .lt) group.date = created_at;
+        }
+        if (entry.meta.session_qid) |session_qid| {
+            if (group.first_session_qid == null or naturalQidOrder(session_qid, group.first_session_qid.?) == .lt) {
+                group.first_session_qid = session_qid;
+            }
+        }
+    }
+    for (groups.items) |group| {
+        std.mem.sort(usize, group.members.items, entries, entryRendersBefore);
+    }
+    std.mem.sort(RenderGroup, groups.items, {}, groupRendersBefore);
+
+    try out.writeAll("\n<sessions>");
+    for (groups.items) |group| {
+        const header_date: ?[]const u8 = if (group.date) |date| dateKey(date) else null;
+        if (group.key) |key| {
+            try out.print("\n## session {s}", .{key});
+            if (group.date) |date| {
+                if (parseIsoDate(date)) |civil| {
+                    try out.print(" {s} ({s})", .{ dateKey(date), weekdayName(civil)[0..3] });
+                } else |_| {
+                    try out.print(" {s}", .{date});
+                }
+            }
+        } else {
+            try out.writeAll("\n## other");
+        }
+        for (group.members.items) |index| {
+            const entry = entries[index];
+            try out.print("\n[{s}]", .{entry.item.qid});
+            var labelled = false;
+            if (entry.meta.created_at) |created_at| {
+                const line_date = dateKey(created_at);
+                if (group.key == null or header_date == null or !std.mem.eql(u8, line_date, header_date.?)) {
+                    try out.print(" {s}", .{line_date});
+                    labelled = true;
+                }
+            }
+            if (entry.meta.role) |role| {
+                try out.print(" {s}", .{role});
+                labelled = true;
+            }
+            if (entry.meta.chunk_count) |count| {
+                if (count > 1) {
+                    if (entry.meta.chunk_index) |chunk_index| {
+                        try out.print(" ({d}/{d})", .{ chunk_index + 1, count });
+                        labelled = true;
+                    }
+                }
+            }
+            try out.writeAll(if (labelled) ": " else " ");
+            try writeItemText(out, entry.item.text);
+        }
+    }
+    try out.writeAll("\n</sessions>");
+}
+
+fn entryRendersBefore(entries: []const RenderEntry, left_index: usize, right_index: usize) bool {
+    const left = entries[left_index];
+    const right = entries[right_index];
+    if (orderOptionalQid(left.meta.session_qid, right.meta.session_qid)) |order| return order == .lt;
+    if (orderOptionalInt(left.meta.message_index, right.meta.message_index)) |order| return order == .lt;
+    if (orderOptionalInt(left.meta.chunk_index, right.meta.chunk_index)) |order| return order == .lt;
+    if (orderOptionalString(left.meta.created_at, right.meta.created_at)) |order| return order == .lt;
+    const qid_order = naturalQidOrder(left.item.qid, right.item.qid);
+    if (qid_order != .eq) return qid_order == .lt;
+    return left.rank < right.rank;
+}
+
+fn groupRendersBefore(_: void, left: RenderGroup, right: RenderGroup) bool {
+    if ((left.key == null) != (right.key == null)) return right.key == null;
+    if (orderOptionalString(left.date, right.date)) |order| return order == .lt;
+    if (orderOptionalQid(left.first_session_qid, right.first_session_qid)) |order| return order == .lt;
+    if (orderOptionalString(left.key, right.key)) |order| return order == .lt;
+    return left.first_rank < right.first_rank;
+}
+
+/// Present values sort before missing ones; null means "tied".
+fn orderOptionalString(left: ?[]const u8, right: ?[]const u8) ?std.math.Order {
+    if (left == null and right == null) return null;
+    if (left == null) return .gt;
+    if (right == null) return .lt;
+    const order = std.mem.order(u8, left.?, right.?);
+    return if (order == .eq) null else order;
+}
+
+fn orderOptionalQid(left: ?[]const u8, right: ?[]const u8) ?std.math.Order {
+    if (left == null and right == null) return null;
+    if (left == null) return .gt;
+    if (right == null) return .lt;
+    const order = naturalQidOrder(left.?, right.?);
+    return if (order == .eq) null else order;
+}
+
+fn orderOptionalInt(left: ?i64, right: ?i64) ?std.math.Order {
+    if (left == null and right == null) return null;
+    if (left == null) return .gt;
+    if (right == null) return .lt;
+    const order = std.math.order(left.?, right.?);
+    return if (order == .eq) null else order;
+}
+
+/// Orders qids such as `q_msg_9` before `q_msg_10` by comparing the trailing
+/// counter numerically.
+fn naturalQidOrder(left: []const u8, right: []const u8) std.math.Order {
+    const left_split = trailingDigitStart(left);
+    const right_split = trailingDigitStart(right);
+    const prefix_order = std.mem.order(u8, left[0..left_split], right[0..right_split]);
+    if (prefix_order != .eq) return prefix_order;
+    const left_digits = std.mem.trimStart(u8, left[left_split..], "0");
+    const right_digits = std.mem.trimStart(u8, right[right_split..], "0");
+    if (left_digits.len != right_digits.len) return std.math.order(left_digits.len, right_digits.len);
+    const digit_order = std.mem.order(u8, left_digits, right_digits);
+    if (digit_order != .eq) return digit_order;
+    return std.mem.order(u8, left, right);
+}
+
+fn trailingDigitStart(text: []const u8) usize {
+    var index = text.len;
+    while (index > 0 and std.ascii.isDigit(text[index - 1])) : (index -= 1) {}
+    return index;
+}
+
+fn optionalStringsEqual(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return std.mem.eql(u8, left.?, right.?);
+}
+
+/// `YYYY-MM-DD` when the timestamp starts with a valid ISO date, else as given.
+fn dateKey(timestamp: []const u8) []const u8 {
+    _ = parseIsoDate(timestamp) catch return timestamp;
+    return timestamp[0..10];
+}
+
+/// Writes item text on one line: whitespace runs collapse to a single space,
+/// raw-cache date annotations are dropped (the session header carries the
+/// date), and context section tags inside memory text are defanged so stored
+/// text cannot close or forge a section.
+fn writeItemText(out: *std.Io.Writer, raw: []const u8) !void {
+    const text = std.mem.trim(u8, stripRawDateAnnotation(raw), " \t\r\n");
+    var pending_space = false;
+    var index: usize = 0;
+    while (index < text.len) {
+        const byte = text[index];
+        if (byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n') {
+            pending_space = true;
+            index += 1;
+            continue;
+        }
+        if (pending_space) {
+            try out.writeByte(' ');
+            pending_space = false;
+        }
+        if (byte == '<') {
+            if (contextTagLength(text[index..])) |tag_len| {
+                try out.writeByte('[');
+                try out.writeAll(text[index + 1 .. index + tag_len - 1]);
+                try out.writeByte(']');
+                index += tag_len;
+                continue;
+            }
+        }
+        try out.writeByte(byte);
+        index += 1;
+    }
+}
+
+fn contextTagLength(text: []const u8) ?usize {
+    const names = [_][]const u8{ "memory", "sessions", "core", "facts", "preferences", "procedures" };
+    var cursor: usize = 1;
+    if (cursor < text.len and text[cursor] == '/') cursor += 1;
+    for (names) |name| {
+        const end = cursor + name.len;
+        if (end < text.len and std.ascii.eqlIgnoreCase(text[cursor..end], name) and text[end] == '>') return end + 1;
+    }
+    return null;
+}
+
+fn stripRawDateAnnotation(text: []const u8) []const u8 {
+    const index = std.mem.lastIndexOf(u8, text, raw_date_annotation_prefix) orelse return text;
+    if (!std.mem.endsWith(u8, text, "]")) return text;
+    return text[0..index];
+}
+
+fn loadRenderMeta(
+    arena: std.mem.Allocator,
+    store: storage.Adapter,
+    item: MessageResult,
+    session_ids: *std.StringHashMap(?[]const u8),
+) !RenderMeta {
+    var meta = RenderMeta{ .created_at = item.validFrom };
+    const node = (store.getNode(arena, item.qid) catch null) orelse return meta;
+    meta.role = defaultRoleForLabel(node.label);
+    const props = parsePropertiesObject(arena, node.properties_json) orelse return meta;
+    meta.role = jsonObjectString(props, "role") orelse meta.role;
+    meta.created_at = jsonObjectString(props, "createdAt") orelse jsonObjectString(props, "eventTime") orelse item.validFrom;
+    meta.session_id = jsonObjectString(props, "sessionId");
+    meta.message_index = jsonObjectInt(props, "messageIndex");
+    meta.chunk_index = jsonObjectInt(props, "chunkIndex");
+    meta.chunk_count = jsonObjectInt(props, "chunkCount");
+    meta.session_qid = sessionQidForNode(arena, store, node.qid, props, 1);
+    if (meta.session_id == null) {
+        if (meta.session_qid) |session_qid| {
+            if (session_ids.get(session_qid)) |cached| {
+                meta.session_id = cached;
+            } else {
+                const session_props = nodeProperties(arena, store, session_qid);
+                meta.session_id = if (session_props) |session| jsonObjectString(session, "sessionId") else null;
+                try session_ids.put(session_qid, meta.session_id);
+            }
+        }
+    }
+    return meta;
+}
+
+/// Session of a raw node: its own `sessionQid`, its turn's, its parent
+/// message's (chunks), or, for nodes written before those properties existed,
+/// the turn that owns it through a HAS_* edge.
+fn sessionQidForNode(arena: std.mem.Allocator, store: storage.Adapter, qid: []const u8, props: std.json.ObjectMap, depth: u8) ?[]const u8 {
+    if (jsonObjectString(props, "sessionQid")) |session_qid| return session_qid;
+    if (jsonObjectString(props, "turnQid")) |turn_qid| {
+        if (nodeProperties(arena, store, turn_qid)) |turn_props| {
+            if (jsonObjectString(turn_props, "sessionQid")) |session_qid| return session_qid;
+        }
+    }
+    if (depth > 0) {
+        if (jsonObjectString(props, "messageQid")) |message_qid| {
+            if (nodeProperties(arena, store, message_qid)) |message_props| {
+                return sessionQidForNode(arena, store, message_qid, message_props, depth - 1);
+            }
+        }
+    }
+    const edges = store.findEdges(arena, .{ .to_qid = qid, .limit = 64 }) catch return null;
+    for (edges) |edge| {
+        if (!std.mem.eql(u8, edge.edge_type, "HAS_MESSAGE") and
+            !std.mem.eql(u8, edge.edge_type, "HAS_TOOL_CALL") and
+            !std.mem.eql(u8, edge.edge_type, "HAS_OBSERVATION")) continue;
+        const turn_props = nodeProperties(arena, store, edge.from_qid) orelse continue;
+        if (jsonObjectString(turn_props, "sessionQid")) |session_qid| return session_qid;
+    }
+    return null;
+}
+
+fn nodeProperties(arena: std.mem.Allocator, store: storage.Adapter, qid: []const u8) ?std.json.ObjectMap {
+    const node = (store.getNode(arena, qid) catch return null) orelse return null;
+    return parsePropertiesObject(arena, node.properties_json);
+}
+
+fn parsePropertiesObject(arena: std.mem.Allocator, properties_json: []const u8) ?std.json.ObjectMap {
+    const value = std.json.parseFromSliceLeaky(Value, arena, properties_json, .{}) catch return null;
+    return switch (value) {
+        .object => |object| object,
+        else => null,
+    };
+}
+
+fn jsonObjectString(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    return switch (object.get(key) orelse return null) {
+        .string => |string| if (string.len > 0) string else null,
+        else => null,
+    };
+}
+
+fn jsonObjectInt(object: std.json.ObjectMap, key: []const u8) ?i64 {
+    return switch (object.get(key) orelse return null) {
+        .integer => |integer| integer,
+        else => null,
+    };
+}
+
+fn defaultRoleForLabel(label: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, label, "Episode")) return "summary";
+    if (std.mem.eql(u8, label, "MemoryCard")) return "note";
+    if (std.mem.eql(u8, label, "ToolCall")) return "tool";
+    if (std.mem.eql(u8, label, "Observation")) return "observation";
+    if (std.mem.eql(u8, label, "Feedback")) return "feedback";
+    return null;
 }
 
 fn idempotencyQid(allocator: std.mem.Allocator, key: []const u8) ![]u8 {
@@ -4214,6 +4643,167 @@ test "runtime extracts current package manager facts" {
     defer std.testing.allocator.free(historical);
     try std.testing.expect(std.mem.indexOf(u8, historical, "The repo uses npm as its package manager.") != null);
     try std.testing.expect(std.mem.indexOf(u8, historical, "The repo uses pnpm as its package manager.") == null);
+}
+
+fn rememberPetSessions(runtime: *Runtime) !void {
+    const late = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"userId\":\"u1\"},\"sessionId\":\"s-late\",\"extract\":false,\"messages\":[{\"role\":\"user\",\"content\":\"I adopted a cat named Miso.\",\"createdAt\":\"2023-05-22T10:00:00Z\"},{\"role\":\"assistant\",\"content\":\"Miso is a lovely name for a cat.\",\"createdAt\":\"2023-05-22T10:00:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(late);
+    const early = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"userId\":\"u1\"},\"sessionId\":\"s-early\",\"extract\":false,\"messages\":[{\"role\":\"user\",\"content\":\"My dog Rex likes the park.\",\"createdAt\":\"2023-05-20T09:00:00Z\"},{\"role\":\"assistant\",\"content\":\"Parks are great for dogs like Rex.\",\"createdAt\":\"2023-05-20T09:00:00Z\"}]}}",
+    );
+    defer std.testing.allocator.free(early);
+}
+
+fn resultStringField(allocator: std.mem.Allocator, response: []const u8, key: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(Value, allocator, response, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    return allocator.dupe(u8, result.get(key).?.string);
+}
+
+fn expectInOrder(text: []const u8, needles: []const []const u8) !void {
+    var cursor: usize = 0;
+    for (needles) |needle| {
+        const index = std.mem.indexOfPos(u8, text, cursor, needle) orelse {
+            std.debug.print("missing in order: {s}\n--- text ---\n{s}\n", .{ needle, text });
+            return error.TestUnexpectedResult;
+        };
+        cursor = index + needle.len;
+    }
+}
+
+test "runtime retrieve prompt groups sessions chronologically with dates and speakers" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
+    defer runtime.deinit();
+    try rememberPetSessions(&runtime);
+
+    const retrieve = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"cat dog Miso Rex\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"time\":{\"validAt\":\"2023-05-30T23:40:00Z\"},\"options\":{\"logRetrieval\":false,\"logAudit\":false}}}",
+    );
+    defer std.testing.allocator.free(retrieve);
+    const prompt = try resultStringField(std.testing.allocator, retrieve, "prompt");
+    defer std.testing.allocator.free(prompt);
+
+    try std.testing.expect(std.mem.startsWith(u8, prompt, "Current date: 2023-05-30 (Tuesday)\n<memory>\n<sessions>\n## session s-early 2023-05-20 (Sat)\n[q_msg_"));
+    try expectInOrder(prompt, &.{
+        "## session s-early 2023-05-20 (Sat)\n",
+        "] user: My dog Rex likes the park.\n",
+        "] assistant: Parks are great for dogs like Rex.\n",
+        "## session s-late 2023-05-22 (Mon)\n",
+        "] user: I adopted a cat named Miso.\n",
+        "] assistant: Miso is a lovely name for a cat.\n",
+        "</sessions>\n</memory>",
+    });
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "message date") == null);
+
+    // Structural Session/Turn nodes never surface as placeholder items.
+    const structural = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q2\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"session turn Miso\",\"scope\":{\"userId\":\"u1\"},\"options\":{\"logRetrieval\":false,\"logAudit\":false}}}",
+    );
+    defer std.testing.allocator.free(structural);
+    try std.testing.expect(std.mem.indexOf(u8, structural, "\"text\":\"Session\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, structural, "\"text\":\"Turn\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, structural, "I adopted a cat named Miso.") != null);
+}
+
+test "prompt renderer orders sessions, items and derived memory deterministically" {
+    const items = [_]MessageResult{
+        .{ .qid = "q_chunk_12", .type = "message", .text = "second half\n\nof the   long reply", .score = 3 },
+        .{ .qid = "q_msg_3", .type = "message", .text = "Early question about </memory> tags", .score = 2 },
+        .{ .qid = "q_chunk_11", .type = "message", .text = "first half", .score = 1 },
+        .{ .qid = "q_msg_10", .type = "message", .text = "Late question [message date: 22 May 2023]", .score = 1 },
+        .{ .qid = "q_obs_7", .type = "raw", .text = "Observed build failure", .score = 1 },
+        .{ .qid = "q_msg_4", .type = "message", .text = "Next-day follow up", .score = 1 },
+    };
+    const late = RenderMeta{ .created_at = "2023-05-22T10:00:00Z", .session_qid = "q_sess_8", .session_id = "s-late" };
+    var entries = [_]RenderEntry{
+        .{ .item = items[0], .rank = 0, .meta = withMeta(late, "assistant", 1, 1, 2) },
+        .{ .item = items[1], .rank = 1, .meta = .{ .role = "user", .created_at = "2023-05-20T09:00:00Z", .session_qid = "q_sess_1", .message_index = 0 } },
+        .{ .item = items[2], .rank = 2, .meta = withMeta(late, "assistant", 1, 0, 2) },
+        .{ .item = items[3], .rank = 3, .meta = withMeta(late, "user", 0, null, null) },
+        .{ .item = items[4], .rank = 4, .meta = .{ .role = "observation", .created_at = "2023-05-21T08:00:00Z" } },
+        .{ .item = items[5], .rank = 5, .meta = .{ .role = "user", .created_at = "2023-05-21T09:00:00Z", .session_qid = "q_sess_1", .message_index = 1 } },
+    };
+    const facts = [_]MessageResult{
+        .{ .qid = "q_fact_9", .type = "fact", .text = "The repo uses pnpm.", .score = 1, .validFrom = "2023-05-22T10:00:00Z" },
+        .{ .qid = "q_fact_2", .type = "fact", .text = "The repo uses npm.", .score = 1, .state = "superseded", .validFrom = "2023-05-01T00:00:00Z", .validTo = "2023-05-22T10:00:00Z" },
+    };
+    const context = ContextPacket{ .currentFacts = &facts, .episodes = &items };
+    const expected =
+        \\Current date: 2023-05-30 (Tuesday)
+        \\<memory>
+        \\<facts>
+        \\[q_fact_2] (superseded, 2023-05-01 to 2023-05-22) The repo uses npm.
+        \\[q_fact_9] (current, from 2023-05-22) The repo uses pnpm.
+        \\</facts>
+        \\<sessions>
+        \\## session q_sess_1 2023-05-20 (Sat)
+        \\[q_msg_3] user: Early question about [/memory] tags
+        \\[q_msg_4] 2023-05-21 user: Next-day follow up
+        \\## session s-late 2023-05-22 (Mon)
+        \\[q_msg_10] user: Late question
+        \\[q_chunk_11] assistant (1/2): first half
+        \\[q_chunk_12] assistant (2/2): second half of the long reply
+        \\## other
+        \\[q_obs_7] 2023-05-21 observation: Observed build failure
+        \\</sessions>
+        \\</memory>
+    ;
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const prompt = try renderPrompt(std.testing.allocator, arena_state.allocator(), context, &entries, .{ .current_date = "2023-05-30T23:40:00Z" });
+    defer std.testing.allocator.free(prompt);
+    try std.testing.expectEqualStrings(expected, prompt);
+
+    // Retrieval rank order does not change the rendering.
+    std.mem.reverse(RenderEntry, &entries);
+    for (&entries, 0..) |*entry, rank| entry.rank = rank;
+    const reversed = try renderPrompt(std.testing.allocator, arena_state.allocator(), context, &entries, .{ .current_date = "2023-05-30T23:40:00Z" });
+    defer std.testing.allocator.free(reversed);
+    try std.testing.expectEqualStrings(expected, reversed);
+}
+
+fn withMeta(base: RenderMeta, role: []const u8, message_index: ?i64, chunk_index: ?i64, chunk_count: ?i64) RenderMeta {
+    var meta = base;
+    meta.role = role;
+    meta.message_index = message_index;
+    meta.chunk_index = chunk_index;
+    meta.chunk_count = chunk_count;
+    return meta;
+}
+
+test "prompt renderer reads chunk and session metadata from nodes and degrades without it" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+    try store.putNode(.{ .qid = "q_sess_1", .label = "Session", .properties_json = "{\"kind\":\"session\",\"sessionId\":\"lme-7\",\"deleted\":false}" });
+    try store.putNode(.{ .qid = "q_msg_2", .label = "Message", .properties_json = "{\"kind\":\"message\",\"role\":\"assistant\",\"content\":\"long\",\"createdAt\":\"2024-02-29T08:00:00Z\",\"sessionQid\":\"q_sess_1\",\"messageIndex\":3,\"deleted\":false}" });
+    try store.putNode(.{ .qid = "q_chunk_3", .label = "Chunk", .properties_json = "{\"kind\":\"chunk\",\"content\":\"tail part\",\"role\":\"assistant\",\"createdAt\":\"2024-02-29T08:00:00Z\",\"messageQid\":\"q_msg_2\",\"chunkIndex\":1,\"chunkCount\":2,\"messageIndex\":3,\"deleted\":false}" });
+
+    const chunk_text = try textForNode(std.testing.allocator, .{ .qid = "q_chunk_3", .label = "Chunk", .properties_json = "{\"content\":\"tail part\"}" });
+    defer std.testing.allocator.free(chunk_text);
+    try std.testing.expectEqualStrings("tail part", chunk_text);
+    try std.testing.expectError(error.NoRenderableText, textForNode(std.testing.allocator, .{ .qid = "q_sess_1", .label = "Session", .properties_json = "{}" }));
+
+    const items = [_]MessageResult{
+        .{ .qid = "q_chunk_3", .type = "message", .text = "tail part", .score = 1 },
+        .{ .qid = "q_unknown_9", .type = "message", .text = "No node behind this item.", .score = 1, .validFrom = "2024-03-01T00:00:00Z" },
+    };
+    const prompt = try promptFromContext(std.testing.allocator, store, .{ .episodes = &items }, .{});
+    defer std.testing.allocator.free(prompt);
+    try std.testing.expectEqualStrings(
+        "<memory>\n<sessions>\n## session lme-7 2024-02-29 (Thu)\n[q_chunk_3] assistant (2/2): tail part\n## other\n[q_unknown_9] 2024-03-01: No node behind this item.\n</sessions>\n</memory>",
+        prompt,
+    );
 }
 
 test "runtime retrieve assembles categorized context and trace" {
