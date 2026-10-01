@@ -3635,16 +3635,18 @@ fn recencyScore(item: MessageResult) f32 {
     return if (item.validFrom != null) 0.75 else 0.5;
 }
 
-/// ceil(text_bytes / 3.5) plus 16 tokens for the rendered line prefix, date
-/// and speaker tags, and amortized session headers.
+/// ceil(text_bytes / 4.2) plus 16 tokens for the rendered line prefix, date
+/// and speaker tags, and amortized session headers. Conversational English
+/// averages about 4.5 bytes per o200k token on LongMemEval-S; 3.5 left a 4K
+/// budget about a quarter empty.
 fn estimateItemTokens(item: MessageResult) usize {
-    return (item.text.len * 2 + 6) / 7 + 16;
+    return (item.text.len * 5 + 20) / 21 + 16;
 }
 
-/// ceil(prompt_bytes / 3.5): the item estimator's rate applied to the rendered
+/// ceil(prompt_bytes / 4.2): the item estimator's rate applied to the rendered
 /// prompt, whose bytes already include line prefixes and session headers.
 fn estimatePromptTokens(prompt: []const u8) usize {
-    return @max(@as(usize, 1), (prompt.len * 2 + 6) / 7);
+    return @max(@as(usize, 1), (prompt.len * 5 + 20) / 21);
 }
 
 const PromptOptions = struct {
@@ -5593,11 +5595,11 @@ test "rrf fuses channels by rank after sorting each by score" {
     try std.testing.expectEqualStrings("a", top[0].qid);
 }
 
-test "estimate item tokens uses bytes over 3.5 plus line overhead" {
+test "estimate item tokens uses bytes over 4.2 plus line overhead" {
     try std.testing.expectEqual(@as(usize, 16), estimateItemTokens(.{ .qid = "q", .type = "message", .text = "", .score = 1 }));
     try std.testing.expectEqual(@as(usize, 17), estimateItemTokens(.{ .qid = "q", .type = "message", .text = "abc", .score = 1 }));
     try std.testing.expectEqual(@as(usize, 18), estimateItemTokens(.{ .qid = "q", .type = "message", .text = "abcdefg", .score = 1 }));
-    try std.testing.expectEqual(@as(usize, 1016), estimateItemTokens(.{ .qid = "q", .type = "message", .text = "a" ** 3500, .score = 1 }));
+    try std.testing.expectEqual(@as(usize, 1016), estimateItemTokens(.{ .qid = "q", .type = "message", .text = "a" ** 4200, .score = 1 }));
 }
 
 /// About 3 KB of sentences: "quokka" opens the first chunk and "zanzibar"

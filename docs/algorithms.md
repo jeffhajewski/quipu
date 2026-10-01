@@ -75,7 +75,7 @@ advertises a non-hash embedding model. Callers can override this with
    pnpm" fact. Memory cards that restate a fact, preference, or procedure slot
    already in the packet are dropped as duplicates.
 7. Pack items greedily in rank order into `budgetTokens` (default 4096),
-   estimating each item as `ceil(text_bytes / 3.5) + 16` tokens; the overhead
+   estimating each item as `ceil(text_bytes / 4.2) + 16` tokens; the overhead
    covers the rendered line prefix, date and speaker tags, and amortized session
    headers. Items that do not fit are skipped and counted in the trace.
 8. Split kept items into context sections and render the prompt from those sections.
