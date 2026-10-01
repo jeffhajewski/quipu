@@ -15,7 +15,8 @@ const LatticeEmbeddingProviderKind = if (build_options.enable_lattice) lattice_s
     hash,
     openai_compatible,
 };
-const default_openrouter_lattice_dimensions: u16 = 768;
+/// Native width of `text-embedding-3-small`, the default hosted embedding model.
+const default_hosted_embedding_dimensions: u16 = 1536;
 
 const RuntimeConfig = struct {
     command_index: usize = 1,
@@ -490,10 +491,15 @@ fn latticeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, c
     }
     const provider_name = config.embedding_provider orelse environ_map.get("QUIPU_EMBEDDING_PROVIDER") orelse file_config.embedding_provider orelse "hash";
     const provider = try parseEmbeddingProvider(provider_name);
-    const vector_dimensions = config.vector_dimensions orelse
+    const hosted_openai_embeddings = provider == .openai_compatible and
+        (isProviderName(provider_name, "openrouter") or isProviderName(provider_name, "openai"));
+    const configured_dimensions = config.vector_dimensions orelse
         envU16(environ_map, "QUIPU_VECTOR_DIMENSIONS") orelse
-        envU16(environ_map, "OPENROUTER_EMBEDDING_DIMENSIONS") orelse
-        if (provider == .openai_compatible and isProviderName(provider_name, "openrouter")) default_openrouter_lattice_dimensions else @as(u16, 128);
+        envU16(environ_map, "OPENROUTER_EMBEDDING_DIMENSIONS");
+    // Hosted models default to their native width; ask the provider to shorten
+    // vectors only when a width was configured.
+    const vector_dimensions = configured_dimensions orelse
+        if (hosted_openai_embeddings) default_hosted_embedding_dimensions else @as(u16, 128);
     const requested_page_size = config.page_size orelse
         envU32(environ_map, "QUIPU_LATTICE_PAGE_SIZE") orelse
         @as(u32, 4096);
@@ -523,8 +529,7 @@ fn latticeOptionsFromConfig(io: std.Io, environ_map: *std.process.Environ.Map, c
         .embedding_url = embedding_url,
         .embedding_model = embedding_model,
         .embedding_api_key = embedding_api_key,
-        .embedding_request_dimensions = provider == .openai_compatible and
-            (isProviderName(provider_name, "openrouter") or isProviderName(provider_name, "openai")),
+        .embedding_request_dimensions = hosted_openai_embeddings and configured_dimensions != null,
         .skip_close = envBool(environ_map, "QUIPU_LATTICE_SKIP_CLOSE"),
     };
 }

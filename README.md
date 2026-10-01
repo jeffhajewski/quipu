@@ -175,12 +175,13 @@ QUIPU_EMBEDDING_PROVIDER=openrouter \
   remember --project repo:quipu --text "The launch code is heliotrope."
 ```
 
-With LatticeDB `0.6.0`, Quipu requests 768-dimensional
-`openai/text-embedding-3-small` vectors by default for the core Lattice adapter.
-The installed LatticeDB header exposes configurable `vector_dimensions`, but
-local smoke tests show commits fail with `LatticeIo` at `1017` dimensions and
-above. Full 1536-dimensional OpenAI embeddings should be re-enabled after that
-LatticeDB persistence issue is fixed.
+With the `openrouter` or `openai` embedding provider, the core Lattice adapter
+stores `text-embedding-3-small` vectors at their native 1536 dimensions and
+does not send a `dimensions` parameter. Set `QUIPU_VECTOR_DIMENSIONS` (or
+`--vector-dimensions`) to ask the provider for shorter vectors. The vector width
+is fixed when a store is created. The `LatticeIo` commit failure at `1017`
+dimensions and above seen with LatticeDB `0.6.0` does not occur with `0.15.0`:
+2,000 1536-dimensional vectors commit and reopen intact on 4KB and 8KB pages.
 
 Provider-backed answer generation and async entity resolution use the unified
 LLM provider surface:
