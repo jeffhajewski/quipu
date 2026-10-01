@@ -48,6 +48,20 @@ unparseable answers return exactly `[abstain]`. Reader prompt, JSON mode, and
 provider wire formats are documented in
 [providers.md](providers.md#memoryanswer-reader).
 
+Two more `memory.answer` options default to `false`:
+
+- `options.readerReasoning` asks the reader to review the evidence in a
+  `reasoning` field before answering. The review is returned as
+  `answerTrace.reasoning`, never in `answer`.
+- `options.temporalHints` appends each session header's offset from
+  `time.validAt` (`, 10 days ago`) and resolves the query's relative time
+  expressions on a `Time references:` line. `memory.retrieve` accepts it too
+  and renders that line in `prompt` after `Current date:`. See
+  [algorithms.md](algorithms.md#temporal-hints).
+
+`answerTrace` reports `readerMode` (`none`, `direct`, or `reasoning`),
+`temporalHints`, and `timeReferences`.
+
 ## Search V0
 
 `memory.search` supports `mode: "fts"`, `"vector"`, `"hybrid"`, and `"graph"`.

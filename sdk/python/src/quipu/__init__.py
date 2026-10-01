@@ -242,10 +242,11 @@ def _validate_retrieve(params: Mapping[str, Any]) -> None:
         _reject_extra(
             options,
             {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format",
-             "rerank", "rerankCandidates"},
+             "rerank", "rerankCandidates", "temporalHints"},
             "options",
         )
-        for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "rerank"):
+        for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "rerank",
+                    "temporalHints"):
             _optional_bool(options, key, "options")
         if "format" in options and options["format"] not in {"prompt", "json"}:
             raise QuipuProtocolError("options.format is invalid")
@@ -278,11 +279,30 @@ def _validate_answer(params: Mapping[str, Any]) -> None:
         options = _ensure_object(params["options"], "options")
         _reject_extra(
             options,
-            {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format",
-             "rerank", "rerankCandidates"},
+            {
+                "includeEvidence",
+                "includeDebug",
+                "logTrace",
+                "logRetrieval",
+                "abstainIfWeak",
+                "format",
+                "rerank",
+                "rerankCandidates",
+                "readerReasoning",
+                "temporalHints",
+            },
             "options",
         )
-        for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "rerank"):
+        for key in (
+            "includeEvidence",
+            "includeDebug",
+            "logTrace",
+            "logRetrieval",
+            "abstainIfWeak",
+            "rerank",
+            "readerReasoning",
+            "temporalHints",
+        ):
             _optional_bool(options, key, "options")
         if "format" in options and options["format"] not in {"prompt", "json"}:
             raise QuipuProtocolError("options.format is invalid")

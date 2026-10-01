@@ -66,6 +66,9 @@
       "trace": null,
       "answerTrace": {
         "strategy": "deterministic_fallback",
+        "readerMode": "none",
+        "temporalHints": false,
+        "timeReferences": null,
         "answerable": true,
         "supportQids": ["q_proc_1"],
         "supportValid": true,
@@ -77,6 +80,7 @@
             "source": "heuristic"
           }
         ],
+        "reasoning": null,
         "rawProviderAnswer": null,
         "normalizedAnswer": "Run just test before committing.",
         "validation": {

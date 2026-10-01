@@ -76,6 +76,19 @@ class ProtocolFixtureTests(unittest.TestCase):
         self.assertEqual(defs["memoryAnswerResult"]["properties"]["prompt"]["type"], ["string", "null"])
         self.assertIn("slotKey", defs["memoryItem"]["properties"])
         self.assertIn("abstainIfWeak", defs["memoryAnswerParams"]["properties"]["options"]["properties"])
+        answer_options = defs["memoryAnswerParams"]["properties"]["options"]["properties"]
+        retrieve_options = defs["memoryRetrieveParams"]["properties"]["options"]["properties"]
+        self.assertEqual(answer_options["readerReasoning"]["type"], "boolean")
+        self.assertEqual(answer_options["temporalHints"]["type"], "boolean")
+        self.assertEqual(retrieve_options["temporalHints"]["type"], "boolean")
+        self.assertNotIn("readerReasoning", retrieve_options)
+        trace = defs["answerTrace"]
+        self.assertEqual(trace["properties"]["readerMode"]["enum"], ["none", "direct", "reasoning"])
+        self.assertEqual(trace["properties"]["reasoning"]["type"], ["string", "null"])
+        self.assertEqual(trace["properties"]["timeReferences"]["type"], ["string", "null"])
+        self.assertEqual(trace["properties"]["temporalHints"]["type"], "boolean")
+        for optional in ("readerMode", "temporalHints", "timeReferences", "reasoning"):
+            self.assertNotIn(optional, trace["required"])
 
     def test_fixtures_cover_public_methods(self):
         success_methods = {
@@ -120,6 +133,36 @@ class ProtocolFixtureTests(unittest.TestCase):
                                 {"rerankCandidates": True}):
                     with self.assertRaises(QuipuProtocolError):
                         validate_rpc_params(method, {"query": "q", "options": options})
+
+    def test_memory_answer_reader_options_fixture_reports_reasoning_and_hints(self):
+        fixture = json.loads((FIXTURE_DIR / "memory.answer.reader_options.json").read_text())
+        options = fixture["request"]["params"]["options"]
+        trace = fixture["response"]["result"]["answerTrace"]
+
+        self.assertTrue(options["readerReasoning"])
+        self.assertTrue(options["temporalHints"])
+        self.assertEqual(trace["readerMode"], "reasoning")
+        self.assertTrue(trace["temporalHints"])
+        self.assertEqual(trace["timeReferences"], '"last week" = 2023-05-22 to 2023-05-28')
+        self.assertIsInstance(trace["reasoning"], str)
+        self.assertNotIn(trace["reasoning"], fixture["response"]["result"]["answer"])
+        self.assertIn("## session s-late 2023-05-22 (Mon), 8 days ago", fixture["response"]["result"]["prompt"])
+
+        default_trace = json.loads((FIXTURE_DIR / "memory.answer.success.json").read_text())["response"]["result"]["answerTrace"]
+        self.assertEqual(default_trace["readerMode"], "none")
+        self.assertFalse(default_trace["temporalHints"])
+        self.assertIsNone(default_trace["reasoning"])
+
+    def test_reader_options_are_validated_per_method(self):
+        validate_rpc_params(
+            "memory.answer",
+            {"query": "q", "options": {"readerReasoning": True, "temporalHints": False}},
+        )
+        validate_rpc_params("memory.retrieve", {"query": "q", "options": {"temporalHints": True}})
+        with self.assertRaises(QuipuProtocolError):
+            validate_rpc_params("memory.answer", {"query": "q", "options": {"readerReasoning": "yes"}})
+        with self.assertRaises(QuipuProtocolError):
+            validate_rpc_params("memory.retrieve", {"query": "q", "options": {"readerReasoning": True}})
 
     def test_error_fixture_rejects_bad_request(self):
         fixture = json.loads((FIXTURE_DIR / "memory.retrieve.invalid_request.json").read_text())

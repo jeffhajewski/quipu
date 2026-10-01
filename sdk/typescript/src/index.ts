@@ -87,6 +87,7 @@ export type RetrieveRequest = {
     logTrace?: boolean;
     logRetrieval?: boolean;
     abstainIfWeak?: boolean;
+    temporalHints?: boolean;
     format?: "prompt" | "json";
     /** Set false to bypass a configured reranker for this request. */
     rerank?: boolean;
@@ -95,7 +96,11 @@ export type RetrieveRequest = {
   };
 };
 
-export type AnswerRequest = RetrieveRequest;
+export type AnswerRequest = Omit<RetrieveRequest, "options"> & {
+  options?: RetrieveRequest["options"] & {
+    readerReasoning?: boolean;
+  };
+};
 
 const ERROR_CODES = new Set([
   "invalid_request",
@@ -317,10 +322,19 @@ function validateRetrieve(params: Record<string, unknown>): void {
         "format",
         "rerank",
         "rerankCandidates",
+        "temporalHints",
       ]),
       "options",
     );
-    for (const key of ["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "rerank"]) {
+    for (const key of [
+      "includeEvidence",
+      "includeDebug",
+      "logTrace",
+      "logRetrieval",
+      "abstainIfWeak",
+      "rerank",
+      "temporalHints",
+    ]) {
       optionalBoolean(params.options, key, "options");
     }
     if ("format" in params.options && !["prompt", "json"].includes(String(params.options.format))) {
@@ -369,10 +383,21 @@ function validateAnswer(params: Record<string, unknown>): void {
         "format",
         "rerank",
         "rerankCandidates",
+        "readerReasoning",
+        "temporalHints",
       ]),
       "options",
     );
-    for (const key of ["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "rerank"]) {
+    for (const key of [
+      "includeEvidence",
+      "includeDebug",
+      "logTrace",
+      "logRetrieval",
+      "abstainIfWeak",
+      "rerank",
+      "readerReasoning",
+      "temporalHints",
+    ]) {
       optionalBoolean(params.options, key, "options");
     }
     if ("format" in params.options && !["prompt", "json"].includes(String(params.options.format))) {

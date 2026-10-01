@@ -86,6 +86,30 @@ test("memory.answer fixture includes optional answerTrace and debug prompt", () 
   assert.ok(fixture.response.result.prompt.startsWith("<memory>"));
 });
 
+test("memory.answer reader options fixture reports reasoning and temporal hints", () => {
+  const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.answer.reader_options.json"), "utf8"));
+  const trace = fixture.response.result.answerTrace;
+  assert.equal(fixture.request.params.options.readerReasoning, true);
+  assert.equal(fixture.request.params.options.temporalHints, true);
+  assert.equal(trace.readerMode, "reasoning");
+  assert.equal(trace.temporalHints, true);
+  assert.equal(trace.timeReferences, '"last week" = 2023-05-22 to 2023-05-28');
+  assert.equal(typeof trace.reasoning, "string");
+  assert.ok(fixture.response.result.prompt.includes("## session s-late 2023-05-22 (Mon), 8 days ago"));
+
+  const defaults = JSON.parse(readFileSync(path.join(fixtureDir, "memory.answer.success.json"), "utf8"));
+  assert.equal(defaults.response.result.answerTrace.readerMode, "none");
+  assert.equal(defaults.response.result.answerTrace.temporalHints, false);
+  assert.equal(defaults.response.result.answerTrace.reasoning, null);
+});
+
+test("reader options are validated per method", () => {
+  validateRpcParams("memory.answer", { query: "q", options: { readerReasoning: true, temporalHints: false } });
+  validateRpcParams("memory.retrieve", { query: "q", options: { temporalHints: true } });
+  assert.throws(() => validateRpcParams("memory.answer", { query: "q", options: { readerReasoning: "yes" } }), QuipuProtocolError);
+  assert.throws(() => validateRpcParams("memory.retrieve", { query: "q", options: { readerReasoning: true } }), QuipuProtocolError);
+});
+
 test("method schema accepts slot metadata, support validity, and answer prompt", () => {
   const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
   assert.ok(schema.$defs.memoryItem.properties.slotKey);
@@ -93,6 +117,11 @@ test("method schema accepts slot metadata, support validity, and answer prompt",
   assert.ok(schema.$defs.answerTrace.required.includes("supportValid"));
   assert.equal(schema.$defs.answerTrace.properties.evidenceGate, undefined);
   assert.deepEqual(schema.$defs.memoryAnswerResult.properties.prompt.type, ["string", "null"]);
+  assert.deepEqual(schema.$defs.answerTrace.properties.readerMode.enum, ["none", "direct", "reasoning"]);
+  assert.deepEqual(schema.$defs.answerTrace.properties.reasoning.type, ["string", "null"]);
+  assert.equal(schema.$defs.answerTrace.required.includes("reasoning"), false);
+  assert.equal(schema.$defs.memoryAnswerParams.properties.options.properties.readerReasoning.type, "boolean");
+  assert.equal(schema.$defs.memoryRetrieveParams.properties.options.properties.temporalHints.type, "boolean");
 });
 
 test("rerank options are part of the retrieve and answer contract", () => {

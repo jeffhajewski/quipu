@@ -9,6 +9,7 @@ test {
     _ = @import("extractor.zig");
     _ = @import("answer_synthesis.zig");
     _ = @import("providers.zig");
+    _ = @import("temporal.zig");
     _ = @import("runtime.zig");
     if (build_options.enable_lattice) {
         _ = @import("lattice_storage.zig");
