@@ -494,20 +494,10 @@ pub const LatticeAdapter = struct {
     /// Empty text enumerates every node, searchable or not, in creation order.
     /// Other text is ranked by BM25 over the searchable nodes' `searchText`,
     /// matching any query term, best first.
-    ///
-    /// Compatibility: text that is exactly a Quipu label present in the store
-    /// (e.g. "Message", "Job") enumerates that label, as the old index text
-    /// carried the label name. jobs.leasePendingJobs and
-    /// Runtime.ensureRawMessageCache depend on this.
     fn fullTextSearch(context: *anyopaque, allocator: std.mem.Allocator, query: storage.FullTextQuery) ![]storage.SearchHit {
         const self = ctx(context);
         if (query.limit == 0) return allocator.alloc(storage.SearchHit, 0);
         if (query.text.len == 0) return self.enumerateLabel(allocator, node_label, query.limit);
-        if (looksLikeLabel(query.text)) {
-            const hits = try self.enumerateLabel(allocator, query.text, query.limit);
-            if (hits.len > 0) return hits;
-            allocator.free(hits);
-        }
 
         const ranked = try self.rankNodeIds(allocator, query.text);
         defer allocator.free(ranked);
@@ -1166,15 +1156,6 @@ fn isBlank(text: []const u8) bool {
     return std.mem.trim(u8, text, " \t\r\n").len == 0;
 }
 
-/// A Quipu label name: an ASCII uppercase letter followed by letters and digits.
-fn looksLikeLabel(text: []const u8) bool {
-    if (text.len == 0 or !std.ascii.isUpper(text[0])) return false;
-    for (text) |byte| {
-        if (!std.ascii.isAlphanumeric(byte)) return false;
-    }
-    return true;
-}
-
 fn nodesWithLabel(allocator: std.mem.Allocator, tx: *c.lattice_txn, label: []const u8) ![]u64 {
     var ids: [*c]c.lattice_node_id = null;
     var count: usize = 0;
@@ -1626,9 +1607,9 @@ test "lattice adapter keeps unsearchable nodes out of search but enumerates them
         try expectSearch(adapter, "walrus", 10, &.{ "q_chunk_5", "q_msg_6" });
         try expectSearch(adapter, "", 100, &.{ "q_sess_1", "q_turn_2", "q_job_3", "q_msg_4", "q_chunk_5", "q_msg_6", "q_fb_7" });
         try expectSearch(adapter, "", 2, &.{ "q_sess_1", "q_turn_2" });
-        // A bare label name enumerates that label (jobs and the raw message cache rely on it).
-        try expectSearch(adapter, "Job", 10, &.{"q_job_3"});
-        try expectSearch(adapter, "Message", 10, &.{ "q_msg_4", "q_msg_6" });
+        // A label name is an ordinary query term, not an enumeration.
+        try expectSearch(adapter, "Job", 10, &.{});
+        try expectSearch(adapter, "Message", 10, &.{"q_msg_6"});
 
         // Forgetting drops a node from search; so does becoming unsearchable.
         try testPut(adapter, "q_chunk_5", "Chunk", "{\"kind\":\"tombstone\",\"deleted\":true,\"state\":\"deleted\"}");
@@ -1792,7 +1773,9 @@ test "lattice adapter vectors searchable chunks and drops forgotten vectors" {
     // The vector itself is gone, not just filtered out.
     try std.testing.expect(!(try rawVectorSearchHas(&state, query, chunk_node)));
     // The node keeps its labels.
-    try expectSearch(adapter, "Chunk", 10, &.{ "q_chunk_2", "q_chunk_3" });
+    const chunks = try state.enumerateLabel(std.testing.allocator, "Chunk", 10);
+    defer freeTestHits(chunks);
+    try std.testing.expectEqual(@as(usize, 2), chunks.len);
 }
 
 test "lattice adapter round-trips 64KB string properties" {
