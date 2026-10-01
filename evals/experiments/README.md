@@ -38,6 +38,18 @@ PYTHONPATH=evals/src artifacts/experiments/venv/bin/python \
 Evaluation incurs provider usage for uncached requests. Analysis is local and
 read-only except its output file; it rejects incomplete or mismatched reports.
 
+## SOTA sprint dev slice
+
+[`sota-dev-selection.json`](sota-dev-selection.json) freezes 70 public
+LongMemEval-S question IDs (IDs only, no content) for the daemon parity sprint:
+10 per category, using E1's categories (`_abs` questions are abstention).
+`quipu_evals.sota_longmemeval select` with seed `quipu-sota-dev-20261001`
+excludes E1's 56 spent questions and their ordinary/`_abs` families, takes at
+most one question per family, and records the dataset and E1-selection SHA256.
+The remaining 374 unused questions stay untouched for later held-out work.
+Tune on this slice only; it is development data, not a held-out score. See
+the "SOTA sprint harness" section of [`docs/evals.md`](../../docs/evals.md).
+
 ## Offline harness check
 
 ```bash
