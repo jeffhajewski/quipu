@@ -86,10 +86,30 @@ def client(cache: Path) -> StudyClient:
     return StudyClient("openrouter", cache_dir=cache, embedding_model=EMBED_MODEL)
 
 
-def prepare(dataset: Path, output: Path, dev_per_category=2, heldout_per_category=6):
+def study_scenario(scenario, item):
+    """Anonymize session IDs and attach gold turns; labels never reach ingestion."""
+    query = scenario.queries[0]
+    identities = {event.event_id: "s_" + digest(event.event_id)[:16] for event in scenario.events}
+    scope = {"case": digest(query.query_id)[:16]}
+    events = [replace(event, event_id=identities[event.event_id], scope=scope,
+                      ground_truth_memories=[]) for event in scenario.events]
+    query = replace(query, scope=scope,
+                    expected_answer=str(item["answer"]),
+                    expected_evidence_event_ids=[identities[key] for key in query.expected_evidence_event_ids])
+    gold_turns = [(identities[session_id], index)
+                  for session_id, session in zip(item["haystack_session_ids"], item["haystack_sessions"])
+                  for index, turn in enumerate(session) if turn.get("has_answer")]
+    return replace(scenario, events=events, queries=[query], metadata={
+        **scenario.metadata, "goldTurns": gold_turns,
+    })
+
+
+def prepare(dataset: Path, output: Path, dev_per_category=2, heldout_per_category=6, selection: Path | None = None):
     original = json.loads(dataset.read_text())
     original_by_id = {item["question_id"]: item for item in original}
     suite = load_longmemeval_suite(dataset, variant="s")
+    if selection is not None:
+        return prepare_selection(dataset, output, suite, original_by_id, selection)
     categories = defaultdict(list)
     for scenario in suite.scenarios:
         categories[scenario.queries[0].category].append(scenario)
@@ -110,21 +130,7 @@ def prepare(dataset: Path, output: Path, dev_per_category=2, heldout_per_categor
             if len(selected) != size:
                 raise ValueError(f"not enough disjoint {category} cases")
             for scenario in selected:
-                query = scenario.queries[0]
-                item = original_by_id[query.query_id]
-                identities = {event.event_id: "s_" + digest(event.event_id)[:16] for event in scenario.events}
-                scope = {"case": digest(query.query_id)[:16]}
-                events = [replace(event, event_id=identities[event.event_id], scope=scope,
-                                  ground_truth_memories=[]) for event in scenario.events]
-                query = replace(query, scope=scope,
-                                expected_answer=str(item["answer"]),
-                                expected_evidence_event_ids=[identities[key] for key in query.expected_evidence_event_ids])
-                gold_turns = [(identities[session_id], index)
-                              for session_id, session in zip(item["haystack_session_ids"], item["haystack_sessions"])
-                              for index, turn in enumerate(session) if turn.get("has_answer")]
-                chosen[split].append(replace(scenario, events=events, queries=[query], metadata={
-                    **scenario.metadata, "goldTurns": gold_turns,
-                }))
+                chosen[split].append(study_scenario(scenario, original_by_id[scenario.queries[0].query_id]))
         selected_suite = replace(suite, scenarios=chosen[split], metadata={
             **suite.metadata, "fullDataset": False, "split": split, "selectionSeed": SEED,
             "selection": "balanced by category; disjoint question/abstention families",
@@ -136,6 +142,30 @@ def prepare(dataset: Path, output: Path, dev_per_category=2, heldout_per_categor
     write_json(output / "selection.json", manifest)
     print(json.dumps({key: {"questions": len(items), "sessions": sum(x["sessions"] for x in items)}
                       for key, items in manifest.items()}), flush=True)
+
+
+def prepare_selection(dataset, output, suite, original_by_id, selection):
+    """Build one study split from an explicit, frozen list of question IDs."""
+    payload = json.loads(selection.read_text())
+    ids = payload["questionIds"] if isinstance(payload, dict) else payload
+    split = payload.get("name", selection.stem) if isinstance(payload, dict) else selection.stem
+    by_id = {scenario.queries[0].query_id: scenario for scenario in suite.scenarios}
+    missing = [question_id for question_id in ids if question_id not in by_id]
+    if missing or len(set(ids)) != len(ids):
+        raise ValueError(f"selection has unknown or duplicate question IDs: {missing[:5]}")
+    scenarios = [study_scenario(by_id[question_id], original_by_id[question_id]) for question_id in ids]
+    selected_suite = replace(suite, scenarios=scenarios, metadata={
+        **suite.metadata, "fullDataset": False, "split": split,
+        "selectionSeed": payload.get("seed") if isinstance(payload, dict) else None,
+        "selection": f"explicit question IDs from {selection.name}",
+        "selectionSha256": hashlib.sha256(selection.read_bytes()).hexdigest(),
+        "sourceSha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
+    })
+    write_suite(output / f"{split}.json", selected_suite)
+    manifest = {split: [{"id": s.queries[0].query_id, "category": s.queries[0].category,
+                         "sessions": len(s.events)} for s in scenarios]}
+    write_json(output / "selection.json", manifest)
+    print(json.dumps({split: {"questions": len(scenarios), "sessions": sum(len(s.events) for s in scenarios)}}), flush=True)
 
 
 def extraction_key(event):
@@ -376,7 +406,7 @@ def mean(values):
     return sum(present) / len(present) if present else None
 
 
-def paired(rows, reference="raw", repeats=10000):
+def paired(rows, reference="raw", repeats=10000, seed=20260905):
     comparisons = []
     indexed = {(r["queryId"], r["arm"], r["budget"]): r for r in rows}
     for arm, budget in sorted({(r["arm"], r["budget"]) for r in rows if r["arm"] != reference}):
@@ -385,7 +415,7 @@ def paired(rows, reference="raw", repeats=10000):
                        and (row["queryId"], reference, budget) in indexed]
         if not differences:
             continue
-        rng = random.Random(20260905)
+        rng = random.Random(seed)
         boot = sorted(sum(rng.choices(differences, k=len(differences))) / len(differences) for _ in range(repeats))
         comparisons.append({"arm": arm, "budget": budget, "reference": reference, "n": len(differences),
                             "wins": differences.count(1), "losses": differences.count(-1),
@@ -405,9 +435,11 @@ def main():
     parser.add_argument("--budgets", type=int, nargs="+", default=[1024, 4096])
     parser.add_argument("--arms", nargs="+", choices=["raw", "raw_message", "assertions", "combined", "assertion_keys", "oracle_source", "oracle_turn"], default=["raw", "assertions", "combined", "oracle_source"])
     parser.add_argument("--upstream", type=Path, default=Path("artifacts/experiments/LongMemEval-upstream/src/evaluation/evaluate_qa.py"))
+    parser.add_argument("--selection", type=Path,
+                        help="prepare: build one split from frozen question IDs (e.g. evals/experiments/sota-dev-selection.json)")
     args = parser.parse_args()
     if args.stage == "prepare":
-        prepare(args.dataset, args.output)
+        prepare(args.dataset, args.output, selection=args.selection)
         return 0
     if args.suite is None:
         parser.error("--suite is required")

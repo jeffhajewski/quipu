@@ -89,8 +89,8 @@ def merged_reports(paths):
     return list(rows.values())
 
 
-def paired_with_exact_test(rows):
-    results = paired(rows)
+def paired_with_exact_test(rows, reference="raw", **kwargs):
+    results = paired(rows, reference=reference, **kwargs)
     for result in results:
         discordant = result["wins"] + result["losses"]
         tail = min(result["wins"], result["losses"])
