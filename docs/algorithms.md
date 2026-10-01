@@ -67,7 +67,15 @@ up, while lexical/vector retrieval remains available immediately.
 
 ## Extraction V0
 
-The current extractor is deterministic and intentionally narrow. It emits candidate facts, preferences, and procedures for package manager, response style, and test-command memories. Runtime treats those candidates as untrusted:
+The current extractor is deterministic and intentionally narrow. It emits candidate facts, preferences, and procedures for package manager, test command, repo style, project constraint, and response style memories. It has no benchmark-specific rules.
+
+Matching is case-insensitive and word-bounded, so `npm` does not match inside `pnpm` or `npmjs`, and `just test` does not match inside `adjust test`. Rules also need a cue:
+
+- A package manager must follow a usage word (`uses npm`, `switched to pnpm`), or the text must mention a "package manager".
+- A test command must follow an imperative (`run just test`) or appear in backticks.
+- A response style must be an explicit request (`prefer concise`, `please be brief`, `response style: detailed`, or a sentence starting with "Be concise"), not descriptive prose such as "to be concise".
+
+Runtime treats extractor candidates as untrusted:
 
 1. Validate that slot, label, value, and text are well formed.
 2. Reject label/slot mismatches before any graph write.

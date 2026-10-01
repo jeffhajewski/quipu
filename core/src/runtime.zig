@@ -4216,33 +4216,6 @@ test "runtime extracts current package manager facts" {
     try std.testing.expect(std.mem.indexOf(u8, historical, "The repo uses pnpm as its package manager.") == null);
 }
 
-test "runtime keeps additive facts current for aggregation" {
-    var harness = try RuntimeTestHarness.init(std.testing.allocator);
-    defer harness.deinit();
-    var runtime = Runtime.init(harness.adapter(), harness.health());
-    defer runtime.deinit();
-
-    const first = try runtime.dispatch(
-        std.testing.allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"lab:counts\"},\"messages\":[{\"role\":\"user\",\"content\":\"I bought 2 train tickets for the retreat.\",\"createdAt\":\"2026-02-01T15:00:00Z\"}]}}",
-    );
-    defer std.testing.allocator.free(first);
-    const second = try runtime.dispatch(
-        std.testing.allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"lab:counts\"},\"messages\":[{\"role\":\"user\",\"content\":\"I bought 3 more train tickets for the retreat.\",\"createdAt\":\"2026-02-04T15:00:00Z\"}]}}",
-    );
-    defer std.testing.allocator.free(second);
-
-    const answer = try runtime.dispatch(
-        std.testing.allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"How many train tickets did I buy for the retreat in total?\",\"scope\":{\"projectId\":\"lab:counts\"},\"options\":{\"includeDebug\":true,\"abstainIfWeak\":true,\"logRetrieval\":false}}}",
-    );
-    defer std.testing.allocator.free(answer);
-    try std.testing.expect(std.mem.indexOf(u8, answer, "\"answer\":\"5\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, answer, "\"aggregationMode\":\"additive\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, answer, "\"slotKey\":\"counts.retreat.train_tickets\"") != null);
-}
-
 test "runtime retrieve assembles categorized context and trace" {
     var harness = try RuntimeTestHarness.init(std.testing.allocator);
     defer harness.deinit();
