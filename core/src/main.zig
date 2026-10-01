@@ -919,7 +919,7 @@ fn runCommand(
             providers.ProviderEndpoint{ .kind = .deterministic, .name = "deterministic" }
         else
             runtime.options.answer_provider;
-        const probe = providers.generateAnswer(allocator, runtime.options.io, endpoint, "Reply with OK.", "") catch |err| {
+        const probe = providers.generateAnswer(allocator, runtime.options.io, endpoint, .{ .question = "Reply with OK." }) catch |err| {
             const message = try providerErrorMessage(allocator, endpoint, err);
             defer allocator.free(message);
             const response = try stringifyAlloc(allocator, .{

@@ -32,7 +32,7 @@
     "id": "req_retrieve_001",
     "result": {
       "retrievalId": "q_retr_local1",
-      "prompt": "<memory>\n<facts>\n- (q_fact_local1) The repo uses pnpm rather than npm.\n</facts>\n</memory>",
+      "prompt": "<memory>\n<facts>\n[q_fact_local1] (current, from 2026-04-28) The repo uses pnpm rather than npm.\n</facts>\n</memory>",
       "context": {
         "core": [],
         "currentFacts": [

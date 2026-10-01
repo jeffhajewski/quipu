@@ -70,7 +70,10 @@ class ProtocolFixtureTests(unittest.TestCase):
         self.assertTrue(expected_defs.issubset(defs))
         self.assertIn("answerTrace", defs)
         self.assertIn("answerTrace", defs["memoryAnswerResult"]["properties"])
-        self.assertIn("evidenceGate", defs["answerTrace"]["properties"])
+        self.assertIn("supportValid", defs["answerTrace"]["properties"])
+        self.assertIn("supportValid", defs["answerTrace"]["required"])
+        self.assertNotIn("evidenceGate", defs["answerTrace"]["properties"])
+        self.assertEqual(defs["memoryAnswerResult"]["properties"]["prompt"]["type"], ["string", "null"])
         self.assertIn("slotKey", defs["memoryItem"]["properties"])
         self.assertIn("abstainIfWeak", defs["memoryAnswerParams"]["properties"]["options"]["properties"])
 
@@ -95,8 +98,10 @@ class ProtocolFixtureTests(unittest.TestCase):
         result = fixture["response"]["result"]
 
         self.assertIn("answerTrace", result)
-        self.assertEqual(result["answerTrace"]["strategy"], "span_extract")
+        self.assertEqual(result["answerTrace"]["strategy"], "deterministic_fallback")
+        self.assertTrue(result["answerTrace"]["supportValid"])
         self.assertEqual(result["answerTrace"]["validation"]["status"], "accepted")
+        self.assertTrue(result["prompt"].startswith("<memory>"))
 
     def test_error_fixture_rejects_bad_request(self):
         fixture = json.loads((FIXTURE_DIR / "memory.retrieve.invalid_request.json").read_text())

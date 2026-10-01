@@ -25,6 +25,7 @@
       "answer": "Run just test before committing.",
       "provider": "deterministic_prompt",
       "model": null,
+      "prompt": "<memory>\n<procedures>\n[q_proc_1] (current) Run just test before committing.\n</procedures>\n</memory>",
       "context": {
         "core": [],
         "currentFacts": [],
@@ -59,18 +60,19 @@
         }
       ],
       "tokenEstimate": 12,
-      "confidence": 0.72,
+      "confidence": 0.5,
       "warnings": [],
       "trace": null,
       "answerTrace": {
-        "strategy": "span_extract",
+        "strategy": "deterministic_fallback",
         "answerable": true,
         "supportQids": ["q_proc_1"],
+        "supportValid": true,
         "candidateAnswers": [
           {
             "text": "Run just test before committing.",
             "supportQids": ["q_proc_1"],
-            "confidence": 0.78,
+            "confidence": 0.5,
             "source": "heuristic"
           }
         ],

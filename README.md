@@ -53,7 +53,8 @@ Quipu currently supports:
   packet with scope filtering, needs filtering, token budgeting, event windows,
   `validAt`, warnings, and optional trace output.
 - `memory.answer`: retrieve scoped evidence and answer with either the
-  deterministic local fallback or a configured OpenRouter-compatible chat model.
+  deterministic local fallback or a configured chat-model reader that gets the
+  session-grouped context and the question date.
 - `memory.search`: lexical, vector, reciprocal-rank hybrid, and graph search
   modes.
 - `memory.inspect`: inspect a node, its provenance, dependents, and stream-backed
@@ -203,7 +204,8 @@ endpoints are documented in [`docs/providers.md`](docs/providers.md).
 
 For local smoke tests without model keys, use
 `--entity-provider deterministic` and omit `--answer-provider`; `memory.answer`
-falls back to deterministic prompt extraction.
+falls back to returning the top current derived fact, or else the top raw
+evidence text.
 
 Use the CLI directly:
 

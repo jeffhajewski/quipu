@@ -88,20 +88,92 @@ its `Session` / `Turn`, tombstones and redacts all of its chunks. A query
 selector that matches a chunk resolves to the parent message, so the whole
 message and every chunk are forgotten together.
 
-`memory.answer` runs the same retrieval path, builds an evidence packet from
-retrieved qids, and routes the query to a synthesis strategy:
-`span_extract`, `preference`, `knowledge_update`, `temporal`,
-`multi_session`, or `abstain`. The runtime first creates obvious heuristic
-candidates from retrieved preferences, current facts, temporal items, direct
-spans, and simple quantities.
+### Context rendering
 
-When a configured answer provider is needed, the provider is prompted to return
-strict JSON containing `answer`, `answerable`, `supportQids`, `strategy`, and
-`confidence`. The runtime validates that every support qid exists in the
-evidence packet, normalizes concise answers, and exposes the validation details
-through optional `answerTrace`. If `options.abstainIfWeak` is true and the
-answer is unsupported or invalidly supported, the public answer string is
-exactly `[abstain]`.
+`memory.retrieve` and `memory.answer` render `prompt` with one deterministic
+renderer. Retrieval rank decides which items are kept; it does not decide the
+order they are shown in.
+
+```text
+Current date: 2023-05-30 (Tuesday)          <- retrieve only, when time.validAt is set
+<memory>
+<facts>
+[q_fact_2] (superseded, 2023-05-01 to 2023-05-22) The repo uses npm.
+[q_fact_9] (current, from 2023-05-22) The repo uses pnpm.
+</facts>
+<sessions>
+## session s-early 2023-05-20 (Sat)
+[q_msg_3] user: My dog Rex likes the park.
+[q_msg_4] 2023-05-21 user: Follow-up written the next day.
+## session s-late 2023-05-22 (Mon)
+[q_chunk_10_0] assistant (1/2): first 1,200-byte chunk
+[q_chunk_10_1] assistant (2/2): second chunk
+## other
+[q_obs_7] 2023-05-21 observation: Observed build failure
+</sessions>
+</memory>
+```
+
+- Derived memory (`core`, `facts`, `preferences`, `procedures`) is rendered in
+  its own sections as `[qid] (state, validity) text`, ordered by `validFrom`.
+- Raw evidence (messages, chunks, episodes, observations) is grouped by
+  session. The header shows the caller's `sessionId` when present, otherwise
+  the session qid, plus the session's earliest ISO date and weekday. Sessions
+  are ordered chronologically. Items within a session are ordered by session
+  qid, `messageIndex`, `chunkIndex`, then `createdAt`. A line repeats its date
+  only when it differs from the session date. Items without a session go last
+  under `## other`.
+- Message and chunk items supply role, date, session, and index metadata
+  through their raw source (the node's `role`, `createdAt`, `sessionQid`,
+  `sessionId`, `messageIndex`, `chunkIndex`, `chunkCount`). Other raw items
+  read the same properties from their node. If a session id is missing, it is
+  looked up on the Session node. Nodes written before these properties existed
+  are placed through the owning Turn's `HAS_*` edge. Qids are compared in
+  natural order (`q_chunk_9_1` before `q_chunk_10_0`). Session and Turn nodes
+  never render as items.
+- Text is written on one line with whitespace collapsed. Context section tags
+  inside stored text are defanged (`</memory>` becomes `[/memory]`), so memory
+  cannot close or forge a section.
+- Fixed overhead per item is the bracketed qid, the speaker, and an optional
+  date or chunk marker, plus a share of its session header. This fits inside the
+  per-item allowance of the budget estimator.
+
+### Answering
+
+`memory.answer` runs the same retrieval path and has exactly one answer path.
+It never routes on question wording.
+
+1. If retrieval kept no items, the answer is `[abstain]` and no reader is called.
+2. If an answer provider is configured, it is always called. The reader gets
+   the rendered context and, when `time.validAt` is set, a trusted
+   `Current date: YYYY-MM-DD (Weekday)` line in its user turn. The reader prompt
+   is described in [providers.md](providers.md#memoryanswer-reader).
+3. Without a provider (deterministic/no-key mode), the answer is the value of
+   the top current derived fact, or else the top raw evidence text.
+
+The reader must return
+`{"answer":"...","answerable":true|false,"supportQids":[...],"confidence":0..1}`.
+The runtime parses it, tolerating code fences, surrounding prose, an
+`abstained` flag, and extra keys. It then validates support:
+
+- `supportQids` that are not in the context (item qids or their evidence qids)
+  are dropped and the `invalid_support` warning is added. An answerable answer
+  with no support adds `missing_support`. In both cases
+  `answerTrace.supportValid` is `false`, and the reader's answer is still
+  returned. The daemon never invents support qids.
+- `answerable: false` keeps the reader's explanation of what is unknown as the
+  answer. Unparseable output keeps the raw text with status `parse_error`.
+- Only `options.abstainIfWeak: true` replaces an unanswerable, unsupported, or
+  unparseable answer with exactly `[abstain]`.
+- `confidence` is the reader's value clamped to `[0, 1]`. If the reader gives no
+  value, it defaults to 0.5 for answerable answers and 0 otherwise. The
+  deterministic fallback reports 0.5 for a derived fact and 0.25 for raw
+  evidence.
+
+`answerTrace.strategy` only describes which path ran: `llm_reader`,
+`deterministic_fallback`, or `abstain`. With `options.includeDebug`, the
+response also carries `prompt`, the exact memory context string the reader
+received.
 
 ## Entity Resolution V0
 
@@ -118,7 +190,15 @@ up, while lexical/vector retrieval remains available immediately.
 
 ## Extraction V0
 
-The current extractor is deterministic and intentionally narrow. It emits candidate facts, preferences, and procedures for package manager, response style, and test-command memories. Runtime treats those candidates as untrusted:
+The current extractor is deterministic and intentionally narrow. It emits candidate facts, preferences, and procedures for package manager, test command, repo style, project constraint, and response style memories. It has no benchmark-specific rules.
+
+Matching is case-insensitive and word-bounded, so `npm` does not match inside `pnpm` or `npmjs`, and `just test` does not match inside `adjust test`. Rules also need a cue:
+
+- A package manager must follow a usage word (`uses npm`, `switched to pnpm`), or the text must mention a "package manager".
+- A test command must follow an imperative (`run just test`) or appear in backticks.
+- A response style must be an explicit request (`prefer concise`, `please be brief`, `response style: detailed`, or a sentence starting with "Be concise"), not descriptive prose such as "to be concise".
+
+Runtime treats extractor candidates as untrusted:
 
 1. Validate that slot, label, value, and text are well formed.
 2. Reject label/slot mismatches before any graph write.
