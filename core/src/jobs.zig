@@ -156,7 +156,8 @@ pub fn jobQid(allocator: std.mem.Allocator, stream: []const u8, sequence: u64, w
 }
 
 pub fn leasePendingJobs(allocator: std.mem.Allocator, store: storage.Adapter, options: LeaseOptions) ![]LeaseResult {
-    const hits = try store.fullTextSearch(allocator, .{ .text = "Job", .limit = 1000 });
+    // Job nodes are internal and never full-text hits; enumerate instead.
+    const hits = try store.fullTextSearch(allocator, .{ .text = "", .limit = 100_000 });
     defer freeHits(allocator, hits);
 
     var leased = std.ArrayList(LeaseResult).empty;

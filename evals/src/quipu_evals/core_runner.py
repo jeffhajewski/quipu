@@ -12,7 +12,7 @@ import tempfile
 from typing import Any, Mapping
 
 from .artifacts import build_manifest, write_json
-from .core_client import CoreStdioClient
+from .core_client import CoreStdioClient, render_context
 from .graders import (
     GradeResult,
     grade_deletion_leakage,
@@ -698,7 +698,7 @@ def run_query(
         if answer_method == "answer":
             retrieved = client.call("memory.answer", params)
             context = retrieved.get("context")
-            prompt = context_prompt(context)
+            prompt = context_prompt(context, retrieved.get("prompt"))
             actual_answer = str(retrieved.get("answer") or "")
         else:
             retrieved = client.call("memory.retrieve", params)
@@ -758,23 +758,17 @@ def run_query(
     )
 
 
-def context_prompt(context: object) -> str:
-    if not isinstance(context, Mapping):
-        return ""
-    core = context.get("core")
-    if not isinstance(core, Mapping):
-        return ""
-    items = core.get("items")
-    if not isinstance(items, list):
-        return ""
-    lines = []
-    for item in items:
-        if not isinstance(item, Mapping):
-            continue
-        text = item.get("text")
-        if isinstance(text, str):
-            lines.append(text)
-    return "\n".join(lines)
+def context_prompt(context: object, prompt: object = None) -> str:
+    """Memory context the daemon's reader saw.
+
+    Prefers the daemon's own ``prompt`` field when present. Otherwise renders
+    ``context`` exactly like runtime.zig ``promptFromContext``: its sections
+    (``core``, ``currentFacts``, ``preferences``, ``procedural``, ``episodes``)
+    are arrays of items, not mappings with an ``items`` key.
+    """
+    if isinstance(prompt, str):
+        return prompt
+    return render_context(context)
 
 
 def event_ids_from_items(items: object, event_to_message_qids: Mapping[str, list[str]]) -> list[str]:
@@ -834,6 +828,11 @@ def ensure_core_binary(*, storage: str = "memory", lattice_include: str | None =
         command.append("-Denable-lattice=true")
         command.append(f"-Dlattice-include={lattice_include}")
         command.append(f"-Dlattice-lib={lattice_lib}")
+    else:
+        # `zig build` defaults to Lattice; without --db such a binary falls back to
+        # QUIPU_DB_PATH or ~/.quipu/default, a shared persistent store. In-memory
+        # runs must build the in-memory adapter explicitly.
+        command.append("-Denable-lattice=false")
     subprocess.run(command, cwd=str(CORE_DIR), check=True, env=env)
 
 
@@ -961,6 +960,7 @@ def main() -> int:
     else:
         run = run_core_suite(
             args.suite,
+            storage=args.storage,
             retrieval_mode=args.retrieval_mode,
             answer_method=args.answer_method,
             answer_provider=args.answer_provider,

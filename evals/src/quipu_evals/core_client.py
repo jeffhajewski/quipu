@@ -6,6 +6,38 @@ import subprocess
 from typing import Any, Mapping, Optional, Sequence
 
 
+CONTEXT_SECTIONS = (
+    ("core", "core"),
+    ("currentFacts", "facts"),
+    ("preferences", "preferences"),
+    ("procedural", "procedures"),
+    ("episodes", "episodes"),
+)
+
+
+def render_context(context: Any) -> str:
+    """Reproduce runtime.zig ``promptFromContext`` from a ``context`` packet.
+
+    Sections are arrays of items; empty sections are omitted, as in the daemon.
+    """
+    if not isinstance(context, Mapping):
+        return ""
+    parts = ["<memory>"]
+    for key, name in CONTEXT_SECTIONS:
+        section = context.get(key)
+        if isinstance(section, Mapping):  # Defensive: tolerate {"items": [...]} shapes.
+            section = section.get("items")
+        if not isinstance(section, list) or not section:
+            continue
+        parts.append(f"\n<{name}>")
+        for item in section:
+            if isinstance(item, Mapping):
+                parts.append(f"\n- ({item.get('qid', '')}) {item.get('text', '')}")
+        parts.append(f"\n</{name}>")
+    parts.append("\n</memory>")
+    return "".join(parts)
+
+
 class CoreStdioClient:
     """Small NDJSON client for `quipu serve-stdio` integration tests."""
 

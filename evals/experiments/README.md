@@ -6,6 +6,50 @@ The first implementation is `quipu_evals.representation_experiment` (E1).
 It runs independently of LatticeDB and the deterministic fixture baseline
 registry so representation quality can be investigated before runtime changes.
 
+## Completed directional study
+
+The public LongMemEval-S follow-up uses `quipu_evals.longmemeval_study`, not
+the fictional pilot grader. See the [frozen protocol](e1-study-protocol.md),
+[findings](../../docs/memory-experiment-results.md), and
+[tracked scorecard](e1-directional-results.json). The study completed 42 held-out
+questions across five treatments and two budgets. Assertions-only lost to raw;
+augmentation gains are smaller and judge-sensitive. This is not a leaderboard
+submission. The pilot-specific limitations below do not describe the study's
+official grader or paired analysis.
+
+After following the protocol to prepare data and extract the held-out split:
+
+```bash
+PYTHONPATH=evals/src artifacts/experiments/venv/bin/python \
+  -m quipu_evals.longmemeval_study evaluate \
+  --suite artifacts/experiments/e1-study-splits/heldout.json \
+  --cache artifacts/experiments/e1-heldout-cache \
+  --output artifacts/experiments/e1-heldout-final \
+  --arms raw assertions combined assertion_keys raw_message --workers 8
+
+PYTHONPATH=evals/src artifacts/experiments/venv/bin/python \
+  -m quipu_evals.study_analysis \
+  --suite artifacts/experiments/e1-study-splits/heldout.json \
+  --cache artifacts/experiments/e1-heldout-cache \
+  --reports artifacts/experiments/e1-heldout-final/report.json \
+  --output artifacts/experiments/e1-heldout-analysis.json
+```
+
+Evaluation incurs provider usage for uncached requests. Analysis is local and
+read-only except its output file; it rejects incomplete or mismatched reports.
+
+## SOTA sprint dev slice
+
+[`sota-dev-selection.json`](sota-dev-selection.json) freezes 70 public
+LongMemEval-S question IDs (IDs only, no content) for the daemon parity sprint:
+10 per category, using E1's categories (`_abs` questions are abstention).
+`quipu_evals.sota_longmemeval select` with seed `quipu-sota-dev-20261001`
+excludes E1's 56 spent questions and their ordinary/`_abs` families, takes at
+most one question per family, and records the dataset and E1-selection SHA256.
+The remaining 374 unused questions stay untouched for later held-out work.
+Tune on this slice only; it is development data, not a held-out score. See
+the "SOTA sprint harness" section of [`docs/evals.md`](../../docs/evals.md).
+
 ## Offline harness check
 
 ```bash
