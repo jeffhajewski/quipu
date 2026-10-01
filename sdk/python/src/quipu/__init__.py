@@ -233,10 +233,10 @@ def _validate_retrieve(params: Mapping[str, Any]) -> None:
         options = _ensure_object(params["options"], "options")
         _reject_extra(
             options,
-            {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format"},
+            {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "temporalHints", "format"},
             "options",
         )
-        for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak"):
+        for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "temporalHints"):
             _optional_bool(options, key, "options")
         if "format" in options and options["format"] not in {"prompt", "json"}:
             raise QuipuProtocolError("options.format is invalid")
@@ -268,10 +268,27 @@ def _validate_answer(params: Mapping[str, Any]) -> None:
         options = _ensure_object(params["options"], "options")
         _reject_extra(
             options,
-            {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format"},
+            {
+                "includeEvidence",
+                "includeDebug",
+                "logTrace",
+                "logRetrieval",
+                "abstainIfWeak",
+                "readerReasoning",
+                "temporalHints",
+                "format",
+            },
             "options",
         )
-        for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak"):
+        for key in (
+            "includeEvidence",
+            "includeDebug",
+            "logTrace",
+            "logRetrieval",
+            "abstainIfWeak",
+            "readerReasoning",
+            "temporalHints",
+        ):
             _optional_bool(options, key, "options")
         if "format" in options and options["format"] not in {"prompt", "json"}:
             raise QuipuProtocolError("options.format is invalid")

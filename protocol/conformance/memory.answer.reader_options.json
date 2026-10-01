@@ -1,0 +1,124 @@
+{
+  "name": "memory.answer with readerReasoning and temporalHints",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_answer_2",
+    "method": "memory.answer",
+    "params": {
+      "query": "What is the name of the cat I adopted last week?",
+      "scope": {
+        "userId": "user-local"
+      },
+      "needs": [
+        "raw"
+      ],
+      "time": {
+        "validAt": "2023-05-30T23:40:00Z"
+      },
+      "options": {
+        "includeDebug": true,
+        "logRetrieval": false,
+        "readerReasoning": true,
+        "temporalHints": true
+      }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_answer_2",
+    "result": {
+      "retrievalId": "q_retr_2",
+      "answer": "Miso",
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "prompt": "<memory>\n<sessions>\n## session s-late 2023-05-22 (Mon), 8 days ago\n[q_msg_4] user: I adopted a cat named Miso.\n[q_msg_6] assistant: Miso is a lovely name for a cat.\n</sessions>\n</memory>",
+      "context": {
+        "core": [],
+        "currentFacts": [],
+        "preferences": [],
+        "procedural": [],
+        "episodes": [
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "text": "I adopted a cat named Miso.",
+            "score": 0.74,
+            "confidence": 1.0,
+            "state": "current",
+            "validFrom": "2023-05-22T10:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_6",
+            "type": "message",
+            "text": "Miso is a lovely name for a cat.",
+            "score": 0.71,
+            "confidence": 1.0,
+            "state": "current",
+            "validFrom": "2023-05-22T10:00:00Z",
+            "validTo": null,
+            "evidence": []
+          }
+        ],
+        "warnings": []
+      },
+      "items": [
+        {
+          "qid": "q_msg_4",
+          "type": "message",
+          "text": "I adopted a cat named Miso.",
+          "score": 0.74,
+          "confidence": 1.0,
+          "state": "current",
+          "validFrom": "2023-05-22T10:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_6",
+          "type": "message",
+          "text": "Miso is a lovely name for a cat.",
+          "score": 0.71,
+          "confidence": 1.0,
+          "state": "current",
+          "validFrom": "2023-05-22T10:00:00Z",
+          "validTo": null,
+          "evidence": []
+        }
+      ],
+      "tokenEstimate": 45,
+      "confidence": 0.9,
+      "warnings": [],
+      "trace": null,
+      "answerTrace": {
+        "strategy": "llm_reader",
+        "readerMode": "reasoning",
+        "temporalHints": true,
+        "timeReferences": "\"last week\" = 2023-05-22 to 2023-05-28",
+        "answerable": true,
+        "supportQids": [
+          "q_msg_4"
+        ],
+        "supportValid": true,
+        "candidateAnswers": [
+          {
+            "text": "Miso",
+            "supportQids": [
+              "q_msg_4"
+            ],
+            "confidence": 0.9,
+            "source": "provider"
+          }
+        ],
+        "reasoning": "[q_msg_4] 2023-05-22 user: adopted a cat named Miso. [q_msg_6] 2023-05-22 assistant: confirms the name Miso. The session is 8 days before the current date, inside last week (2023-05-22 to 2023-05-28).",
+        "rawProviderAnswer": "{\"reasoning\":\"[q_msg_4] 2023-05-22 user: adopted a cat named Miso. [q_msg_6] 2023-05-22 assistant: confirms the name Miso. The session is 8 days before the current date, inside last week (2023-05-22 to 2023-05-28).\",\"answer\":\"Miso\",\"answerable\":true,\"supportQids\":[\"q_msg_4\"],\"confidence\":0.9}",
+        "normalizedAnswer": "Miso",
+        "validation": {
+          "status": "accepted",
+          "warnings": []
+        }
+      }
+    }
+  }
+}

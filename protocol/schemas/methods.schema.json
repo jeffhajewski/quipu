@@ -175,6 +175,19 @@
           "description": "Describes which answer path ran; it never routes the question.",
           "enum": ["llm_reader", "deterministic_fallback", "abstain"]
         },
+        "readerMode": {
+          "type": "string",
+          "description": "Reader prompt that produced the answer: none when no reader was called, reasoning when options.readerReasoning was applied.",
+          "enum": ["none", "direct", "reasoning"]
+        },
+        "temporalHints": {
+          "type": "boolean",
+          "description": "True when options.temporalHints was applied: it was requested and time.validAt was a parseable date."
+        },
+        "timeReferences": {
+          "type": ["string", "null"],
+          "description": "Relative time expressions from the query resolved to dates, as sent on the reader's Time references line; null when none matched or hints were off."
+        },
         "answerable": { "type": "boolean" },
         "supportQids": {
           "type": "array",
@@ -200,6 +213,10 @@
               "source": { "type": "string", "enum": ["heuristic", "provider"] }
             }
           }
+        },
+        "reasoning": {
+          "type": ["string", "null"],
+          "description": "The reader's evidence review in reasoning mode; never part of answer. Null in direct mode or when the reader gave none (a missing_reasoning or invalid_reasoning warning is added)."
         },
         "rawProviderAnswer": { "type": ["string", "null"] },
         "normalizedAnswer": { "type": "string" },
@@ -345,6 +362,10 @@
             "logTrace": { "type": "boolean" },
             "logRetrieval": { "type": "boolean" },
             "abstainIfWeak": { "type": "boolean" },
+            "temporalHints": {
+              "type": "boolean",
+              "description": "Append each session header's offset from time.validAt and a Time references line resolving the query's relative dates. Default false."
+            },
             "format": { "type": "string", "enum": ["prompt", "json"] }
           }
         }
@@ -441,6 +462,14 @@
             "logTrace": { "type": "boolean" },
             "logRetrieval": { "type": "boolean" },
             "abstainIfWeak": { "type": "boolean" },
+            "readerReasoning": {
+              "type": "boolean",
+              "description": "Ask the reader to review the evidence in a reasoning field before answering; reported in answerTrace.reasoning. Default false."
+            },
+            "temporalHints": {
+              "type": "boolean",
+              "description": "Append each session header's offset from time.validAt and give the reader a Time references line resolving the query's relative dates. Default false."
+            },
             "format": { "type": "string", "enum": ["prompt", "json"] }
           }
         }

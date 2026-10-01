@@ -87,11 +87,16 @@ export type RetrieveRequest = {
     logTrace?: boolean;
     logRetrieval?: boolean;
     abstainIfWeak?: boolean;
+    temporalHints?: boolean;
     format?: "prompt" | "json";
   };
 };
 
-export type AnswerRequest = RetrieveRequest;
+export type AnswerRequest = Omit<RetrieveRequest, "options"> & {
+  options?: RetrieveRequest["options"] & {
+    readerReasoning?: boolean;
+  };
+};
 
 const ERROR_CODES = new Set([
   "invalid_request",
@@ -296,10 +301,10 @@ function validateRetrieve(params: Record<string, unknown>): void {
     assertObject(params.options, "options");
     rejectExtra(
       params.options,
-      new Set(["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format"]),
+      new Set(["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "temporalHints", "format"]),
       "options",
     );
-    for (const key of ["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak"]) {
+    for (const key of ["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "temporalHints"]) {
       optionalBoolean(params.options, key, "options");
     }
     if ("format" in params.options && !["prompt", "json"].includes(String(params.options.format))) {
@@ -338,10 +343,27 @@ function validateAnswer(params: Record<string, unknown>): void {
     assertObject(params.options, "options");
     rejectExtra(
       params.options,
-      new Set(["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format"]),
+      new Set([
+        "includeEvidence",
+        "includeDebug",
+        "logTrace",
+        "logRetrieval",
+        "abstainIfWeak",
+        "readerReasoning",
+        "temporalHints",
+        "format",
+      ]),
       "options",
     );
-    for (const key of ["includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak"]) {
+    for (const key of [
+      "includeEvidence",
+      "includeDebug",
+      "logTrace",
+      "logRetrieval",
+      "abstainIfWeak",
+      "readerReasoning",
+      "temporalHints",
+    ]) {
       optionalBoolean(params.options, key, "options");
     }
     if ("format" in params.options && !["prompt", "json"].includes(String(params.options.format))) {
