@@ -10,6 +10,7 @@ const providers = @import("providers.zig");
 const schema = @import("schema.zig");
 const storage = @import("storage.zig");
 const streams = @import("streams.zig");
+const temporal = @import("temporal.zig");
 
 const ObjectMap = std.json.ObjectMap;
 const Value = std.json.Value;
@@ -745,6 +746,7 @@ pub const Runtime = struct {
         const include_trace = if (options) |opts| (boolField(&opts, "includeDebug") orelse false) or (boolField(&opts, "logTrace") orelse false) else false;
         const log_retrieval = if (options) |opts| boolField(&opts, "logRetrieval") orelse (boolField(&opts, "logTrace") orelse true) else true;
         const log_audit = if (options) |opts| boolField(&opts, "logAudit") orelse true else true;
+        const temporal_hints = if (options) |opts| boolField(&opts, "temporalHints") orelse false else false;
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
         };
@@ -774,7 +776,14 @@ pub const Runtime = struct {
 
         const retrieval_id = try self.nextQid(allocator, "retr");
         defer allocator.free(retrieval_id);
-        const prompt = try promptFromContext(allocator, self.store, context.view(), .{ .current_date = valid_at });
+        const hint_date = temporalHintDate(temporal_hints, valid_at);
+        const time_references = try timeReferencesForQuery(allocator, query, hint_date);
+        defer if (time_references) |text| allocator.free(text);
+        const prompt = try promptFromContext(allocator, self.store, context.view(), .{
+            .current_date = valid_at,
+            .hint_date = hint_date,
+            .time_references = time_references,
+        });
         defer allocator.free(prompt);
         const token_estimate = estimatePromptTokens(prompt);
         const score_breakdowns = try buildScoreBreakdowns(allocator, results.items.items);
@@ -868,6 +877,8 @@ pub const Runtime = struct {
         const include_evidence = if (options) |opts| boolField(&opts, "includeEvidence") orelse true else true;
         const include_trace = if (options) |opts| (boolField(&opts, "includeDebug") orelse false) or (boolField(&opts, "logTrace") orelse false) else false;
         const abstain_if_weak = if (options) |opts| boolField(&opts, "abstainIfWeak") orelse false else false;
+        const reader_reasoning = if (options) |opts| boolField(&opts, "readerReasoning") orelse false else false;
+        const temporal_hints = if (options) |opts| boolField(&opts, "temporalHints") orelse false else false;
         const log_retrieval = if (options) |opts| boolField(&opts, "logRetrieval") orelse (boolField(&opts, "logTrace") orelse true) else true;
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
@@ -898,9 +909,13 @@ pub const Runtime = struct {
 
         const retrieval_id = try self.nextQid(allocator, "retr");
         defer allocator.free(retrieval_id);
-        // The question date travels in the reader's user turn, not inside the
+        // The question date (and, with temporal hints, the query's resolved
+        // time references) travels in the reader's user turn, not inside the
         // untrusted memory block.
-        const prompt = try promptFromContext(allocator, self.store, context.view(), .{});
+        const hint_date = temporalHintDate(temporal_hints, valid_at);
+        const time_references = try timeReferencesForQuery(allocator, query, hint_date);
+        defer if (time_references) |text| allocator.free(text);
+        const prompt = try promptFromContext(allocator, self.store, context.view(), .{ .hint_date = hint_date });
         defer allocator.free(prompt);
         const token_estimate = estimatePromptTokens(prompt);
         const score_breakdowns = try buildScoreBreakdowns(allocator, results.items.items);
@@ -942,6 +957,8 @@ pub const Runtime = struct {
                 .question = query,
                 .context = prompt,
                 .current_date = current_date,
+                .time_references = time_references,
+                .reasoning = reader_reasoning,
             }) catch |err| {
                 const message = if (err == error.MissingProviderApiKey)
                     try std.fmt.allocPrint(
@@ -962,8 +979,11 @@ pub const Runtime = struct {
         defer freeAnswerEvidencePacket(allocator, evidence_packet);
         var synthesized = try answer_synthesis.synthesize(allocator, evidence_packet, raw_provider_answer, .{
             .abstain_if_weak = abstain_if_weak,
+            .reader_reasoning = reader_reasoning,
         });
         defer synthesized.deinit();
+        synthesized.trace.temporalHints = hint_date != null;
+        synthesized.trace.timeReferences = time_references;
         for (synthesized.trace.validation.warnings) |warning| {
             if (!containsWarning(warnings.items, warning)) try warnings.append(allocator, warning);
         }
@@ -3203,21 +3223,8 @@ fn textForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
     return allocator.dupe(u8, node.label);
 }
 
-const CivilDate = struct {
-    year: i32,
-    month: u8,
-    day: u8,
-};
-
-fn parseIsoDate(timestamp: []const u8) !CivilDate {
-    if (timestamp.len < 10 or timestamp[4] != '-' or timestamp[7] != '-') return error.InvalidDate;
-    const year = try std.fmt.parseInt(i32, timestamp[0..4], 10);
-    const month = try std.fmt.parseInt(u8, timestamp[5..7], 10);
-    const day = try std.fmt.parseInt(u8, timestamp[8..10], 10);
-    if (month < 1 or month > 12) return error.InvalidDate;
-    if (day < 1 or day > daysInMonth(year, month)) return error.InvalidDate;
-    return .{ .year = year, .month = month, .day = day };
-}
+const parseIsoDate = temporal.parseIsoDate;
+const weekdayName = temporal.weekdayName;
 
 /// `YYYY-MM-DD (Weekday)` for a trusted current-date line; unparseable
 /// timestamps are passed through unchanged.
@@ -3226,35 +3233,18 @@ fn formatCurrentDate(allocator: std.mem.Allocator, timestamp: []const u8) ![]u8 
     return std.fmt.allocPrint(allocator, "{s} ({s})", .{ timestamp[0..10], weekdayName(date) });
 }
 
-/// Days since 1970-01-01 in the proleptic Gregorian calendar.
-fn daysFromCivil(date: CivilDate) i64 {
-    const month: i64 = date.month;
-    const year: i64 = if (month <= 2) @as(i64, date.year) - 1 else date.year;
-    const era = @divFloor(year, 400);
-    const year_of_era = year - era * 400;
-    const shifted_month = @mod(month + 9, 12);
-    const day_of_year = @divFloor(153 * shifted_month + 2, 5) + @as(i64, date.day) - 1;
-    const day_of_era = year_of_era * 365 + @divFloor(year_of_era, 4) - @divFloor(year_of_era, 100) + day_of_year;
-    return era * 146097 + day_of_era - 719468;
+/// `options.temporalHints`: the trusted question date (`time.validAt`) the
+/// hints are computed against, or null when hints are off or the date is
+/// missing or unparseable.
+fn temporalHintDate(enabled: bool, valid_at: ?[]const u8) ?temporal.CivilDate {
+    if (!enabled) return null;
+    return parseIsoDate(valid_at orelse return null) catch null;
 }
 
-fn weekdayName(date: CivilDate) []const u8 {
-    const names = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
-    // 1970-01-01 was a Thursday.
-    return names[@intCast(@mod(daysFromCivil(date) + 4, 7))];
-}
-
-fn daysInMonth(year: i32, month: u8) u8 {
-    return switch (month) {
-        1, 3, 5, 7, 8, 10, 12 => 31,
-        4, 6, 9, 11 => 30,
-        2 => if (isLeapYear(year)) 29 else 28,
-        else => 30,
-    };
-}
-
-fn isLeapYear(year: i32) bool {
-    return @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
+/// Relative time expressions in the query resolved against the hint date, or
+/// null when hints are off or nothing matches.
+fn timeReferencesForQuery(allocator: std.mem.Allocator, query: []const u8, hint_date: ?temporal.CivilDate) !?[]u8 {
+    return temporal.resolveTimeReferences(allocator, query, hint_date orelse return null);
 }
 
 fn stateForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
@@ -3655,6 +3645,13 @@ const PromptOptions = struct {
     /// Trusted question date (`time.validAt`). When set, a `Current date:` line
     /// is rendered above the untrusted memory block.
     current_date: ?[]const u8 = null,
+    /// Temporal hints: each dated session header gains its offset from this
+    /// date (`## session s07 2023-05-20 (Sat), 10 days ago`).
+    hint_date: ?temporal.CivilDate = null,
+    /// Temporal hints: resolved time references from the query, rendered as a
+    /// `Time references:` line after `Current date:` (retrieve only; the
+    /// answer path puts them in the reader's user turn).
+    time_references: ?[]const u8 = null,
 };
 
 /// Per-item rendering metadata read from the item's node. Every field is
@@ -3719,13 +3716,14 @@ fn renderPrompt(
     if (options.current_date) |timestamp| {
         const formatted = try formatCurrentDate(arena, timestamp);
         try out.print("Current date: {s}\n", .{formatted});
+        if (options.time_references) |references| try out.print("Time references: {s}\n", .{references});
     }
     try out.writeAll("<memory>");
     try writePromptSection(arena, out, "core", context.core);
     try writePromptSection(arena, out, "facts", context.currentFacts);
     try writePromptSection(arena, out, "preferences", context.preferences);
     try writePromptSection(arena, out, "procedures", context.procedural);
-    try writeSessionSection(arena, out, entries);
+    try writeSessionSection(arena, out, entries, options.hint_date);
     try out.writeAll("\n</memory>");
     return writer.toOwnedSlice();
 }
@@ -3770,8 +3768,9 @@ fn derivedRendersBefore(items: []const MessageResult, left: usize, right: usize)
 /// Raw evidence grouped by session:
 /// `## session <id> YYYY-MM-DD (Ddd)` then `[qid] speaker: text` lines. A line
 /// repeats its date only when it differs from the session date. Items without
-/// a session go last under `## other`.
-fn writeSessionSection(arena: std.mem.Allocator, out: *std.Io.Writer, entries: []const RenderEntry) !void {
+/// a session go last under `## other`. With a `hint_date`, a dated header ends
+/// with its offset from that date (`, 10 days ago`).
+fn writeSessionSection(arena: std.mem.Allocator, out: *std.Io.Writer, entries: []const RenderEntry, hint_date: ?temporal.CivilDate) !void {
     if (entries.len == 0) return;
     var groups = std.ArrayList(RenderGroup).empty;
     for (entries, 0..) |entry, index| {
@@ -3806,6 +3805,10 @@ fn writeSessionSection(arena: std.mem.Allocator, out: *std.Io.Writer, entries: [
             if (group.date) |date| {
                 if (parseIsoDate(date)) |civil| {
                     try out.print(" {s} ({s})", .{ dateKey(date), weekdayName(civil)[0..3] });
+                    if (hint_date) |current| {
+                        try out.writeAll(", ");
+                        try temporal.writeOffset(out, civil, current);
+                    }
                 } else |_| {
                     try out.print(" {s}", .{date});
                 }
@@ -4839,7 +4842,11 @@ test "runtime answer deterministic fallback returns the current derived fact" {
 const TestReader = struct {
     calls: usize = 0,
     last_user: ?[]u8 = null,
+    last_system: []const u8 = "",
+    last_min_output_tokens: ?u32 = null,
     cite_invalid: bool = false,
+    /// Reply with a leading `reasoning` field, as reasoning mode asks.
+    with_reasoning: bool = false,
 
     fn endpoint(self: *TestReader) providers.ProviderEndpoint {
         return .{
@@ -4855,11 +4862,13 @@ const TestReader = struct {
         self.calls += 1;
         if (self.last_user) |previous| std.testing.allocator.free(previous);
         self.last_user = try std.testing.allocator.dupe(u8, turn.user_content);
+        self.last_system = turn.system_prompt;
+        self.last_min_output_tokens = turn.min_output_tokens;
         const qid = if (self.cite_invalid) "q_msg_999" else lineQid(turn.user_content, "I adopted a cat") orelse "q_missing";
         return std.fmt.allocPrint(
             allocator,
-            "{{\"answer\":\"Miso\",\"answerable\":true,\"supportQids\":[\"{s}\"],\"confidence\":0.75}}",
-            .{qid},
+            "{{{s}\"answer\":\"Miso\",\"answerable\":true,\"supportQids\":[\"{s}\"],\"confidence\":0.75}}",
+            .{ if (self.with_reasoning) "\"reasoning\":\"[cat line] 2023-05-22 user adopted a cat named Miso.\"," else "", qid },
         );
     }
 
@@ -4975,6 +4984,12 @@ test "runtime answer sends the rendered context and question date to the reader"
     try std.testing.expect(std.mem.startsWith(u8, user_turn, "Current date: 2023-05-30 (Tuesday)\n\nQuestion:\nWhat are my cat and dog called?\n\nMemory context:\n"));
     // `prompt` is exactly the memory context the reader received.
     try std.testing.expect(std.mem.endsWith(u8, user_turn, prompt));
+    // Defaults: the direct prompt, no output floor, no temporal hints.
+    try std.testing.expectEqualStrings(providers.answer_system_prompt, reader.last_system);
+    try std.testing.expect(reader.last_min_output_tokens == null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, " ago") == null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"readerMode\":\"direct\",\"temporalHints\":false,\"timeReferences\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"reasoning\":null") != null);
 
     const quiet = try runtime.dispatch(
         std.testing.allocator,
@@ -4983,6 +4998,93 @@ test "runtime answer sends the rendered context and question date to the reader"
     defer std.testing.allocator.free(quiet);
     try std.testing.expect(std.mem.indexOf(u8, quiet, "\"prompt\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, reader.last_user.?, "Current date:") == null);
+}
+
+test "runtime answer reasoning and temporal hints reach the reader and the trace" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var reader = TestReader{ .with_reasoning = true };
+    defer reader.deinit();
+    var runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{ .answer_provider = reader.endpoint() });
+    defer runtime.deinit();
+    try rememberPetSessions(&runtime);
+
+    const answer = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What cat and dog did I mention last week?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"time\":{\"validAt\":\"2023-05-30T23:40:00Z\"},\"options\":{\"includeDebug\":true,\"logRetrieval\":false,\"readerReasoning\":true,\"temporalHints\":true}}}",
+    );
+    defer std.testing.allocator.free(answer);
+
+    try std.testing.expectEqualStrings(providers.answer_reasoning_system_prompt, reader.last_system);
+    try std.testing.expectEqual(@as(?u32, providers.reasoning_min_output_tokens), reader.last_min_output_tokens);
+    const prompt = try resultStringField(std.testing.allocator, answer, "prompt");
+    defer std.testing.allocator.free(prompt);
+    try std.testing.expect(std.mem.startsWith(u8, prompt, "<memory>\n<sessions>\n## session s-early 2023-05-20 (Sat), 10 days ago\n"));
+    try expectInOrder(prompt, &.{ "## session s-late 2023-05-22 (Mon), 8 days ago\n", "] user: I adopted a cat named Miso.\n" });
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        reader.last_user.?,
+        "Current date: 2023-05-30 (Tuesday)\nTime references: \"last week\" = 2023-05-22 to 2023-05-28\n\nQuestion:\nWhat cat and dog did I mention last week?\n\nMemory context:\n<memory>",
+    ));
+    try std.testing.expect(std.mem.endsWith(u8, reader.last_user.?, prompt));
+
+    var parsed = try std.json.parseFromSlice(Value, std.testing.allocator, answer, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("Miso", result.get("answer").?.string);
+    const trace = result.get("answerTrace").?.object;
+    try std.testing.expectEqualStrings("reasoning", trace.get("readerMode").?.string);
+    try std.testing.expect(trace.get("temporalHints").?.bool);
+    try std.testing.expectEqualStrings("\"last week\" = 2023-05-22 to 2023-05-28", trace.get("timeReferences").?.string);
+    try std.testing.expectEqualStrings("[cat line] 2023-05-22 user adopted a cat named Miso.", trace.get("reasoning").?.string);
+    try std.testing.expect(trace.get("supportValid").?.bool);
+    try std.testing.expectEqual(@as(usize, 0), result.get("warnings").?.array.items.len);
+
+    // A reader that skips the reasoning keeps its answer and adds a warning.
+    reader.with_reasoning = false;
+    const bare = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a2\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What is my cat called?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"options\":{\"includeDebug\":true,\"logRetrieval\":false,\"readerReasoning\":true,\"temporalHints\":true}}}",
+    );
+    defer std.testing.allocator.free(bare);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "\"answer\":\"Miso\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "\"warnings\":[\"missing_reasoning\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "\"readerMode\":\"reasoning\"") != null);
+    // Without time.validAt there is no date to hint against.
+    try std.testing.expect(std.mem.indexOf(u8, bare, "\"temporalHints\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare, " ago") == null);
+    try std.testing.expect(std.mem.indexOf(u8, reader.last_user.?, "Time references:") == null);
+}
+
+test "runtime retrieve renders temporal hints only when requested" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
+    defer runtime.deinit();
+    try rememberPetSessions(&runtime);
+
+    const hinted = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"cat dog Miso Rex since the start of the year\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"time\":{\"validAt\":\"2023-08-28T10:00:00Z\"},\"options\":{\"logRetrieval\":false,\"logAudit\":false,\"temporalHints\":true}}}",
+    );
+    defer std.testing.allocator.free(hinted);
+    const prompt = try resultStringField(std.testing.allocator, hinted, "prompt");
+    defer std.testing.allocator.free(prompt);
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        prompt,
+        "Current date: 2023-08-28 (Monday)\nTime references: \"since the start of the year\" = 2023-01-01 to 2023-08-28\n<memory>\n<sessions>\n## session s-early 2023-05-20 (Sat), ~3 months (100 days) ago\n",
+    ));
+    try expectInOrder(prompt, &.{"## session s-late 2023-05-22 (Mon), ~3 months (98 days) ago\n"});
+
+    const plain = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q2\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"cat dog Miso Rex since the start of the year\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"time\":{\"validAt\":\"2023-08-28T10:00:00Z\"},\"options\":{\"logRetrieval\":false,\"logAudit\":false}}}",
+    );
+    defer std.testing.allocator.free(plain);
+    const plain_prompt = try resultStringField(std.testing.allocator, plain, "prompt");
+    defer std.testing.allocator.free(plain_prompt);
+    try std.testing.expect(std.mem.startsWith(u8, plain_prompt, "Current date: 2023-08-28 (Monday)\n<memory>\n<sessions>\n## session s-early 2023-05-20 (Sat)\n"));
 }
 
 test "runtime answer abstains without calling the reader when nothing is retrieved" {
@@ -5090,6 +5192,47 @@ test "prompt renderer orders sessions, items and derived memory deterministicall
     const reversed = try renderPrompt(std.testing.allocator, arena_state.allocator(), context, &entries, .{ .current_date = "2023-05-30T23:40:00Z" });
     defer std.testing.allocator.free(reversed);
     try std.testing.expectEqualStrings(expected, reversed);
+}
+
+test "prompt renderer appends session offsets from the hint date" {
+    const items = [_]MessageResult{
+        .{ .qid = "q_msg_1", .type = "message", .text = "Old trip.", .score = 1 },
+        .{ .qid = "q_msg_2", .type = "message", .text = "Recent run.", .score = 1 },
+        .{ .qid = "q_obs_3", .type = "raw", .text = "Loose note.", .score = 1 },
+        .{ .qid = "q_msg_4", .type = "message", .text = "Same-day plan.", .score = 1 },
+    };
+    const entries = [_]RenderEntry{
+        .{ .item = items[0], .rank = 0, .meta = .{ .role = "user", .created_at = "2021-02-28T09:00:00Z", .session_id = "s-old" } },
+        .{ .item = items[1], .rank = 1, .meta = .{ .role = "user", .created_at = "2024-02-28T09:00:00Z", .session_id = "s-feb" } },
+        .{ .item = items[2], .rank = 2, .meta = .{ .role = "observation", .created_at = "2024-02-01T08:00:00Z" } },
+        .{ .item = items[3], .rank = 3, .meta = .{ .role = "user", .created_at = "2024-03-01T07:00:00Z", .session_id = "s-today" } },
+    };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const prompt = try renderPrompt(std.testing.allocator, arena_state.allocator(), .{ .episodes = &items }, &entries, .{
+        .current_date = "2024-03-01T12:00:00Z",
+        .hint_date = try parseIsoDate("2024-03-01"),
+        .time_references = "\"yesterday\" = 2024-02-29 (Thu)",
+    });
+    defer std.testing.allocator.free(prompt);
+    try std.testing.expectEqualStrings(
+        \\Current date: 2024-03-01 (Friday)
+        \\Time references: "yesterday" = 2024-02-29 (Thu)
+        \\<memory>
+        \\<sessions>
+        \\## session s-old 2021-02-28 (Sun), ~3 years (1097 days) ago
+        \\[q_msg_1] user: Old trip.
+        \\## session s-feb 2024-02-28 (Wed), 2 days ago
+        \\[q_msg_2] user: Recent run.
+        \\## session s-today 2024-03-01 (Fri), today
+        \\[q_msg_4] user: Same-day plan.
+        \\## other
+        \\[q_obs_3] 2024-02-01 observation: Loose note.
+        \\</sessions>
+        \\</memory>
+    ,
+        prompt,
+    );
 }
 
 fn withMeta(base: RenderMeta, role: []const u8, message_index: ?i64, chunk_index: ?i64, chunk_count: ?i64) RenderMeta {

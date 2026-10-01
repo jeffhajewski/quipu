@@ -16,6 +16,11 @@ pub const strategy_reader = "llm_reader";
 pub const strategy_deterministic = "deterministic_fallback";
 pub const strategy_abstain = "abstain";
 
+/// `answerTrace.readerMode`: which reader prompt produced the answer.
+pub const reader_mode_none = "none";
+pub const reader_mode_direct = "direct";
+pub const reader_mode_reasoning = "reasoning";
+
 /// One retrieved context item as seen by the synthesizer. `qid` is the qid the
 /// reader saw in the rendered context; `evidenceQids` are the raw evidence it
 /// links to (also valid support).
@@ -42,10 +47,20 @@ pub const Validation = struct {
 
 pub const AnswerTrace = struct {
     strategy: []const u8,
+    /// `none` when no reader was called, else `direct` or `reasoning`.
+    readerMode: []const u8 = reader_mode_none,
+    /// Whether temporal hints were rendered (`options.temporalHints` with a
+    /// parseable `time.validAt`). Set by the runtime.
+    temporalHints: bool = false,
+    /// The `Time references:` payload sent to the reader, if any. Set by the
+    /// runtime.
+    timeReferences: ?[]const u8 = null,
     answerable: bool,
     supportQids: []const []const u8 = &.{},
     supportValid: bool,
     candidateAnswers: []const CandidateAnswer = &.{},
+    /// The reader's evidence review in reasoning mode; never part of `answer`.
+    reasoning: ?[]const u8 = null,
     rawProviderAnswer: ?[]const u8 = null,
     normalizedAnswer: []const u8,
     validation: Validation,
@@ -55,6 +70,9 @@ pub const SynthesisOptions = struct {
     /// Replace weak answers (unanswerable, unsupported, unparseable) with
     /// exactly `[abstain]`. When false the reader's answer is always kept.
     abstain_if_weak: bool = false,
+    /// The reader was asked for a `reasoning` field (`options.readerReasoning`).
+    /// A missing or non-string reasoning adds a warning; the answer is kept.
+    reader_reasoning: bool = false,
 };
 
 pub const OwnedSynthesisResult = struct {
@@ -70,11 +88,20 @@ pub const OwnedSynthesisResult = struct {
     }
 };
 
+/// The reader's optional `reasoning` field: absent (or empty or null), a
+/// non-string value, or trimmed text.
+pub const Reasoning = union(enum) {
+    missing,
+    invalid,
+    text: []const u8,
+};
+
 pub const ParsedProviderAnswer = struct {
     answer: []const u8,
     answerable: bool,
     supportQids: []const []const u8,
     confidence: ?f32,
+    reasoning: Reasoning = .missing,
 };
 
 const Draft = struct {
@@ -86,6 +113,7 @@ const Draft = struct {
     confidence: f32,
     status: []const u8,
     candidate: ?CandidateAnswer = null,
+    reasoning: ?[]const u8 = null,
 };
 
 /// Builds the public answer and trace. `raw_provider_answer` is the reader's raw
@@ -108,7 +136,7 @@ pub fn synthesize(
         try warnings.append(a, "no_evidence");
         break :blk abstainDraft();
     } else if (raw_provider_answer) |raw|
-        try readerDraft(a, items, raw, &warnings)
+        try readerDraft(a, items, raw, options.reader_reasoning, &warnings)
     else
         try deterministicDraft(a, items);
 
@@ -127,16 +155,24 @@ pub fn synthesize(
     else
         &.{};
 
+    const reader_called = items.len > 0 and raw_provider_answer != null;
     return .{
         .arena = arena,
         .answer = draft.answer,
         .confidence = draft.confidence,
         .trace = .{
             .strategy = draft.strategy,
+            .readerMode = if (!reader_called)
+                reader_mode_none
+            else if (options.reader_reasoning)
+                reader_mode_reasoning
+            else
+                reader_mode_direct,
             .answerable = draft.answerable,
             .supportQids = draft.support_qids,
             .supportValid = draft.support_valid,
             .candidateAnswers = candidates,
+            .reasoning = draft.reasoning,
             .rawProviderAnswer = if (raw_provider_answer) |raw| try a.dupe(u8, raw) else null,
             .normalizedAnswer = draft.answer,
             .validation = .{
@@ -162,6 +198,7 @@ fn readerDraft(
     a: std.mem.Allocator,
     items: []const EvidenceItem,
     raw: []const u8,
+    reasoning_mode: bool,
     warnings: *std.ArrayList([]const u8),
 ) !Draft {
     const parsed = parseProviderAnswer(a, raw) catch |err| switch (err) {
@@ -169,6 +206,7 @@ fn readerDraft(
         else => {
             // Keep the reader's text, but nothing about it was validated.
             try warnings.append(a, "parse_error");
+            if (reasoning_mode) try warnings.append(a, "missing_reasoning");
             const text = try normalizeAnswerText(a, stripJsonFence(raw));
             const answerable = text.len > 0;
             return .{
@@ -181,6 +219,14 @@ fn readerDraft(
                 .candidate = .{ .text = text, .confidence = 0, .source = "provider" },
             };
         },
+    };
+
+    // Reasoning is trace-only: its absence never discards the answer.
+    var reasoning: ?[]const u8 = null;
+    if (reasoning_mode) switch (parsed.reasoning) {
+        .missing => try warnings.append(a, "missing_reasoning"),
+        .invalid => try warnings.append(a, "invalid_reasoning"),
+        .text => |review| reasoning = review,
     };
 
     const text = try normalizeAnswerText(a, parsed.answer);
@@ -212,6 +258,7 @@ fn readerDraft(
         .confidence = confidence,
         .status = status,
         .candidate = .{ .text = text, .supportQids = support_qids, .confidence = confidence, .source = "provider" },
+        .reasoning = reasoning,
     };
 }
 
@@ -251,7 +298,8 @@ fn deterministicDraft(a: std.mem.Allocator, items: []const EvidenceItem) !Draft 
 }
 
 /// Parses the reader's JSON contract
-/// `{"answer":"...","answerable":true,"supportQids":[...],"confidence":0..1}`.
+/// `{"answer":"...","answerable":true,"supportQids":[...],"confidence":0..1}`,
+/// with an optional leading `"reasoning":"..."` in reasoning mode.
 /// Tolerates code fences, surrounding prose, an E1-style `abstained` flag and
 /// legacy extra keys such as `strategy`. All strings live in `a`.
 pub fn parseProviderAnswer(a: std.mem.Allocator, raw: []const u8) !ParsedProviderAnswer {
@@ -284,11 +332,21 @@ pub fn parseProviderAnswer(a: std.mem.Allocator, raw: []const u8) !ParsedProvide
         }
     }
 
+    const reasoning: Reasoning = if (root.get("reasoning")) |value| switch (value) {
+        .string => |string| blk: {
+            const trimmed = std.mem.trim(u8, string, " \t\r\n");
+            break :blk if (trimmed.len == 0) .missing else .{ .text = trimmed };
+        },
+        .null => .missing,
+        else => .invalid,
+    } else .missing;
+
     return .{
         .answer = answer,
         .answerable = answerable,
         .supportQids = try qids.toOwnedSlice(a),
         .confidence = jsonFloat(root.get("confidence")),
+        .reasoning = reasoning,
     };
 }
 
@@ -496,11 +554,57 @@ test "unparseable reader output keeps its text with parse_error" {
     try std.testing.expectEqualStrings("accepted", wrapped.trace.validation.status);
 }
 
+test "reasoning mode keeps the answer and reports reasoning only in the trace" {
+    const raw = "{\"reasoning\":\"[q_msg_1] 2023-03-01 user booked Harbor Inn; later [q_fact_1] says Lakeside Suites, which is newer.\",\"answer\":\"Lakeside Suites\",\"answerable\":true,\"supportQids\":[\"q_fact_1\"],\"confidence\":0.8}";
+    var result = try synthesize(std.testing.allocator, &test_items, raw, .{ .reader_reasoning = true });
+    defer result.deinit();
+    try std.testing.expectEqualStrings("Lakeside Suites", result.answer);
+    try std.testing.expectEqualStrings(reader_mode_reasoning, result.trace.readerMode);
+    try std.testing.expect(std.mem.startsWith(u8, result.trace.reasoning.?, "[q_msg_1] 2023-03-01 user booked"));
+    try std.testing.expectEqualStrings("accepted", result.trace.validation.status);
+    try std.testing.expectEqual(@as(usize, 0), result.trace.validation.warnings.len);
+
+    // Direct mode ignores a reasoning field the reader volunteered.
+    var direct = try synthesize(std.testing.allocator, &test_items, raw, .{});
+    defer direct.deinit();
+    try std.testing.expectEqualStrings(reader_mode_direct, direct.trace.readerMode);
+    try std.testing.expect(direct.trace.reasoning == null);
+}
+
+test "missing or invalid reasoning warns without discarding the answer" {
+    const missing = "{\"answer\":\"Harbor Inn\",\"answerable\":true,\"supportQids\":[\"q_msg_1\"],\"confidence\":0.6}";
+    var without = try synthesize(std.testing.allocator, &test_items, missing, .{ .reader_reasoning = true });
+    defer without.deinit();
+    try std.testing.expectEqualStrings("Harbor Inn", without.answer);
+    try std.testing.expect(without.trace.reasoning == null);
+    try std.testing.expectEqualStrings("accepted", without.trace.validation.status);
+    try std.testing.expectEqualStrings("missing_reasoning", without.trace.validation.warnings[0]);
+
+    const blank = "{\"reasoning\":\"  \",\"answer\":\"Harbor Inn\",\"answerable\":true,\"supportQids\":[\"q_msg_1\"]}";
+    var empty = try synthesize(std.testing.allocator, &test_items, blank, .{ .reader_reasoning = true });
+    defer empty.deinit();
+    try std.testing.expectEqualStrings("missing_reasoning", empty.trace.validation.warnings[0]);
+
+    const listed = "{\"reasoning\":[\"q_msg_1 says Harbor Inn\"],\"answer\":\"Harbor Inn\",\"answerable\":true,\"supportQids\":[\"q_msg_1\"]}";
+    var invalid = try synthesize(std.testing.allocator, &test_items, listed, .{ .reader_reasoning = true });
+    defer invalid.deinit();
+    try std.testing.expectEqualStrings("Harbor Inn", invalid.answer);
+    try std.testing.expect(invalid.trace.reasoning == null);
+    try std.testing.expect(invalid.trace.supportValid);
+    try std.testing.expectEqualStrings("invalid_reasoning", invalid.trace.validation.warnings[0]);
+
+    var unparseable = try synthesize(std.testing.allocator, &test_items, "{\"reasoning\":\"cut off mid", .{ .reader_reasoning = true });
+    defer unparseable.deinit();
+    try std.testing.expectEqualStrings("parse_error", unparseable.trace.validation.status);
+    try std.testing.expectEqualStrings("missing_reasoning", unparseable.trace.validation.warnings[1]);
+}
+
 test "deterministic fallback prefers the top current derived fact value" {
     var result = try synthesize(std.testing.allocator, &test_items, null, .{});
     defer result.deinit();
     try std.testing.expectEqualStrings("Lakeside Suites", result.answer);
     try std.testing.expectEqualStrings(strategy_deterministic, result.trace.strategy);
+    try std.testing.expectEqualStrings(reader_mode_none, result.trace.readerMode);
     try std.testing.expectEqualStrings("q_fact_1", result.trace.supportQids[0]);
     try std.testing.expectEqualStrings("q_msg_2", result.trace.supportQids[1]);
 
