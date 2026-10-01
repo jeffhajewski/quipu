@@ -4954,7 +4954,7 @@ test "runtime answer sends the rendered context and question date to the reader"
 
     const answer = try runtime.dispatch(
         std.testing.allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What is my cat's name?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"time\":{\"validAt\":\"2023-05-30T23:40:00Z\"},\"options\":{\"includeDebug\":true,\"logRetrieval\":false}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What are my cat and dog called?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"time\":{\"validAt\":\"2023-05-30T23:40:00Z\"},\"options\":{\"includeDebug\":true,\"logRetrieval\":false}}}",
     );
     defer std.testing.allocator.free(answer);
 
@@ -4970,13 +4970,13 @@ test "runtime answer sends the rendered context and question date to the reader"
     try std.testing.expect(std.mem.startsWith(u8, prompt, "<memory>\n<sessions>\n## session s-early 2023-05-20 (Sat)\n"));
     try expectInOrder(prompt, &.{ "## session s-late 2023-05-22 (Mon)\n", "] user: I adopted a cat named Miso.\n" });
     const user_turn = reader.last_user.?;
-    try std.testing.expect(std.mem.startsWith(u8, user_turn, "Current date: 2023-05-30 (Tuesday)\n\nQuestion:\nWhat is my cat's name?\n\nMemory context:\n"));
+    try std.testing.expect(std.mem.startsWith(u8, user_turn, "Current date: 2023-05-30 (Tuesday)\n\nQuestion:\nWhat are my cat and dog called?\n\nMemory context:\n"));
     // `prompt` is exactly the memory context the reader received.
     try std.testing.expect(std.mem.endsWith(u8, user_turn, prompt));
 
     const quiet = try runtime.dispatch(
         std.testing.allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":\"a2\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What is my cat's name?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"options\":{\"logRetrieval\":false}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a2\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What are my cat and dog called?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"options\":{\"logRetrieval\":false}}}",
     );
     defer std.testing.allocator.free(quiet);
     try std.testing.expect(std.mem.indexOf(u8, quiet, "\"prompt\":null") != null);
