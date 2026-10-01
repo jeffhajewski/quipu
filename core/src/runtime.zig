@@ -29,6 +29,9 @@ const property_truncation_marker = "…";
 const message_chunk_max_bytes = 1200;
 /// Boundary search looks back this many bytes from the hard chunk limit.
 const message_chunk_boundary_window = 200;
+const default_budget_tokens: i64 = 4096;
+/// Candidate items kept per retrieval; enough chunks to fill the default budget.
+const retrieval_candidate_limit: usize = 80;
 
 const Scope = struct {
     tenant_id: ?[]const u8 = null,
@@ -160,6 +163,9 @@ const RawSource = struct {
     /// 0-based chunk position; null when the item is a whole message.
     chunk_index: ?i64 = null,
     chunk_count: ?i64 = null,
+    /// Slot keys of memories evidenced by this message that are stale at
+    /// query time (filled only when the packet holds slot memories).
+    stale_slot_keys: []const []const u8 = &.{},
 
     fn deinit(self: RawSource, allocator: std.mem.Allocator) void {
         if (self.role) |value| allocator.free(value);
@@ -168,6 +174,8 @@ const RawSource = struct {
         if (self.session_qid) |value| allocator.free(value);
         if (self.turn_qid) |value| allocator.free(value);
         allocator.free(self.message_qid);
+        for (self.stale_slot_keys) |key| allocator.free(key);
+        if (self.stale_slot_keys.len > 0) allocator.free(self.stale_slot_keys);
     }
 };
 
@@ -721,7 +729,7 @@ pub const Runtime = struct {
         if (query.len == 0) {
             return errorResponse(allocator, id, "invalid_request", "query must be a non-empty string");
         }
-        const budget = integerField(params, "budgetTokens") orelse 1200;
+        const budget = integerField(params, "budgetTokens") orelse default_budget_tokens;
         if (budget < 1) {
             return errorResponse(allocator, id, "invalid_request", "budgetTokens must be positive");
         }
@@ -739,16 +747,14 @@ pub const Runtime = struct {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
         };
 
-        var results = try self.collectItems(allocator, query, retrieve_mode, 40, scope, false, null, valid_at, event_window, include_evidence, include_trace);
+        var results = try self.collectItems(allocator, query, retrieve_mode, retrieval_candidate_limit, scope, false, null, valid_at, event_window, include_evidence, include_trace);
         defer results.deinit();
         if (needsIncludes(needs_value, "core")) {
             try self.appendCoreItems(allocator, &results, scope, include_evidence, include_trace);
         }
         const candidate_count = results.items.items.len;
         const dropped_for_needs = results.filterByNeeds(needs_value);
-        if (!needsIncludes(needs_value, "raw")) {
-            results.suppressRawIfDerived(needs_value);
-        }
+        results.applyRawEvidencePolicy();
         const dropped_for_budget = results.applyTokenBudget(@intCast(budget));
 
         var warnings = std.ArrayList([]const u8).empty;
@@ -847,7 +853,7 @@ pub const Runtime = struct {
         if (query.len == 0) {
             return errorResponse(allocator, id, "invalid_request", "query must be a non-empty string");
         }
-        const budget = integerField(params, "budgetTokens") orelse 1200;
+        const budget = integerField(params, "budgetTokens") orelse default_budget_tokens;
         if (budget < 1) {
             return errorResponse(allocator, id, "invalid_request", "budgetTokens must be positive");
         }
@@ -865,16 +871,14 @@ pub const Runtime = struct {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
         };
 
-        var results = try self.collectItems(allocator, query, retrieve_mode, 40, scope, false, null, valid_at, event_window, include_evidence, include_trace);
+        var results = try self.collectItems(allocator, query, retrieve_mode, retrieval_candidate_limit, scope, false, null, valid_at, event_window, include_evidence, include_trace);
         defer results.deinit();
         if (needsIncludes(needs_value, "core")) {
             try self.appendCoreItems(allocator, &results, scope, include_evidence, include_trace);
         }
         const candidate_count = results.items.items.len;
         const dropped_for_needs = results.filterByNeeds(needs_value);
-        if (!needsIncludes(needs_value, "raw")) {
-            results.suppressRawIfDerived(needs_value);
-        }
+        results.applyRawEvidencePolicy();
         const dropped_for_budget = results.applyTokenBudget(@intCast(budget));
 
         var warnings = std.ArrayList([]const u8).empty;
@@ -1786,10 +1790,13 @@ pub const Runtime = struct {
         const episode_qid = try hashQid(allocator, "ep", turn_qid);
         errdefer allocator.free(episode_qid);
         const episode_summary = summary[0..utf8PrefixLen(summary, 1024)];
+        // While the episode only copies the first message it would duplicate
+        // raw evidence in search, so it is kept out of the lexical/vector index.
         const props = try stringifyAlloc(allocator, .{
             .kind = "episode",
             .qtype = "episode",
             .episodeType = "conversation",
+            .searchable = false,
             .sessionQid = session_qid,
             .turnQid = turn_qid,
             .summary = episode_summary,
@@ -2114,19 +2121,83 @@ pub const Runtime = struct {
             });
             if (owned.items.items.len >= limit) break;
         }
+        sortItemsByScore(&owned);
+        try self.markStaleRawEvidence(allocator, &owned, valid_at);
         return owned;
     }
 
+    /// Records, on each raw item, the slot keys of memories evidenced by its
+    /// message that are not active at query time. Only runs when the packet
+    /// holds slot memories, since the raw-evidence policy needs a current
+    /// version of the slot in the same packet before dropping anything.
+    fn markStaleRawEvidence(self: *Runtime, allocator: std.mem.Allocator, owned: *OwnedItems, valid_at: ?[]const u8) !void {
+        var has_slot_item = false;
+        for (owned.items.items) |item| {
+            if (item.raw_source == null and item.slotKey != null) {
+                has_slot_item = true;
+                break;
+            }
+        }
+        if (!has_slot_item) return;
+        for (owned.items.items) |*item| {
+            if (item.raw_source) |*source| {
+                source.stale_slot_keys = try self.staleSlotKeysForMessage(allocator, source.message_qid, valid_at);
+            }
+        }
+    }
+
+    fn staleSlotKeysForMessage(self: *Runtime, allocator: std.mem.Allocator, message_qid: []const u8, valid_at: ?[]const u8) ![]const []const u8 {
+        const edges = try self.store.findEdges(allocator, .{ .to_qid = message_qid, .edge_type = "EVIDENCED_BY", .limit = 4096 });
+        defer self.store.freeEdges(allocator, edges);
+
+        var stale = OwnedQids{ .allocator = allocator };
+        defer stale.deinit();
+        var active = OwnedQids{ .allocator = allocator };
+        defer active.deinit();
+        for (edges) |edge| {
+            const node = (try self.store.getNode(allocator, edge.from_qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!isSlotMemoryLabel(node.label)) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            const slot_key = (try readOptionalPropertyString(allocator, node.properties_json, "slotKey")) orelse continue;
+            defer allocator.free(slot_key);
+            const is_active = if (valid_at) |timestamp|
+                try derivedActiveAt(allocator, node, timestamp)
+            else
+                try propertyEquals(allocator, node.properties_json, "state", "current");
+            if (is_active) {
+                try active.appendUnique(allocator, slot_key);
+            } else {
+                try stale.appendUnique(allocator, slot_key);
+            }
+        }
+
+        var keys = std.ArrayList([]const u8).empty;
+        errdefer {
+            for (keys.items) |key| allocator.free(key);
+            keys.deinit(allocator);
+        }
+        for (stale.items.items) |key| {
+            // A message that also evidences the active version stays relevant.
+            if (active.contains(key)) continue;
+            try keys.append(allocator, try allocator.dupe(u8, key));
+        }
+        return keys.toOwnedSlice(allocator);
+    }
+
+    /// Every mode returns hits sorted by descending score.
     fn collectSearchHits(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, mode: SearchMode, limit: usize) ![]storage.SearchHit {
-        return switch (mode) {
-            .fts => self.store.fullTextSearch(allocator, .{ .text = query, .limit = limit }),
-            .graph => self.graphSearch(allocator, query, limit),
+        const hits = switch (mode) {
+            .fts => try self.store.fullTextSearch(allocator, .{ .text = query, .limit = limit }),
+            .graph => try self.graphSearch(allocator, query, limit),
             .vector => self.vectorTextSearch(allocator, query, limit) catch |err| switch (err) {
-                error.Unsupported => allocator.alloc(storage.SearchHit, 0),
+                error.Unsupported => try allocator.alloc(storage.SearchHit, 0),
                 else => |e| return e,
             },
-            .hybrid => self.hybridSearch(allocator, query, limit),
+            .hybrid => try self.hybridSearch(allocator, query, limit),
         };
+        sortHitsByScore(hits);
+        return hits;
     }
 
     fn vectorTextSearch(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, limit: usize) ![]storage.SearchHit {
@@ -2143,6 +2214,9 @@ pub const Runtime = struct {
             else => |e| return e,
         };
         defer freeHits(allocator, vector_hits);
+        // RRF is rank based, so each channel must be in score order first.
+        sortHitsByScore(fts_hits);
+        sortHitsByScore(vector_hits);
 
         var merged = std.ArrayList(storage.SearchHit).empty;
         errdefer {
@@ -2165,6 +2239,7 @@ pub const Runtime = struct {
         else
             try self.store.fullTextSearch(allocator, .{ .text = query, .limit = @max(limit * 2, limit) });
         defer freeHits(allocator, base_hits);
+        sortHitsByScore(base_hits);
 
         var merged = std.ArrayList(storage.SearchHit).empty;
         errdefer {
@@ -2179,6 +2254,7 @@ pub const Runtime = struct {
 
         const entity_hits = try self.store.fullTextSearch(allocator, .{ .text = query, .limit = @max(limit * 2, limit) });
         defer freeHits(allocator, entity_hits);
+        sortHitsByScore(entity_hits);
         for (entity_hits, 0..) |hit, rank| {
             const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
@@ -2458,20 +2534,16 @@ const OwnedItems = struct {
         self.items.deinit(self.allocator);
     }
 
-    fn suppressRawIfDerived(self: *OwnedItems, needs_value: ?Value) void {
-        var has_derived = false;
-        for (self.items.items) |item| {
-            if (std.mem.eql(u8, item.type, "fact") or std.mem.eql(u8, item.type, "preference") or std.mem.eql(u8, item.type, "procedure") or std.mem.eql(u8, item.type, "core")) {
-                has_derived = true;
-                break;
-            }
-        }
-        if (!has_derived) return;
-
+    /// Raw evidence competes by rank alongside derived memory. A raw item is
+    /// dropped only when its message evidences a slot memory that is stale at
+    /// query time and the packet already holds the active version of that
+    /// slot (stale "uses npm" evidence must not sit next to "uses pnpm").
+    /// Memory cards that restate a fact/preference/procedure slot already in
+    /// the packet are dropped as duplicates.
+    fn applyRawEvidencePolicy(self: *OwnedItems) void {
         var write_index: usize = 0;
         for (self.items.items) |item| {
-            const suppress_episode_like = !needsIncludes(needs_value, "recent_episodes") and (std.mem.eql(u8, item.type, "episode") or std.mem.eql(u8, item.type, "memory_card"));
-            if (std.mem.eql(u8, item.type, "message") or std.mem.eql(u8, item.type, "raw") or suppress_episode_like) {
+            if (self.isStaleRawEvidence(item) or self.isDuplicateCard(item)) {
                 self.freeItem(item);
                 continue;
             }
@@ -2479,6 +2551,31 @@ const OwnedItems = struct {
             write_index += 1;
         }
         self.items.items.len = write_index;
+    }
+
+    fn isStaleRawEvidence(self: *const OwnedItems, item: MessageResult) bool {
+        const source = item.raw_source orelse return false;
+        for (source.stale_slot_keys) |slot_key| {
+            if (self.containsSlotItem(slot_key, false)) return true;
+        }
+        return false;
+    }
+
+    fn isDuplicateCard(self: *const OwnedItems, item: MessageResult) bool {
+        if (!std.mem.eql(u8, item.type, "memory_card")) return false;
+        const slot_key = item.slotKey orelse return false;
+        return self.containsSlotItem(slot_key, true);
+    }
+
+    fn containsSlotItem(self: *const OwnedItems, slot_key: []const u8, derived_only: bool) bool {
+        for (self.items.items) |item| {
+            if (item.raw_source != null) continue;
+            const item_slot = item.slotKey orelse continue;
+            if (!std.mem.eql(u8, item_slot, slot_key)) continue;
+            if (derived_only and !isFactLikeType(item.type)) continue;
+            return true;
+        }
+        return false;
     }
 
     fn filterByNeeds(self: *OwnedItems, needs_value: ?Value) usize {
@@ -2598,19 +2695,14 @@ fn freeAnswerEvidencePacket(allocator: std.mem.Allocator, packet: []answer_synth
     allocator.free(packet);
 }
 
+/// Stable sort by descending score; equal scores put newer items first.
 fn sortItemsByScore(owned: *OwnedItems) void {
-    var index: usize = 1;
-    while (index < owned.items.items.len) : (index += 1) {
-        var cursor = index;
-        while (cursor > 0 and itemRanksBefore(owned.items.items[cursor], owned.items.items[cursor - 1])) : (cursor -= 1) {
-            std.mem.swap(MessageResult, &owned.items.items[cursor], &owned.items.items[cursor - 1]);
-        }
-    }
+    std.mem.sort(MessageResult, owned.items.items, {}, itemRanksBefore);
 }
 
-fn itemRanksBefore(left: MessageResult, right: MessageResult) bool {
+fn itemRanksBefore(_: void, left: MessageResult, right: MessageResult) bool {
     if (left.score != right.score) return left.score > right.score;
-    return timestampAtOrAfter(left.validFrom orelse "", right.validFrom orelse "");
+    return std.mem.order(u8, left.validFrom orelse "", right.validFrom orelse "") == .gt;
 }
 
 const OwnedContextPacket = struct {
@@ -3620,8 +3712,10 @@ fn recencyScore(item: MessageResult) f32 {
     return if (item.validFrom != null) 0.75 else 0.5;
 }
 
+/// ceil(text_bytes / 3.5) plus 16 tokens for the rendered line prefix, date
+/// and speaker tags, and amortized session headers.
 fn estimateItemTokens(item: MessageResult) usize {
-    return @max(@as(usize, 1), item.text.len / 4 + 8);
+    return (item.text.len * 2 + 6) / 7 + 16;
 }
 
 fn promptFromContext(allocator: std.mem.Allocator, context: ContextPacket) ![]u8 {
@@ -3805,14 +3899,13 @@ fn reciprocalRank(rank: usize) f32 {
     return 1.0 / @as(f32, @floatFromInt(60 + rank + 1));
 }
 
+/// Stable sort by descending score, so ties keep their incoming order.
 fn sortHitsByScore(hits: []storage.SearchHit) void {
-    var index: usize = 1;
-    while (index < hits.len) : (index += 1) {
-        var cursor = index;
-        while (cursor > 0 and hits[cursor].score > hits[cursor - 1].score) : (cursor -= 1) {
-            std.mem.swap(storage.SearchHit, &hits[cursor], &hits[cursor - 1]);
-        }
-    }
+    std.mem.sort(storage.SearchHit, hits, {}, hitRanksBefore);
+}
+
+fn hitRanksBefore(_: void, left: storage.SearchHit, right: storage.SearchHit) bool {
+    return left.score > right.score;
 }
 
 fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
@@ -4082,8 +4175,24 @@ test "runtime stores tool calls observations episodes and memory cards" {
         "{\"jsonrpc\":\"2.0\",\"id\":\"s2\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"repo uses pnpm\",\"scope\":{\"projectId\":\"repo:test\"},\"needs\":[\"recent_episodes\"]}}",
     );
     defer std.testing.allocator.free(episodes);
-    try std.testing.expect(std.mem.indexOf(u8, episodes, "\"type\":\"episode\"") != null);
+    // The episode only copies the first message, so it is unsearchable and
+    // recent_episodes is served by the raw message itself.
+    try std.testing.expect(std.mem.indexOf(u8, episodes, "\"type\":\"episode\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, episodes, "\"type\":\"message\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, episodes, "This repo uses pnpm.") != null);
+
+    const episode_qid = try hashQid(std.testing.allocator, "ep", "q_turn_2");
+    defer std.testing.allocator.free(episode_qid);
+    const inspect_request = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"i1\",\"method\":\"memory.inspect\",\"params\":{{\"qid\":\"{s}\"}}}}",
+        .{episode_qid},
+    );
+    defer std.testing.allocator.free(inspect_request);
+    const episode = try runtime.dispatch(std.testing.allocator, inspect_request);
+    defer std.testing.allocator.free(episode);
+    try std.testing.expect(std.mem.indexOf(u8, episode, "\"type\":\"episode\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, episode, "\\\"searchable\\\":false") != null);
 
     const observations = try runtime.dispatch(
         std.testing.allocator,
@@ -4795,6 +4904,13 @@ fn expectChunksReassemble(allocator: std.mem.Allocator, content: []const u8, end
     try std.testing.expectEqualStrings(content, rebuilt.items);
 }
 
+test "estimate item tokens uses bytes over 3.5 plus line overhead" {
+    try std.testing.expectEqual(@as(usize, 16), estimateItemTokens(.{ .qid = "q", .type = "message", .text = "", .score = 1 }));
+    try std.testing.expectEqual(@as(usize, 17), estimateItemTokens(.{ .qid = "q", .type = "message", .text = "abc", .score = 1 }));
+    try std.testing.expectEqual(@as(usize, 18), estimateItemTokens(.{ .qid = "q", .type = "message", .text = "abcdefg", .score = 1 }));
+    try std.testing.expectEqual(@as(usize, 1016), estimateItemTokens(.{ .qid = "q", .type = "message", .text = "a" ** 3500, .score = 1 }));
+}
+
 /// About 3 KB of sentences: "quokka" opens the first chunk and "zanzibar"
 /// closes the last one.
 fn testLongContent(allocator: std.mem.Allocator) ![]u8 {
@@ -4918,6 +5034,95 @@ test "runtime chunks long messages and maps chunk hits to the parent message" {
         if (std.mem.startsWith(u8, item.qid, "q_chunk_4_")) graph_chunks += 1;
     }
     try std.testing.expectEqual(chunk_count, graph_chunks);
+}
+
+test "runtime retrieve sorts lexical candidates by BM25 score" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
+    defer runtime.deinit();
+
+    const remember = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:rank\"},\"messages\":[{\"role\":\"user\",\"content\":\"I baked an apple pie with grandma on Sunday.\"},{\"role\":\"user\",\"content\":\"The apple tart was too sweet.\"},{\"role\":\"user\",\"content\":\"A zebra apple is a rare heirloom variety.\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(remember);
+
+    var items = try runtime.collectItems(std.testing.allocator, "zebra apple", .fts, 10, .{ .project_id = "repo:rank" }, false, null, null, .{}, true, false);
+    defer items.deinit();
+    try std.testing.expectEqual(@as(usize, 3), items.items.items.len);
+    try std.testing.expectEqualStrings("A zebra apple is a rare heirloom variety.", items.items.items[0].text);
+    for (items.items.items[1..], 1..) |item, index| {
+        try std.testing.expect(item.score <= items.items.items[index - 1].score);
+    }
+}
+
+test "runtime raw evidence competes with derived memory and only stale evidence is dropped" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
+    defer runtime.deinit();
+
+    const requests = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"This repo uses npm.\",\"createdAt\":\"2026-01-01T10:00:00Z\"}]}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"We migrated this repo to pnpm. Use pnpm now.\",\"createdAt\":\"2026-02-01T10:00:00Z\"}]}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r3\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:test\"},\"messages\":[{\"role\":\"user\",\"content\":\"My cat is named Biscuit.\",\"createdAt\":\"2026-02-02T10:00:00Z\"}]}}",
+    };
+    for (requests) |request| {
+        const response = try runtime.dispatch(std.testing.allocator, request);
+        std.testing.allocator.free(response);
+    }
+
+    // Raw evidence stays next to the current fact; the superseded npm
+    // evidence is dropped because the current slot version is present.
+    const current = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"Which package manager does this repo use: npm or pnpm?\",\"scope\":{\"projectId\":\"repo:test\"},\"options\":{\"logRetrieval\":false,\"logAudit\":false}}}",
+    );
+    defer std.testing.allocator.free(current);
+    try std.testing.expect(std.mem.indexOf(u8, current, "The repo uses pnpm as its package manager.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, current, "We migrated this repo to pnpm. Use pnpm now.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, current, "This repo uses npm.") == null);
+    try std.testing.expect(std.mem.indexOf(u8, current, "\"type\":\"memory_card\"") == null);
+
+    // An unrelated derived item no longer suppresses raw evidence.
+    const unrelated = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q2\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"package manager cat Biscuit\",\"scope\":{\"projectId\":\"repo:test\"},\"options\":{\"logRetrieval\":false,\"logAudit\":false}}}",
+    );
+    defer std.testing.allocator.free(unrelated);
+    try std.testing.expect(std.mem.indexOf(u8, unrelated, "The repo uses pnpm as its package manager.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unrelated, "My cat is named Biscuit.") != null);
+
+    // At a time when npm was current, its evidence is not stale.
+    const historical = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q3\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"Which package manager does this repo use: npm or pnpm?\",\"scope\":{\"projectId\":\"repo:test\"},\"time\":{\"validAt\":\"2026-01-15T10:00:00Z\"},\"options\":{\"logRetrieval\":false,\"logAudit\":false}}}",
+    );
+    defer std.testing.allocator.free(historical);
+    try std.testing.expect(std.mem.indexOf(u8, historical, "The repo uses npm as its package manager.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, historical, "This repo uses npm.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, historical, "pnpm") == null);
+}
+
+test "runtime retrieve defaults to a 4096 token budget" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
+    defer runtime.deinit();
+
+    const remember = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"messages\":[{\"role\":\"user\",\"content\":\"Budget marker note.\"}],\"extract\":false}}",
+    );
+    defer std.testing.allocator.free(remember);
+    const retrieve = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"budget marker\",\"options\":{\"includeDebug\":true,\"logRetrieval\":false,\"logAudit\":false}}}",
+    );
+    defer std.testing.allocator.free(retrieve);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "\"budgetTokens\":4096") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "Budget marker note.") != null);
 }
 
 const forgotten_sentence = "We finally booked the zanzibar ferry for June.";
