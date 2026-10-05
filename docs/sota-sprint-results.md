@@ -139,6 +139,22 @@ Two other findings:
   wrong temporal answers had every gold turn in context. The reader resolves
   relative dates against the wrong session.
 
+## Protocol correction: question time
+
+LongMemEval sometimes stamps an evidence session later on the question's day
+than the question itself. Every daemon run above sent the exact question time
+as `time.validAt`, which filtered that evidence out. That affected 3 of the 70
+dev questions (all "which came first" temporal questions) and about 41 of
+roughly 470 non-abstention questions in the full set, 40 of them
+temporal-reasoning. The E1 reference applies no time filter, so this
+understated the daemon on exactly the temporal questions it seemed to fail.
+
+From `8a2ded1`, the harness sends the end of the question's day (`--valid-at
+end-of-day`, the new default). The reader's current date is unchanged, and
+same-day evidence is no longer dropped. `--valid-at question` reproduces the
+earlier runs. Results above have not been re-measured; re-measuring is blocked
+until the provider account has credit.
+
 ## What we learned
 
 - **The reader is now the bottleneck, not retrieval.** At 4K, 93% of gold
