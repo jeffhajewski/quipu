@@ -13,6 +13,12 @@ hits. Full-text hits are returned sorted by descending score and truncated only
 after sorting. An empty query enumerates every node, including unsearchable
 ones; maintenance paths (forget closure, core blocks, job leasing) use that.
 
+A message or chunk whose role is a speaker's name rather than a generic role
+(`user`, `assistant`, `system`, `tool`, `developer`, `function`) gets
+`searchText = "<role>: <text>"`. In a multi-party transcript, a speaker's own
+lines then match searches for their name. Embeddings use the same text.
+Generic roles keep content-only indexing.
+
 The in-memory adapter scores full-text queries with BM25 (k1 = 1.2, b = 0.75)
 over lowercased alphanumeric tokens, with a small stopword list and simple
 plural folding. Its vector mode returns no hits because it does not advertise

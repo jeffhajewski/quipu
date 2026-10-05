@@ -627,7 +627,13 @@ pub const Runtime = struct {
                 .deleted = false,
             });
             defer allocator.free(message_props);
-            try self.store.putNode(.{ .qid = message_qid, .label = "Message", .properties_json = message_props });
+            // Chunked messages are searched through their chunks, which carry the speaker text.
+            const message_node_props = if (chunked)
+                try allocator.dupe(u8, message_props)
+            else
+                try withSpeakerSearchText(allocator, message_props, role, content);
+            defer allocator.free(message_node_props);
+            try self.store.putNode(.{ .qid = message_qid, .label = "Message", .properties_json = message_node_props });
             try self.putEdge(allocator, turn_qid, message_qid, "HAS_MESSAGE");
             if (chunked) {
                 try self.writeMessageChunks(allocator, meta, content, chunk_ends);
@@ -1852,9 +1858,15 @@ pub const Runtime = struct {
     ) !void {
         var texts = std.ArrayList([]const u8).empty;
         defer texts.deinit(allocator);
+        // Speaker-prefixed index texts are built here; free them after the prefetch.
+        var owned = std.ArrayList([]u8).empty;
+        defer {
+            for (owned.items) |text| allocator.free(text);
+            owned.deinit(allocator);
+        }
         for (messages) |message_value| {
             const message = objectValue(message_value) orelse break;
-            if (stringField(&message, "role") == null) break;
+            const role = stringField(&message, "role") orelse break;
             const content = stringField(&message, "content") orelse break;
             if (content.len == 0) break;
 
@@ -1863,11 +1875,11 @@ pub const Runtime = struct {
             if (chunk_ends.len > 1) {
                 var start: usize = 0;
                 for (chunk_ends) |end| {
-                    try texts.append(allocator, content[start..end]);
+                    try appendIndexText(allocator, &texts, &owned, role, content[start..end]);
                     start = end;
                 }
             } else {
-                try texts.append(allocator, content);
+                try appendIndexText(allocator, &texts, &owned, role, content);
             }
 
             if (extract_enabled) {
@@ -1915,7 +1927,9 @@ pub const Runtime = struct {
                 .deleted = false,
             });
             defer allocator.free(props);
-            try self.store.putNode(.{ .qid = chunk_qid, .label = "Chunk", .properties_json = props });
+            const chunk_node_props = try withSpeakerSearchText(allocator, props, meta.role, content[start..end]);
+            defer allocator.free(chunk_node_props);
+            try self.store.putNode(.{ .qid = chunk_qid, .label = "Chunk", .properties_json = chunk_node_props });
             try self.putDeterministicEdge(allocator, meta.message_qid, chunk_qid, "HAS_CHUNK");
             try self.putDeterministicEdge(allocator, chunk_qid, meta.message_qid, "EVIDENCED_BY");
             start = end;
@@ -4621,6 +4635,54 @@ fn isAsciiWhitespace(byte: u8) bool {
     return byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r';
 }
 
+/// Generic chat roles. Any other role is taken to be a speaker's name, as in
+/// multi-party transcripts where each line's role is the person speaking.
+const generic_message_roles = [_][]const u8{ "user", "assistant", "system", "tool", "developer", "function" };
+
+fn speakerNamesRole(role: []const u8) bool {
+    if (std.mem.trim(u8, role, " \t\r\n").len == 0) return false;
+    for (generic_message_roles) |generic| {
+        if (std.ascii.eqlIgnoreCase(role, generic)) return false;
+    }
+    return true;
+}
+
+/// `Role: text` when the role names a speaker, so the speaker's own lines
+/// match searches for their name; null for generic roles, whose nodes are
+/// indexed by `content` as before.
+fn speakerSearchText(allocator: std.mem.Allocator, role: []const u8, text: []const u8) !?[]u8 {
+    if (!speakerNamesRole(role)) return null;
+    return try std.fmt.allocPrint(allocator, "{s}: {s}", .{ role, text });
+}
+
+/// Returns `props_json` with a leading `searchText` field when the role names
+/// a speaker, otherwise an unchanged copy.
+fn withSpeakerSearchText(allocator: std.mem.Allocator, props_json: []const u8, role: []const u8, text: []const u8) ![]u8 {
+    const search_text = (try speakerSearchText(allocator, role, text)) orelse return allocator.dupe(u8, props_json);
+    defer allocator.free(search_text);
+    std.debug.assert(props_json.len >= 2 and props_json[0] == '{');
+    const encoded = try stringifyAlloc(allocator, search_text);
+    defer allocator.free(encoded);
+    const separator: []const u8 = if (props_json.len > 2) "," else "";
+    return std.fmt.allocPrint(allocator, "{{\"searchText\":{s}{s}{s}", .{ encoded, separator, props_json[1..] });
+}
+
+fn appendIndexText(
+    allocator: std.mem.Allocator,
+    texts: *std.ArrayList([]const u8),
+    owned: *std.ArrayList([]u8),
+    role: []const u8,
+    text: []const u8,
+) !void {
+    if (try speakerSearchText(allocator, role, text)) |search_text| {
+        errdefer allocator.free(search_text);
+        try owned.append(allocator, search_text);
+        try texts.append(allocator, search_text);
+    } else {
+        try texts.append(allocator, text);
+    }
+}
+
 fn chunkQid(allocator: std.mem.Allocator, message_qid: []const u8, chunk_index: usize) ![]u8 {
     const suffix = if (std.mem.startsWith(u8, message_qid, "q_msg_")) message_qid["q_msg_".len..] else message_qid;
     return std.fmt.allocPrint(allocator, "q_chunk_{s}_{d}", .{ suffix, chunk_index });
@@ -6292,6 +6354,58 @@ fn testChunkCount(store: storage.Adapter, allocator: std.mem.Allocator, message_
     defer store.freeNode(allocator, node);
     const count = (try readOptionalPropertyInt(allocator, node.properties_json, "chunkCount")) orelse return error.TestUnexpectedResult;
     return @intCast(count);
+}
+
+test "speaker roles add a searchText prefix and generic roles do not" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(speakerNamesRole("Caroline"));
+    try std.testing.expect(!speakerNamesRole("user"));
+    try std.testing.expect(!speakerNamesRole("Assistant"));
+    try std.testing.expect(!speakerNamesRole(" "));
+
+    const named = try withSpeakerSearchText(allocator, "{\"kind\":\"message\"}", "Caroline", "I went to a \"pride\" parade.");
+    defer allocator.free(named);
+    try std.testing.expectEqualStrings("{\"searchText\":\"Caroline: I went to a \\\"pride\\\" parade.\",\"kind\":\"message\"}", named);
+    const generic = try withSpeakerSearchText(allocator, "{\"kind\":\"message\"}", "user", "hello");
+    defer allocator.free(generic);
+    try std.testing.expectEqualStrings("{\"kind\":\"message\"}", generic);
+}
+
+test "runtime finds a speaker's own lines by name" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+    var runtime = Runtime.init(store, harness.health());
+    defer runtime.deinit();
+
+    const remembered = try runtime.dispatch(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"userId\":\"u1\"},\"sessionId\":\"s1\",\"extract\":false,\"messages\":[{\"role\":\"Caroline\",\"content\":\"I signed up for the pottery workshop.\",\"createdAt\":\"2023-05-08T13:56:00Z\"},{\"role\":\"Melanie\",\"content\":\"Sounds fun, enjoy the clay!\",\"createdAt\":\"2023-05-08T13:56:01Z\"},{\"role\":\"user\",\"content\":\"A generic line about pottery.\",\"createdAt\":\"2023-05-08T13:56:02Z\"}]}}",
+    );
+    defer allocator.free(remembered);
+
+    const hits = try store.fullTextSearch(allocator, .{ .text = "Caroline", .limit = 10 });
+    defer {
+        for (hits) |hit| allocator.free(hit.qid);
+        allocator.free(hits);
+    }
+    try std.testing.expectEqual(@as(usize, 1), hits.len);
+    const caroline = (try store.getNode(allocator, hits[0].qid)) orelse return error.TestUnexpectedResult;
+    defer store.freeNode(allocator, caroline);
+    try std.testing.expect(try propertyEquals(allocator, caroline.properties_json, "role", "Caroline"));
+    try std.testing.expect(try propertyEquals(allocator, caroline.properties_json, "content", "I signed up for the pottery workshop."));
+
+    // Generic roles keep content-only indexing.
+    const generic_hits = try store.fullTextSearch(allocator, .{ .text = "generic", .limit = 10 });
+    defer {
+        for (generic_hits) |hit| allocator.free(hit.qid);
+        allocator.free(generic_hits);
+    }
+    try std.testing.expectEqual(@as(usize, 1), generic_hits.len);
+    const generic = (try store.getNode(allocator, generic_hits[0].qid)) orelse return error.TestUnexpectedResult;
+    defer store.freeNode(allocator, generic);
+    try std.testing.expect(std.mem.indexOf(u8, generic.properties_json, "searchText") == null);
 }
 
 test "runtime chunks long messages and maps chunk hits to the parent message" {
