@@ -2,6 +2,7 @@ const std = @import("std");
 const answer_synthesis = @import("answer_synthesis.zig");
 const build_options = @import("build_options");
 const extractor = @import("extractor.zig");
+const forgetting = @import("forgetting.zig");
 const in_memory_storage = if (build_options.enable_lattice) struct {} else @import("in_memory_storage.zig");
 const jobs = @import("jobs.zig");
 const lattice_storage = if (build_options.enable_lattice) @import("lattice_storage.zig") else struct {};
@@ -39,6 +40,10 @@ const retrieval_candidate_limit: usize = 80;
 const default_rerank_candidates: usize = 50;
 /// Rerank scores listed in the retrieval trace.
 const rerank_trace_top_scores: usize = 10;
+/// Audit events read per stream page by memory.inspect.
+const audit_page_size: usize = 1000;
+/// Related cards a new memory card links to.
+const related_card_limit: usize = 8;
 
 const Scope = struct {
     tenant_id: ?[]const u8 = null,
@@ -1174,6 +1179,11 @@ pub const Runtime = struct {
         defer report.deinit();
         var contaminated_core_qids = OwnedQids{ .allocator = allocator };
         defer contaminated_core_qids.deinit();
+        // Every node this request forgets, so one reached from several roots
+        // is reported and tombstoned once.
+        var handled = forgetting.QidList.init(allocator);
+        defer handled.deinit();
+        for (selected_qids.items.items) |qid| _ = try handled.appendUnique(qid);
 
         const root_action: []const u8 = if (dry_run)
             if (std.mem.eql(u8, mode, "redact")) "would_redact" else "would_delete"
@@ -1190,45 +1200,49 @@ pub const Runtime = struct {
             roots_matched += 1;
             try report.append(allocator, qid, labelType(node.label), root_action);
 
-            if (propagate) {
-                var dependents = try self.derivedRefsByEvidence(allocator, qid);
-                defer dependents.deinit();
-                for (dependents.items.items) |dependent| {
-                    if (isFactLikeType(dependent.type)) facts_invalidated += 1;
-                }
-                for (dependents.items.items) |dependent| {
-                    try report.append(allocator, dependent.qid, dependent.type, dependent_action);
-                }
-
-                try self.appendCoreClosureRefs(allocator, qid, &contaminated_core_qids, &report, core_action);
-                for (dependents.items.items) |dependent| {
-                    try self.appendCoreClosureRefs(allocator, dependent.qid, &contaminated_core_qids, &report, core_action);
-                }
-            }
-
+            // The root and its chunks: the evidence the closure starts from.
+            var forgotten = forgetting.QidList.init(allocator);
+            defer forgotten.deinit();
+            _ = try forgotten.appendUnique(qid);
             // Chunks hold the message's raw text, so they are forgotten with
             // it regardless of `propagate`.
             const chunk_count = if (std.mem.eql(u8, node.label, "Message"))
-                try self.forgetMessageChunks(allocator, qid, reason, mode, dry_run, &report, root_action)
+                try self.forgetMessageChunks(allocator, qid, reason, mode, dry_run, &report, root_action, &handled, &forgotten)
             else
                 0;
 
             if (!dry_run) {
-                try self.tombstoneNode(allocator, qid, node.label, reason, mode);
+                try self.tombstoneNode(allocator, node, reason, mode);
                 if (std.mem.eql(u8, mode, "redact")) {
                     nodes_redacted += 1 + chunk_count;
                 } else {
                     nodes_deleted += 1 + chunk_count;
                 }
-                if (propagate) _ = try self.tombstoneDerivedByEvidence(allocator, qid, reason, "hard_delete");
+            }
+            if (!propagate) continue;
+
+            var dependents = try self.dependentClosure(allocator, forgotten.items.items, &handled);
+            defer dependents.deinit();
+            for (dependents.items.items) |dependent| {
+                if (isFactLikeType(dependent.type)) facts_invalidated += 1;
+                try report.append(allocator, dependent.qid, dependent.type, dependent_action);
+            }
+            for (forgotten.items.items) |source| {
+                try self.appendCoreClosureRefs(allocator, source, &contaminated_core_qids, &handled, &report, core_action);
+            }
+            for (dependents.items.items) |dependent| {
+                try self.appendCoreClosureRefs(allocator, dependent.qid, &contaminated_core_qids, &handled, &report, core_action);
+            }
+            if (!dry_run) {
+                for (dependents.items.items) |dependent| {
+                    try self.tombstoneQid(allocator, dependent.qid, reason, "hard_delete");
+                }
             }
         }
         summaries_contaminated = contaminated_core_qids.items.items.len;
         if (!dry_run and propagate) {
             for (contaminated_core_qids.items.items) |core_qid| {
-                const core_node = (try self.store.getNode(allocator, core_qid)) orelse continue;
-                defer self.store.freeNode(allocator, core_node);
-                try self.tombstoneNode(allocator, core_qid, core_node.label, reason, mode);
+                try self.tombstoneQid(allocator, core_qid, reason, mode);
             }
         }
 
@@ -1288,7 +1302,9 @@ pub const Runtime = struct {
 
         const query = stringField(selector, "query") orelse return;
         if (query.len == 0) return;
-        const hits = try self.store.fullTextSearch(allocator, .{ .text = query, .limit = 1000 });
+        // Every match, not a top-k: a forget selector must not miss evidence
+        // because it ranked low.
+        const hits = try self.store.fullTextSearch(allocator, .{ .text = query, .limit = storage.unlimited });
         defer freeHits(allocator, hits);
         for (hits) |hit| {
             try self.selectForgetRoot(allocator, hit.qid, scope, window, selected_qids, true);
@@ -1323,7 +1339,7 @@ pub const Runtime = struct {
         try selected_qids.appendUnique(allocator, node.qid);
 
         if (std.mem.eql(u8, node.label, "Session")) {
-            const turn_edges = try self.store.findEdges(allocator, .{ .from_qid = node.qid, .edge_type = "HAS_TURN", .limit = 100_000 });
+            const turn_edges = try self.store.findEdges(allocator, .{ .from_qid = node.qid, .edge_type = "HAS_TURN", .limit = storage.unlimited });
             defer self.store.freeEdges(allocator, turn_edges);
             for (turn_edges) |edge| {
                 try self.selectTurnMessages(allocator, edge.to_qid, selected_qids);
@@ -1334,7 +1350,7 @@ pub const Runtime = struct {
     }
 
     fn selectTurnMessages(self: *Runtime, allocator: std.mem.Allocator, turn_qid: []const u8, selected_qids: *OwnedQids) !void {
-        const message_edges = try self.store.findEdges(allocator, .{ .from_qid = turn_qid, .edge_type = "HAS_MESSAGE", .limit = 100_000 });
+        const message_edges = try self.store.findEdges(allocator, .{ .from_qid = turn_qid, .edge_type = "HAS_MESSAGE", .limit = storage.unlimited });
         defer self.store.freeEdges(allocator, message_edges);
         for (message_edges) |edge| {
             const message = (try self.store.getNode(allocator, edge.to_qid)) orelse continue;
@@ -1346,7 +1362,8 @@ pub const Runtime = struct {
     }
 
     /// Tombstones (or, on a dry run, only reports) every live chunk of a
-    /// message. Uses HAS_CHUNK edges rather than node enumeration.
+    /// message, and adds each to `forgotten`. Uses HAS_CHUNK edges rather
+    /// than node enumeration.
     fn forgetMessageChunks(
         self: *Runtime,
         allocator: std.mem.Allocator,
@@ -1356,43 +1373,81 @@ pub const Runtime = struct {
         dry_run: bool,
         report: *OwnedForgetReport,
         action: []const u8,
+        handled: *forgetting.QidList,
+        forgotten: *forgetting.QidList,
     ) !usize {
-        const chunk_edges = try self.store.findEdges(allocator, .{ .from_qid = message_qid, .edge_type = "HAS_CHUNK", .limit = 100_000 });
+        const chunk_edges = try self.store.findEdges(allocator, .{ .from_qid = message_qid, .edge_type = "HAS_CHUNK", .limit = storage.unlimited });
         defer self.store.freeEdges(allocator, chunk_edges);
-        var forgotten: usize = 0;
+        var count: usize = 0;
         for (chunk_edges) |edge| {
             const chunk = (try self.store.getNode(allocator, edge.to_qid)) orelse continue;
             defer self.store.freeNode(allocator, chunk);
             if (!std.mem.eql(u8, chunk.label, "Chunk")) continue;
             if (try propertyBool(allocator, chunk.properties_json, "deleted")) continue;
+            _ = try forgotten.appendUnique(chunk.qid);
+            if (!try handled.appendUnique(chunk.qid)) continue;
             try report.append(allocator, chunk.qid, "chunk", action);
-            if (!dry_run) try self.tombstoneNode(allocator, chunk.qid, chunk.label, reason, mode);
-            forgotten += 1;
+            if (!dry_run) try self.tombstoneNode(allocator, chunk, reason, mode);
+            count += 1;
         }
-        return forgotten;
+        return count;
     }
 
+    /// Live nodes derived from any of `seeds`, transitively and whatever their
+    /// label: anything with an EVIDENCED_BY or DERIVED_FROM edge (or an
+    /// `evidenceQid`) to forgotten evidence, then anything derived from those.
+    /// Chunks are raw parts of their message, forgotten with it, so they are
+    /// never dependents. Skips and records nodes in `handled`.
+    fn dependentClosure(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        seeds: []const []const u8,
+        handled: *forgetting.QidList,
+    ) !OwnedNodeRefs {
+        var refs = OwnedNodeRefs{ .allocator = allocator };
+        errdefer refs.deinit();
+        var queue = forgetting.QidList.init(allocator);
+        defer queue.deinit();
+        for (seeds) |seed| _ = try queue.appendUnique(seed);
+
+        var position: usize = 0;
+        while (position < queue.items.items.len) : (position += 1) {
+            var direct = try forgetting.dependentQids(allocator, self.store, queue.items.items[position]);
+            defer direct.deinit();
+            for (direct.items.items) |dependent_qid| {
+                if (handled.contains(dependent_qid)) continue;
+                const node = (try self.store.getNode(allocator, dependent_qid)) orelse continue;
+                defer self.store.freeNode(allocator, node);
+                if (std.mem.eql(u8, node.label, "Chunk")) continue;
+                if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+                _ = try handled.appendUnique(dependent_qid);
+                try refs.append(allocator, dependent_qid, labelType(node.label), "derived_from");
+                _ = try queue.appendUnique(dependent_qid);
+            }
+        }
+        return refs;
+    }
+
+    /// Adds every live node compiled from `source_qid` (core blocks, through
+    /// COMPILED_FROM edges) to the contaminated set.
     fn appendCoreClosureRefs(
         self: *Runtime,
         allocator: std.mem.Allocator,
         source_qid: []const u8,
         contaminated_core_qids: *OwnedQids,
+        handled: *const forgetting.QidList,
         report: *OwnedForgetReport,
         action: []const u8,
     ) !void {
-        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
-        defer freeHits(allocator, hits);
-        for (hits) |hit| {
-            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+        var blocks = try forgetting.compiledFromQids(allocator, self.store, source_qid);
+        defer blocks.deinit();
+        for (blocks.items.items) |block_qid| {
+            if (contaminated_core_qids.contains(block_qid) or handled.contains(block_qid)) continue;
+            const node = (try self.store.getNode(allocator, block_qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
-            if (!std.mem.eql(u8, node.label, "Core")) continue;
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
-            if (!try propertyStringArrayContains(allocator, node.properties_json, "evidenceQids", source_qid)) continue;
-            const already_seen = contaminated_core_qids.contains(node.qid);
-            try contaminated_core_qids.appendUnique(allocator, node.qid);
-            if (!already_seen) {
-                try report.append(allocator, node.qid, "core", action);
-            }
+            try contaminated_core_qids.appendUnique(allocator, block_qid);
+            try report.append(allocator, block_qid, labelType(node.label), action);
         }
     }
 
@@ -1494,8 +1549,12 @@ pub const Runtime = struct {
     fn memoryCoreGet(self: *Runtime, allocator: std.mem.Allocator, id: ?[]const u8, params: *const ObjectMap) ![]u8 {
         const scope = parseScope(params);
         const requested_key = stringField(params, "blockKey");
-        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
-        defer freeHits(allocator, hits);
+        const key_match = [_]storage.PropertyMatch{.{ .name = "blockKey", .value = requested_key orelse "" }};
+        var core_nodes = self.store.iterateNodes(allocator, .{
+            .label = "Core",
+            .where = if (requested_key != null) &key_match else &.{},
+        });
+        defer core_nodes.deinit();
 
         var blocks = std.ArrayList(CoreBlockResult).empty;
         defer {
@@ -1510,8 +1569,8 @@ pub const Runtime = struct {
             blocks.deinit(allocator);
         }
 
-        for (hits) |hit| {
-            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+        while (try core_nodes.next()) |core_qid| {
+            const node = (try self.store.getNode(allocator, core_qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
             if (!std.mem.eql(u8, node.label, "Core")) continue;
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
@@ -1570,11 +1629,12 @@ pub const Runtime = struct {
             evidence_qids.deinit(allocator);
         }
 
-        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
-        defer freeHits(allocator, hits);
-        for (hits) |hit| {
+        // Oldest first across the whole store, paged, until `limit` sources.
+        var candidates = self.store.iterateNodes(allocator, .{});
+        defer candidates.deinit();
+        while (try candidates.next()) |candidate_qid| {
             if (evidence_qids.items.len >= limit) break;
-            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+            const node = (try self.store.getNode(allocator, candidate_qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
             if (!isConsolidatableLabel(node.label)) continue;
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
@@ -1668,15 +1728,25 @@ pub const Runtime = struct {
         return self.store.appendStream(stream, payload_json);
     }
 
+    /// Every audit event whose payload names `qid` as a JSON string, read a
+    /// page at a time to the end of the stream.
     fn auditEventsForQid(self: *Runtime, allocator: std.mem.Allocator, qid: []const u8) !OwnedAuditEvents {
-        const entries = try self.store.readStream(allocator, streams.audit, 0, 1000);
-        defer freeStreamEntries(allocator, entries);
+        const needle = try std.fmt.allocPrint(allocator, "\"{s}\"", .{qid});
+        defer allocator.free(needle);
 
         var audit = OwnedAuditEvents{ .allocator = allocator };
         errdefer audit.deinit();
-        for (entries) |entry| {
-            if (std.mem.indexOf(u8, entry.payload_json, qid) == null) continue;
-            try audit.append(allocator, entry.stream, entry.sequence, entry.payload_json);
+        var after: u64 = 0;
+        while (true) {
+            const entries = try self.store.readStream(allocator, streams.audit, after, audit_page_size);
+            defer freeStreamEntries(allocator, entries);
+            if (entries.len == 0) break;
+            for (entries) |entry| {
+                after = @max(after, entry.sequence);
+                if (std.mem.indexOf(u8, entry.payload_json, needle) == null) continue;
+                try audit.append(allocator, entry.stream, entry.sequence, entry.payload_json);
+            }
+            if (entries.len < audit_page_size) break;
         }
         return audit;
     }
@@ -1809,6 +1879,9 @@ pub const Runtime = struct {
         }
     }
 
+    /// Up to `related_card_limit` live cards in scope that share the
+    /// candidate's slot, newest first, then cards of the same kind, newest
+    /// first.
     fn relatedCardQidsForCandidate(
         self: *Runtime,
         allocator: std.mem.Allocator,
@@ -1816,25 +1889,33 @@ pub const Runtime = struct {
         card_qid: []const u8,
         candidate: extractor.Candidate,
     ) ![]const []const u8 {
-        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
-        defer freeHits(allocator, hits);
         var related = std.ArrayList([]const u8).empty;
         errdefer {
             for (related.items) |qid| allocator.free(qid);
             related.deinit(allocator);
         }
-        for (hits) |hit| {
-            if (related.items.len >= 8) break;
-            if (std.mem.eql(u8, hit.qid, card_qid)) continue;
-            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
-            defer self.store.freeNode(allocator, node);
-            if (!std.mem.eql(u8, node.label, "MemoryCard")) continue;
-            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
-            if (!try scope.matchesNode(allocator, node)) continue;
-            const same_slot = try propertyEquals(allocator, node.properties_json, "slotKey", candidate.slot_key);
-            const same_kind = try propertyEquals(allocator, node.properties_json, "cardKind", memoryCardKind(candidate.label));
-            if (!same_slot and !same_kind) continue;
-            try related.append(allocator, try allocator.dupe(u8, node.qid));
+        const lookups = [_]storage.PropertyMatch{
+            .{ .name = "slotKey", .value = candidate.slot_key },
+            .{ .name = "cardKind", .value = memoryCardKind(candidate.label) },
+        };
+        for (lookups) |match| {
+            const where = [_]storage.PropertyMatch{match};
+            var cards = self.store.iterateNodes(allocator, .{
+                .label = "MemoryCard",
+                .where = &where,
+                .order = .newest_first,
+                .limit = 64,
+            });
+            defer cards.deinit();
+            while (try cards.next()) |qid| {
+                if (related.items.len >= related_card_limit) break;
+                if (std.mem.eql(u8, qid, card_qid) or stringListContains(related.items, qid)) continue;
+                const node = (try self.store.getNode(allocator, qid)) orelse continue;
+                defer self.store.freeNode(allocator, node);
+                if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+                if (!try scope.matchesNode(allocator, node)) continue;
+                try related.append(allocator, try allocator.dupe(u8, node.qid));
+            }
         }
         return related.toOwnedSlice(allocator);
     }
@@ -2025,12 +2106,17 @@ pub const Runtime = struct {
         return written;
     }
 
+    /// Marks every current slot memory with `slot_key` in `scope` superseded.
+    /// The slot and state indexes find them wherever they sit in the store.
     fn supersedeCurrentSlot(self: *Runtime, allocator: std.mem.Allocator, scope: Scope, slot_key: []const u8, valid_to: ?[]const u8) !void {
-        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
-        defer freeHits(allocator, hits);
-
-        for (hits) |hit| {
-            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+        const where = [_]storage.PropertyMatch{
+            .{ .name = "slotKey", .value = slot_key },
+            .{ .name = "state", .value = "current" },
+        };
+        var current = self.store.iterateNodes(allocator, .{ .where = &where });
+        defer current.deinit();
+        while (try current.next()) |qid| {
+            const node = (try self.store.getNode(allocator, qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
             if (!isSlotMemoryLabel(node.label)) continue;
             if (!try scope.matchesNode(allocator, node)) continue;
@@ -2041,6 +2127,9 @@ pub const Runtime = struct {
         }
     }
 
+    /// Sets `state` and `validTo` and keeps every other property, so a
+    /// superseded card keeps its card fields and any label's extra fields
+    /// survive.
     fn rewriteDerivedState(
         self: *Runtime,
         allocator: std.mem.Allocator,
@@ -2048,128 +2137,99 @@ pub const Runtime = struct {
         state: []const u8,
         valid_to: ?[]const u8,
     ) !void {
-        const text = try readPropertyString(allocator, node.properties_json, "text");
-        defer allocator.free(text);
-        const slot_key = try readPropertyString(allocator, node.properties_json, "slotKey");
-        defer allocator.free(slot_key);
-        const subject = try readOptionalPropertyString(allocator, node.properties_json, "subject");
-        defer if (subject) |value_to_free| allocator.free(value_to_free);
-        const attribute = try readOptionalPropertyString(allocator, node.properties_json, "attribute");
-        defer if (attribute) |value_to_free| allocator.free(value_to_free);
-        const value = try readPropertyString(allocator, node.properties_json, "value");
-        defer allocator.free(value);
-        const numeric_value = try readOptionalPropertyInt(allocator, node.properties_json, "numericValue");
-        const unit = try readOptionalPropertyString(allocator, node.properties_json, "unit");
-        defer if (unit) |value_to_free| allocator.free(value_to_free);
-        const aggregation_mode = try readOptionalPropertyString(allocator, node.properties_json, "aggregationMode");
-        defer if (aggregation_mode) |value_to_free| allocator.free(value_to_free);
-        const evidence_qid = try readPropertyString(allocator, node.properties_json, "evidenceQid");
-        defer allocator.free(evidence_qid);
-        const quote = try readPropertyString(allocator, node.properties_json, "quote");
-        defer allocator.free(quote);
-        const valid_from = try readOptionalPropertyString(allocator, node.properties_json, "validFrom");
-        defer if (valid_from) |value_to_free| allocator.free(value_to_free);
-        const tenant_id = try readOptionalPropertyString(allocator, node.properties_json, "tenantId");
-        defer if (tenant_id) |value_to_free| allocator.free(value_to_free);
-        const user_id = try readOptionalPropertyString(allocator, node.properties_json, "userId");
-        defer if (user_id) |value_to_free| allocator.free(value_to_free);
-        const agent_id = try readOptionalPropertyString(allocator, node.properties_json, "agentId");
-        defer if (agent_id) |value_to_free| allocator.free(value_to_free);
-        const project_id = try readOptionalPropertyString(allocator, node.properties_json, "projectId");
-        defer if (project_id) |value_to_free| allocator.free(value_to_free);
-
-        const props = try stringifyAlloc(allocator, .{
-            .kind = labelType(node.label),
-            .text = text,
-            .slotKey = slot_key,
-            .subject = subject,
-            .attribute = attribute,
-            .value = value,
-            .numericValue = numeric_value,
-            .unit = unit,
-            .aggregationMode = aggregation_mode orelse "single_value",
-            .state = state,
-            .validFrom = valid_from,
-            .validTo = valid_to,
-            .evidenceQid = evidence_qid,
-            .quote = quote,
-            .tenantId = tenant_id,
-            .userId = user_id,
-            .agentId = agent_id,
-            .projectId = project_id,
-            .deleted = false,
-        });
+        var parsed = try std.json.parseFromSlice(Value, allocator, node.properties_json, .{});
+        defer parsed.deinit();
+        const arena = parsed.arena.allocator();
+        switch (parsed.value) {
+            .object => |*object| {
+                try object.put(arena, "state", .{ .string = state });
+                try object.put(arena, "validTo", if (valid_to) |value| .{ .string = value } else .null);
+            },
+            else => return error.InvalidRequest,
+        }
+        const props = try stringifyAlloc(allocator, parsed.value);
         defer allocator.free(props);
         try self.store.putNode(.{ .qid = node.qid, .label = node.label, .properties_json = props });
     }
 
+    /// What `node` was derived or compiled from: the targets of its
+    /// EVIDENCED_BY, DERIVED_FROM and COMPILED_FROM edges, plus the node its
+    /// `evidenceQid` (or a chunk's `messageQid`) names when no edge records it.
     fn provenanceRefsForNode(self: *Runtime, allocator: std.mem.Allocator, node: storage.Node) !OwnedNodeRefs {
         var refs = OwnedNodeRefs{ .allocator = allocator };
         errdefer refs.deinit();
+        var seen = forgetting.QidList.init(allocator);
+        defer seen.deinit();
 
-        if (std.mem.eql(u8, node.label, "Chunk")) {
-            const message_qid = (try readOptionalPropertyString(allocator, node.properties_json, "messageQid")) orelse return refs;
-            defer allocator.free(message_qid);
-            const message = (try self.store.getNode(allocator, message_qid)) orelse return refs;
-            defer self.store.freeNode(allocator, message);
-            try refs.append(allocator, message_qid, labelType(message.label), "evidenced_by");
-            return refs;
+        const relations = [_][2][]const u8{
+            .{ "EVIDENCED_BY", "evidenced_by" },
+            .{ "DERIVED_FROM", "derived_from" },
+            .{ forgetting.compiled_edge_type, "compiled_from" },
+        };
+        for (relations) |relation| {
+            const edges = try self.store.findEdges(allocator, .{ .from_qid = node.qid, .edge_type = relation[0], .limit = storage.unlimited });
+            defer self.store.freeEdges(allocator, edges);
+            for (edges) |edge| {
+                if (seen.contains(edge.to_qid)) continue;
+                const target = (try self.store.getNode(allocator, edge.to_qid)) orelse continue;
+                defer self.store.freeNode(allocator, target);
+                _ = try seen.appendUnique(edge.to_qid);
+                try refs.append(allocator, edge.to_qid, labelType(target.label), relation[1]);
+            }
         }
-        if (!isEvidenceLinkedLabel(node.label)) return refs;
-        const evidence_qid = try readOptionalPropertyString(allocator, node.properties_json, "evidenceQid");
-        defer if (evidence_qid) |qid| allocator.free(qid);
-        if (evidence_qid) |qid| {
-            const evidence_node = (try self.store.getNode(allocator, qid)) orelse return refs;
-            defer self.store.freeNode(allocator, evidence_node);
-            try refs.append(allocator, qid, labelType(evidence_node.label), "evidenced_by");
-        }
+
+        const property_key: []const u8 = if (std.mem.eql(u8, node.label, "Chunk")) "messageQid" else "evidenceQid";
+        const evidence_qid = (try readOptionalPropertyString(allocator, node.properties_json, property_key)) orelse return refs;
+        defer allocator.free(evidence_qid);
+        if (seen.contains(evidence_qid)) return refs;
+        const evidence_node = (try self.store.getNode(allocator, evidence_qid)) orelse return refs;
+        defer self.store.freeNode(allocator, evidence_node);
+        try refs.append(allocator, evidence_qid, labelType(evidence_node.label), "evidenced_by");
         return refs;
     }
 
+    /// Live nodes derived directly from `evidence_qid`, whatever their label.
+    /// Chunks are parts of their message, not derived memory.
     fn derivedRefsByEvidence(self: *Runtime, allocator: std.mem.Allocator, evidence_qid: []const u8) !OwnedNodeRefs {
-        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
-        defer freeHits(allocator, hits);
+        var direct = try forgetting.dependentQids(allocator, self.store, evidence_qid);
+        defer direct.deinit();
 
         var refs = OwnedNodeRefs{ .allocator = allocator };
         errdefer refs.deinit();
-        for (hits) |hit| {
-            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+        for (direct.items.items) |dependent_qid| {
+            const node = (try self.store.getNode(allocator, dependent_qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
-            if (!isEvidenceLinkedLabel(node.label)) continue;
+            if (std.mem.eql(u8, node.label, "Chunk")) continue;
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
-            if (!try propertyEquals(allocator, node.properties_json, "evidenceQid", evidence_qid)) continue;
             try refs.append(allocator, node.qid, labelType(node.label), "derived_from");
         }
         return refs;
     }
 
-    fn tombstoneDerivedByEvidence(self: *Runtime, allocator: std.mem.Allocator, evidence_qid: []const u8, reason: []const u8, mode: []const u8) !usize {
-        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
-        defer freeHits(allocator, hits);
-        var invalidated: usize = 0;
-        for (hits) |hit| {
-            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
-            defer self.store.freeNode(allocator, node);
-            if (!isEvidenceLinkedLabel(node.label)) continue;
-            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
-            if (!try propertyEquals(allocator, node.properties_json, "evidenceQid", evidence_qid)) continue;
-            try self.tombstoneNode(allocator, node.qid, node.label, reason, mode);
-            invalidated += 1;
-        }
-        return invalidated;
+    fn tombstoneQid(self: *Runtime, allocator: std.mem.Allocator, qid: []const u8, reason: []const u8, mode: []const u8) !void {
+        const node = (try self.store.getNode(allocator, qid)) orelse return;
+        defer self.store.freeNode(allocator, node);
+        try self.tombstoneNode(allocator, node, reason, mode);
     }
 
-    fn tombstoneNode(self: *Runtime, allocator: std.mem.Allocator, qid: []const u8, label: []const u8, reason: []const u8, mode: []const u8) !void {
+    /// Replaces a node's properties with a tombstone, which leaves every
+    /// search and vector index. Raw text survives only as fingerprints for
+    /// `verify leaks`. An existing tombstone is left as it is.
+    fn tombstoneNode(self: *Runtime, allocator: std.mem.Allocator, node: storage.Node, reason: []const u8, mode: []const u8) !void {
+        if (try propertyBool(allocator, node.properties_json, "deleted")) return;
+        const fingerprints = try forgetting.fingerprintNode(allocator, node.label, node.properties_json);
+        defer forgetting.freeFingerprints(allocator, fingerprints);
         const tombstone = try stringifyAlloc(allocator, .{
             .kind = "tombstone",
             .deleted = true,
             .state = if (std.mem.eql(u8, mode, "redact")) "redacted" else "deleted",
             .mode = mode,
             .reason = reason,
-            .previousLabel = label,
+            .previousLabel = node.label,
+            .leakFingerprints = fingerprints,
         });
         defer allocator.free(tombstone);
-        try self.store.putNode(.{ .qid = qid, .label = label, .properties_json = tombstone });
+        try self.store.putNode(.{ .qid = node.qid, .label = node.label, .properties_json = tombstone });
     }
 
     fn nextQid(self: *Runtime, allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
@@ -2364,7 +2424,7 @@ pub const Runtime = struct {
     }
 
     fn staleSlotKeysForMessage(self: *Runtime, allocator: std.mem.Allocator, message_qid: []const u8, valid_at: ?[]const u8) ![]const []const u8 {
-        const edges = try self.store.findEdges(allocator, .{ .to_qid = message_qid, .edge_type = "EVIDENCED_BY", .limit = 4096 });
+        const edges = try self.store.findEdges(allocator, .{ .to_qid = message_qid, .edge_type = "EVIDENCED_BY", .limit = storage.unlimited });
         defer self.store.freeEdges(allocator, edges);
 
         var stale = OwnedQids{ .allocator = allocator };
@@ -2558,11 +2618,11 @@ pub const Runtime = struct {
     }
 
     fn appendCoreItems(self: *Runtime, allocator: std.mem.Allocator, owned: *OwnedItems, scope: Scope, include_evidence: bool, include_debug: bool) !void {
-        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
-        defer freeHits(allocator, hits);
+        var core_nodes = self.store.iterateNodes(allocator, .{ .label = "Core" });
+        defer core_nodes.deinit();
 
-        for (hits) |hit| {
-            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+        while (try core_nodes.next()) |core_qid| {
+            const node = (try self.store.getNode(allocator, core_qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
             if (!std.mem.eql(u8, node.label, "Core")) continue;
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
@@ -2581,7 +2641,7 @@ pub const Runtime = struct {
                 .qid = result_qid,
                 .type = "core",
                 .text = text,
-                .score = hit.score,
+                .score = 1.0,
                 .state = state,
                 .evidence = evidence,
                 .includeDebug = include_debug,
@@ -2590,11 +2650,12 @@ pub const Runtime = struct {
     }
 
     fn findCoreBlockQid(self: *Runtime, allocator: std.mem.Allocator, scope: Scope, block_key: []const u8) !?[]u8 {
-        const hits = try self.store.fullTextSearch(allocator, .{ .text = "", .limit = 1000 });
-        defer freeHits(allocator, hits);
+        const where = [_]storage.PropertyMatch{.{ .name = "blockKey", .value = block_key }};
+        var blocks = self.store.iterateNodes(allocator, .{ .label = "Core", .where = &where });
+        defer blocks.deinit();
 
-        for (hits) |hit| {
-            const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+        while (try blocks.next()) |block_qid| {
+            const node = (try self.store.getNode(allocator, block_qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
             if (!std.mem.eql(u8, node.label, "Core")) continue;
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
@@ -3456,21 +3517,6 @@ fn propertyIsFalse(allocator: std.mem.Allocator, properties_json: []const u8, ke
         .bool => |boolean| !boolean,
         else => false,
     };
-}
-
-fn propertyStringArrayContains(allocator: std.mem.Allocator, properties_json: []const u8, key: []const u8, expected: []const u8) !bool {
-    var parsed = try std.json.parseFromSlice(Value, allocator, properties_json, .{});
-    defer parsed.deinit();
-    const object = switch (parsed.value) {
-        .object => |object| object,
-        else => return false,
-    };
-    const array = arrayValue(object.get(key)) orelse return false;
-    for (array.items) |item| {
-        const value = stringValue(item) orelse continue;
-        if (std.mem.eql(u8, value, expected)) return true;
-    }
-    return false;
 }
 
 fn textForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
