@@ -249,6 +249,18 @@ pub fn buildAnswerUserContent(allocator: std.mem.Allocator, request: AnswerReque
     return writer.toOwnedSlice();
 }
 
+/// Sends one chat turn and returns the reply text: HTTP endpoints go through
+/// the same request body, JSON mode and transient-error retries as the
+/// reader; callback endpoints receive the turn in process.
+pub fn completeChat(allocator: std.mem.Allocator, io: ?std.Io, endpoint: ProviderEndpoint, turn: ChatTurn) ![]u8 {
+    return switch (endpoint.kind) {
+        .none => error.ProviderUnavailable,
+        .deterministic, .command => error.UnsupportedProviderKind,
+        .callback => callProviderCallback(allocator, endpoint, turn),
+        .http => chatCompletionWithRetries(allocator, io orelse return error.ProviderUnavailable, endpoint, turn),
+    };
+}
+
 fn callProviderCallback(allocator: std.mem.Allocator, endpoint: ProviderEndpoint, turn: ChatTurn) ![]u8 {
     const callback = endpoint.callback orelse return error.InvalidProviderConfig;
     return callback.respond(callback.context, allocator, turn);
