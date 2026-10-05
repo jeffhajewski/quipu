@@ -149,6 +149,28 @@ def iso_time(value: str) -> str:
     return _parse_datetime(value).isoformat().replace("+00:00", "Z")
 
 
+VALID_AT_MODES = ("end-of-day", "question")
+
+
+def answer_valid_at(question_time: str, mode: str = "end-of-day") -> str:
+    """The ``time.validAt`` sent with each question.
+
+    LongMemEval sometimes stamps an evidence session later on the question's
+    own day than the question time, so filtering at the exact question time
+    drops evidence the benchmark treats as prior (E1 applies no time filter at
+    all). ``end-of-day`` keeps the question's date, which the reader sees as
+    the current date, but admits that same-day evidence; ``question`` is the
+    exact question time, as runs before this option used.
+    """
+    if mode == "question":
+        return question_time
+    if mode != "end-of-day":
+        raise ValueError(f"unknown validAt mode {mode!r}")
+    moment = _parse_datetime(question_time)
+    end = moment.replace(hour=23, minute=59, second=59, microsecond=0)
+    return end.isoformat().replace("+00:00", "Z")
+
+
 def build_case(item: Mapping[str, Any]) -> dict[str, Any]:
     """Convert one LongMemEval item into daemon-ready sessions.
 
@@ -500,7 +522,8 @@ def run_question(case: Mapping[str, Any], config: Mapping[str, Any], proxy: Any,
             for budget in budgets:
                 params: dict[str, Any] = {
                     "query": case["question"], "scope": case["scope"],
-                    "time": {"validAt": case["questionTime"]}, "budgetTokens": budget,
+                    "time": {"validAt": answer_valid_at(case["questionTime"], config.get("validAtMode", "question"))},
+                    "budgetTokens": budget,
                     "options": {**(config.get("answerOptions") or {}),
                                 "includeDebug": True, "includeEvidence": True},
                 }
@@ -872,6 +895,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "vectorDimensions": args.vector_dimensions, "readerModel": args.reader_model,
         "budgets": args.budgets, "extract": not args.no_extract, "needs": args.needs, "mode": args.mode,
         "daemonArgs": args.daemon_arg or [], "answerOptions": parse_answer_options(args.answer_option),
+        "validAtMode": args.valid_at,
         "rerankerUrl": args.reranker_url, "rerankerModel": args.reranker_model,
         "rememberTimeout": args.remember_timeout,
         "answerTimeout": args.answer_timeout,
@@ -1211,6 +1235,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--daemon-arg", action="append", help="extra daemon CLI argument (repeatable)")
     run.add_argument("--answer-option", action="append", metavar="KEY=JSON",
                      help="extra memory.answer option, value parsed as JSON (repeatable)")
+    run.add_argument("--valid-at", choices=VALID_AT_MODES, default="end-of-day",
+                     help="time.validAt per question: end of the question's day (default), or the exact "
+                          "question time as runs before this flag used")
     run.add_argument("--reranker-url", help="Cohere-compatible rerank endpoint for the daemon, "
                      "e.g. http://127.0.0.1:7341/v1/rerank (see quipu_evals.rerank_server)")
     run.add_argument("--reranker-model", help="model sent to the reranker (default: the rerank_server's model)")

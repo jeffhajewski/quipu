@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "evals" / "src"))
 
 from quipu_evals.rerank_server import RerankServer, RerankService, ScoreCache  # noqa: E402
 from quipu_evals.sota_longmemeval import (  # noqa: E402
-    build_case, coverage, daemon_command, item_turns, linked_message_qids, paired_comparison, parse_answer_options,
+    answer_valid_at, build_case, coverage, daemon_command, item_turns, linked_message_qids, paired_comparison, parse_answer_options,
     percentile, reader_context, render_context, rerank_summary, reranker_health, select_dev, summarize_rows,
 )
 
@@ -142,6 +142,14 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(percentile([1, 2, 3, 4], 0.5), 2)
         self.assertEqual(percentile(range(1, 101), 0.95), 95)
         self.assertIsNone(percentile([], 0.5))
+
+
+class ValidAtTests(unittest.TestCase):
+    def test_end_of_day_keeps_the_date_and_admits_later_same_day_evidence(self):
+        self.assertEqual(answer_valid_at("2023-05-30T07:03:00Z"), "2023-05-30T23:59:59Z")
+        self.assertEqual(answer_valid_at("2023-05-30T07:03:00Z", "question"), "2023-05-30T07:03:00Z")
+        with self.assertRaises(ValueError):
+            answer_valid_at("2023-05-30T07:03:00Z", "none")
 
 
 class AnswerOptionTests(unittest.TestCase):
