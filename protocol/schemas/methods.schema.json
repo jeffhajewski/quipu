@@ -155,7 +155,50 @@
             }
           }
         },
-        "rerank": { "$ref": "#/$defs/rerankTrace" }
+        "rerank": { "$ref": "#/$defs/rerankTrace" },
+        "queryExpansion": { "$ref": "#/$defs/queryExpansionTrace" }
+      }
+    },
+    "queryExpansionMode": {
+      "type": "string",
+      "enum": ["off", "rules", "llm"],
+      "description": "Query decomposition before candidate generation. off (default) runs the query alone; rules splits recognizable choices and intervals (\"which ... first, X or Y?\", \"between X and Y\") deterministically; llm asks the expansion provider (default: the answer provider) for up to four sub-queries, sending only the query text. The original query always runs, and the per-query candidate lists are fused."
+    },
+    "queryExpansionTrace": {
+      "type": "object",
+      "description": "Present in trace and answerTrace only when options.queryExpansion is rules or llm.",
+      "required": ["mode", "status", "model", "latencyMs", "queries", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["rules", "llm"] },
+        "status": {
+          "type": "string",
+          "enum": ["expanded", "unchanged", "failed"],
+          "description": "unchanged means there was nothing to split; failed means the expansion call or its validation failed, the original query ran alone, and the query_expansion_failed warning was added."
+        },
+        "model": { "type": ["string", "null"], "description": "The expansion model in llm mode." },
+        "latencyMs": { "type": "number", "minimum": 0 },
+        "queries": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Every query that ran, the original first.",
+          "items": {
+            "type": "object",
+            "required": ["query", "source", "hitCount", "topQids"],
+            "additionalProperties": false,
+            "properties": {
+              "query": { "type": "string", "minLength": 1 },
+              "source": { "type": "string", "enum": ["original", "rules", "llm"] },
+              "hitCount": { "type": "integer", "minimum": 0, "description": "Candidates this query returned before fusion." },
+              "topQids": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/qid" },
+                "description": "This query's leading candidates, which lead the fused list."
+              }
+            }
+          }
+        },
+        "error": { "type": ["string", "null"] }
       }
     },
     "rerankTrace": {
@@ -219,6 +262,7 @@
           "type": ["string", "null"],
           "description": "Relative time expressions from the query resolved to dates, as sent on the reader's Time references line; null when none matched or hints were off."
         },
+        "queryExpansion": { "$ref": "#/$defs/queryExpansionTrace" },
         "answerable": { "type": "boolean" },
         "supportQids": {
           "type": "array",
@@ -296,6 +340,22 @@
               "additionalProperties": false,
               "properties": {
                 "configured": { "type": "boolean" },
+                "model": { "type": ["string", "null"] }
+              }
+            },
+            "queryExpansion": {
+              "type": "object",
+              "required": ["modes", "llmConfigured", "model"],
+              "additionalProperties": false,
+              "properties": {
+                "modes": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/queryExpansionMode" }
+                },
+                "llmConfigured": {
+                  "type": "boolean",
+                  "description": "True when an expansion or answer chat provider can serve options.queryExpansion llm."
+                },
                 "model": { "type": ["string", "null"] }
               }
             }
@@ -421,6 +481,7 @@
               "type": "boolean",
               "description": "Append each session header's offset from time.validAt and a Time references line resolving the query's relative dates. Default false."
             },
+            "queryExpansion": { "$ref": "#/$defs/queryExpansionMode" },
             "format": { "type": "string", "enum": ["prompt", "json"] }
           }
         }
@@ -534,6 +595,7 @@
               "type": "boolean",
               "description": "Append each session header's offset from time.validAt and give the reader a Time references line resolving the query's relative dates. Default false."
             },
+            "queryExpansion": { "$ref": "#/$defs/queryExpansionMode" },
             "format": { "type": "string", "enum": ["prompt", "json"] }
           }
         }

@@ -1,0 +1,238 @@
+{
+  "name": "memory.answer with rules query expansion",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_answer_3",
+    "method": "memory.answer",
+    "params": {
+      "query": "Which gift did I buy first, the necklace for my sister or the photo album for my mom?",
+      "scope": {
+        "userId": "user-local"
+      },
+      "needs": [
+        "raw"
+      ],
+      "time": {
+        "validAt": "2023-05-30T23:40:00Z"
+      },
+      "options": {
+        "includeDebug": true,
+        "logRetrieval": false,
+        "queryExpansion": "rules"
+      }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_answer_3",
+    "result": {
+      "retrievalId": "q_retr_3",
+      "answer": "The photo album for your mom.",
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "prompt": "<memory>\n<sessions>\n## session s-album 2023-05-02 (Tue)\n[q_msg_9] user: I ordered a photo album for my mom.\n## session s-necklace 2023-05-10 (Wed)\n[q_msg_4] user: I bought a silver necklace as a gift for my sister.\n</sessions>\n</memory>",
+      "context": {
+        "core": [],
+        "currentFacts": [],
+        "preferences": [],
+        "procedural": [],
+        "episodes": [
+          {
+            "qid": "q_msg_9",
+            "type": "message",
+            "text": "I ordered a photo album for my mom.",
+            "score": 0.0489,
+            "confidence": 1.0,
+            "state": "current",
+            "validFrom": "2023-05-02T09:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "text": "I bought a silver necklace as a gift for my sister.",
+            "score": 0.0487,
+            "confidence": 1.0,
+            "state": "current",
+            "validFrom": "2023-05-10T10:00:00Z",
+            "validTo": null,
+            "evidence": []
+          }
+        ],
+        "warnings": []
+      },
+      "items": [
+        {
+          "qid": "q_msg_9",
+          "type": "message",
+          "text": "I ordered a photo album for my mom.",
+          "score": 0.0489,
+          "confidence": 1.0,
+          "state": "current",
+          "validFrom": "2023-05-02T09:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_4",
+          "type": "message",
+          "text": "I bought a silver necklace as a gift for my sister.",
+          "score": 0.0487,
+          "confidence": 1.0,
+          "state": "current",
+          "validFrom": "2023-05-10T10:00:00Z",
+          "validTo": null,
+          "evidence": []
+        }
+      ],
+      "tokenEstimate": 57,
+      "confidence": 0.85,
+      "warnings": [],
+      "trace": {
+        "query": "Which gift did I buy first, the necklace for my sister or the photo album for my mom?",
+        "requestedNeedsCount": 1,
+        "budgetTokens": 4096,
+        "candidateSources": {
+          "fts": 2,
+          "vector": 0,
+          "hybrid": 0,
+          "graph": 0,
+          "core": 0
+        },
+        "candidateCount": 2,
+        "keptCount": 2,
+        "droppedForNeeds": 0,
+        "droppedForBudget": 0,
+        "tokenEstimate": 57,
+        "validAt": "2023-05-30T23:40:00Z",
+        "scoreBreakdowns": [
+          {
+            "qid": "q_msg_9",
+            "type": "message",
+            "score": 0.0489,
+            "lexical": 0.0466,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "score": 0.0487,
+            "lexical": 0.0464,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          }
+        ],
+        "scoringDetails": [],
+        "droppedItemReasons": [],
+        "queryExpansion": {
+          "mode": "rules",
+          "status": "expanded",
+          "model": null,
+          "latencyMs": 0.17,
+          "queries": [
+            {
+              "query": "Which gift did I buy first, the necklace for my sister or the photo album for my mom?",
+              "source": "original",
+              "hitCount": 2,
+              "topQids": [
+                "q_msg_9",
+                "q_msg_4"
+              ]
+            },
+            {
+              "query": "the necklace for my sister",
+              "source": "rules",
+              "hitCount": 2,
+              "topQids": [
+                "q_msg_4",
+                "q_msg_9"
+              ]
+            },
+            {
+              "query": "the photo album for my mom",
+              "source": "rules",
+              "hitCount": 2,
+              "topQids": [
+                "q_msg_9",
+                "q_msg_4"
+              ]
+            }
+          ],
+          "error": null
+        }
+      },
+      "answerTrace": {
+        "strategy": "llm_reader",
+        "readerMode": "direct",
+        "temporalHints": false,
+        "timeReferences": null,
+        "queryExpansion": {
+          "mode": "rules",
+          "status": "expanded",
+          "model": null,
+          "latencyMs": 0.17,
+          "queries": [
+            {
+              "query": "Which gift did I buy first, the necklace for my sister or the photo album for my mom?",
+              "source": "original",
+              "hitCount": 2,
+              "topQids": [
+                "q_msg_9",
+                "q_msg_4"
+              ]
+            },
+            {
+              "query": "the necklace for my sister",
+              "source": "rules",
+              "hitCount": 2,
+              "topQids": [
+                "q_msg_4",
+                "q_msg_9"
+              ]
+            },
+            {
+              "query": "the photo album for my mom",
+              "source": "rules",
+              "hitCount": 2,
+              "topQids": [
+                "q_msg_9",
+                "q_msg_4"
+              ]
+            }
+          ],
+          "error": null
+        },
+        "answerable": true,
+        "supportQids": [
+          "q_msg_9",
+          "q_msg_4"
+        ],
+        "supportValid": true,
+        "candidateAnswers": [
+          {
+            "text": "The photo album for your mom.",
+            "supportQids": [
+              "q_msg_9",
+              "q_msg_4"
+            ],
+            "confidence": 0.85,
+            "source": "provider"
+          }
+        ],
+        "reasoning": null,
+        "rawProviderAnswer": "{\"answer\":\"The photo album for your mom.\",\"answerable\":true,\"supportQids\":[\"q_msg_9\",\"q_msg_4\"],\"confidence\":0.85}",
+        "normalizedAnswer": "The photo album for your mom.",
+        "validation": {
+          "status": "accepted",
+          "warnings": []
+        }
+      }
+    }
+  }
+}

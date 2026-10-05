@@ -144,6 +144,17 @@ def _validate_rerank_candidates(options: Mapping[str, Any]) -> None:
         raise QuipuProtocolError("options.rerankCandidates must be a positive integer")
 
 
+QUERY_EXPANSION_MODES = {"off", "rules", "llm"}
+
+
+def _validate_query_expansion(options: Mapping[str, Any]) -> None:
+    if "queryExpansion" not in options:
+        return
+    mode = options["queryExpansion"]
+    if not isinstance(mode, str) or mode not in QUERY_EXPANSION_MODES:
+        raise QuipuProtocolError("options.queryExpansion must be off, rules, or llm")
+
+
 def _validate_scope(value: Any, label: str = "scope") -> None:
     scope = _ensure_object(value, label)
     _reject_extra(scope, SCOPE_KEYS, label)
@@ -242,7 +253,7 @@ def _validate_retrieve(params: Mapping[str, Any]) -> None:
         _reject_extra(
             options,
             {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format",
-             "rerank", "rerankCandidates", "temporalHints"},
+             "rerank", "rerankCandidates", "temporalHints", "queryExpansion"},
             "options",
         )
         for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "rerank",
@@ -251,6 +262,7 @@ def _validate_retrieve(params: Mapping[str, Any]) -> None:
         if "format" in options and options["format"] not in {"prompt", "json"}:
             raise QuipuProtocolError("options.format is invalid")
         _validate_rerank_candidates(options)
+        _validate_query_expansion(options)
 
 
 def _validate_answer(params: Mapping[str, Any]) -> None:
@@ -290,6 +302,7 @@ def _validate_answer(params: Mapping[str, Any]) -> None:
                 "rerankCandidates",
                 "readerReasoning",
                 "temporalHints",
+                "queryExpansion",
             },
             "options",
         )
@@ -307,6 +320,7 @@ def _validate_answer(params: Mapping[str, Any]) -> None:
         if "format" in options and options["format"] not in {"prompt", "json"}:
             raise QuipuProtocolError("options.format is invalid")
         _validate_rerank_candidates(options)
+        _validate_query_expansion(options)
 
 
 def _validate_search(params: Mapping[str, Any]) -> None:

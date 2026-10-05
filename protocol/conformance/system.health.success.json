@@ -35,6 +35,15 @@
         "reranker": {
           "configured": false,
           "model": null
+        },
+        "queryExpansion": {
+          "modes": [
+            "off",
+            "rules",
+            "llm"
+          ],
+          "llmConfigured": false,
+          "model": null
         }
       }
     }
