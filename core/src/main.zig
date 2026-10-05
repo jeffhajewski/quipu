@@ -4,6 +4,7 @@ const in_memory_storage = @import("in_memory_storage.zig");
 const jobs = @import("jobs.zig");
 const lattice_storage = if (build_options.enable_lattice) @import("lattice_storage.zig") else struct {};
 const protocol = @import("protocol.zig");
+const forgetting = @import("forgetting.zig");
 const providers = @import("providers.zig");
 const runtime_mod = @import("runtime.zig");
 const schema = @import("schema.zig");
@@ -1023,18 +1024,17 @@ fn runCommand(
     }
 
     if (args.len > command_index and std.mem.eql(u8, args[command_index], "verify")) {
+        const plan = try parseVerifyChecks(allocator, args[command_index + 1 ..]);
+        defer allocator.free(plan.checks);
         const schema_issues = try schema.verify(allocator, store);
         defer freeVerificationIssues(allocator, schema_issues);
         const storage_issues = try store.verify(allocator);
         defer freeVerificationIssues(allocator, storage_issues);
-        const issues = try mergeVerificationIssues(allocator, schema_issues, storage_issues);
+        const forgetting_issues = try forgetting.verify(allocator, store, .{ .leaks = plan.leaks });
+        defer forgetting.freeIssues(allocator, forgetting_issues);
+        const issues = try mergeVerificationIssues(allocator, &.{ schema_issues, storage_issues, forgetting_issues });
         defer allocator.free(issues);
-        const default_checks = [_][]const u8{ "schema", "provenance", "temporal", "forgetting", "streams" };
-        var checks: []const []const u8 = &default_checks;
-        if (args.len > command_index + 1) {
-            const requested = args[command_index + 1 ..];
-            checks = if (requested.len == 1 and std.mem.eql(u8, requested[0], "all")) &default_checks else requested;
-        }
+        const checks = plan.checks;
         const response = try stringifyAlloc(allocator, .{
             .status = if (issues.len == 0) "ok" else "failed",
             .checks = checks,
@@ -1322,7 +1322,7 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams|leaks]... [--leaks] | jobs materialize|lease|complete|fail|run entity-resolve ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
@@ -1892,15 +1892,65 @@ fn freeVerificationIssues(allocator: std.mem.Allocator, issues: []const @import(
     allocator.free(issues);
 }
 
+/// Concatenates issue lists, dropping a repeated (code, qid) pair: the
+/// adapter and the forgetting checks can both report one derived node. The
+/// kept issue borrows the dropped one's `relatedQid` when it has none. The
+/// result borrows every string from `sources`.
 fn mergeVerificationIssues(
     allocator: std.mem.Allocator,
-    schema_issues: []const storage.VerificationIssue,
-    storage_issues: []const storage.VerificationIssue,
+    sources: []const []const storage.VerificationIssue,
 ) ![]storage.VerificationIssue {
-    const merged = try allocator.alloc(storage.VerificationIssue, schema_issues.len + storage_issues.len);
-    @memcpy(merged[0..schema_issues.len], schema_issues);
-    @memcpy(merged[schema_issues.len..], storage_issues);
-    return merged;
+    var merged = std.ArrayList(storage.VerificationIssue).empty;
+    errdefer merged.deinit(allocator);
+    for (sources) |issues| {
+        next: for (issues) |issue| {
+            for (merged.items) |*kept| {
+                if (!std.mem.eql(u8, kept.code, issue.code)) continue;
+                if (!optionalStringsEqual(kept.qid, issue.qid)) continue;
+                if (kept.relatedQid == null) kept.relatedQid = issue.relatedQid;
+                continue :next;
+            }
+            try merged.append(allocator, issue);
+        }
+    }
+    return merged.toOwnedSlice(allocator);
+}
+
+fn optionalStringsEqual(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return std.mem.eql(u8, left.?, right.?);
+}
+
+const VerifyPlan = struct {
+    /// Names echoed in the report; borrowed from the arguments or constants.
+    checks: []const []const u8,
+    leaks: bool,
+};
+
+const default_verify_checks = [_][]const u8{ "schema", "provenance", "temporal", "forgetting", "streams" };
+
+/// `verify` runs the default checks; `verify all` adds `leaks`; `leaks` or
+/// `--leaks` adds the leak scan to whatever else is named.
+fn parseVerifyChecks(allocator: std.mem.Allocator, requested: []const []const u8) !VerifyPlan {
+    var checks = std.ArrayList([]const u8).empty;
+    errdefer checks.deinit(allocator);
+    var leaks = false;
+    var named = false;
+    for (requested) |arg| {
+        if (std.mem.eql(u8, arg, "--leaks") or std.mem.eql(u8, arg, "leaks")) {
+            leaks = true;
+        } else if (std.mem.eql(u8, arg, "all")) {
+            leaks = true;
+            try checks.appendSlice(allocator, &default_verify_checks);
+            named = true;
+        } else {
+            try checks.append(allocator, arg);
+            named = true;
+        }
+    }
+    if (!named) try checks.appendSlice(allocator, &default_verify_checks);
+    if (leaks) try checks.append(allocator, "leaks");
+    return .{ .checks = try checks.toOwnedSlice(allocator), .leaks = leaks };
 }
 
 fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
