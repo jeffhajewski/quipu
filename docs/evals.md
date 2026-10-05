@@ -394,6 +394,10 @@ $PY -m quipu_evals.sota_longmemeval run \
 # LLM fact extraction after ingest (memory.extract.run through the proxy):
 #   --extract [--extract-model openai/gpt-4o-mini-2024-07-18] [--extract-concurrency 8],
 #   then compare arms with and without --answer-option factKeys=true
+# Query decomposition: --answer-option queryExpansion='"rules"' or '"llm"'
+#   (llm uses the answer provider unless --daemon-arg --expand-model is given)
+# Question time: --valid-at end-of-day (default since 8a2ded1) or --valid-at question,
+#   which reproduces earlier runs that filtered out same-day evidence
 
 # E1 raw-arm reference on the same slice (the parity target).
 python3 -m quipu_evals.longmemeval_study prepare \
