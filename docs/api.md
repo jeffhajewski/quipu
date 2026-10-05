@@ -19,6 +19,14 @@ See [../SPEC.md](../SPEC.md) for the full design. This file tracks implemented p
 - Optional `mode` values `fts`, `vector`, `hybrid`, and `graph`. Retrieval
   defaults to lexical search unless the active storage backend advertises a
   non-hash embedding model, in which case it defaults to hybrid search.
+- `options.queryExpansion` (`off` by default, `rules`, or `llm`) runs
+  candidate generation for the query and for sub-queries split from it, then
+  fuses the lists, so both sides of "which came first, X or Y?" reach the
+  budget. `rules` is deterministic; `llm` sends only the question to the
+  expansion provider and falls back to the query alone with the
+  `query_expansion_failed` warning. `memory.answer` accepts it too. The trace
+  and `answerTrace` gain a `queryExpansion` block. See
+  [algorithms.md](algorithms.md#query-expansion).
 
 The prompt is assembled from the structured context sections, so callers that need typed memory should use `result.context` and callers that need direct model input can use `result.prompt`. Derived memory renders in its own sections with state and validity dates. Raw evidence is grouped by session in chronological order, with dated session headers and `[qid] speaker: text` lines. When `time.validAt` is set, the prompt starts with `Current date: YYYY-MM-DD (Weekday)`. See [algorithms.md](algorithms.md#context-rendering).
 
@@ -60,7 +68,8 @@ Two more `memory.answer` options default to `false`:
   [algorithms.md](algorithms.md#temporal-hints).
 
 `answerTrace` reports `readerMode` (`none`, `direct`, or `reasoning`),
-`temporalHints`, and `timeReferences`.
+`temporalHints`, and `timeReferences`, plus `queryExpansion` when
+`options.queryExpansion` is not `off`.
 
 ## Search V0
 
