@@ -388,6 +388,9 @@ $PY -m quipu_evals.sota_longmemeval run \
 # Reranked runs add: --reranker-url http://127.0.0.1:7341/v1/rerank (see "Rerank server" below)
 # Diagnostics: --needs raw, --mode fts|vector|hybrid|graph, --no-extract, --daemon-arg X,
 #   --answer-option KEY=JSON (e.g. rerank=false)
+# LLM fact extraction after ingest (memory.extract.run through the proxy):
+#   --extract [--extract-model openai/gpt-4o-mini-2024-07-18] [--extract-concurrency 8],
+#   then compare arms with and without --answer-option factKeys=true
 
 # E1 raw-arm reference on the same slice (the parity target).
 python3 -m quipu_evals.longmemeval_study prepare \

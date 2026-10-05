@@ -1,6 +1,6 @@
 # LLM Providers
 
-Quipu has one LLM provider abstraction for answer generation, entity resolution, and eval judging. The core still defaults to deterministic behavior when no provider is configured, so local development works without an API key.
+Quipu has one LLM provider abstraction for answer generation, entity resolution, fact extraction, and eval judging. The core still defaults to deterministic behavior when no provider is configured, so local development works without an API key.
 
 ## Quick Start
 
@@ -31,7 +31,7 @@ quipu serve-stdio --answer-provider openrouter --answer-model anthropic/claude-3
 Quipu resolves provider settings in this order:
 
 1. CLI flags: `--llm-provider`, `--llm-model`, `--llm-base-url`, `--llm-api-key`, `--llm-temperature`, `--llm-max-tokens`.
-2. Specific CLI flags: `--answer-provider`, `--answer-model`, `--answer-url`, `--entity-provider`, `--entity-model`, `--entity-url`.
+2. Specific CLI flags: `--answer-provider`, `--answer-model`, `--answer-url`, `--entity-provider`, `--entity-model`, `--entity-url`, `--extract-provider`, `--extract-model`, `--extract-url`. A specific flag wins over the shared `--llm-*` value.
 3. Environment variables: `QUIPU_LLM_PROVIDER`, `QUIPU_LLM_MODEL`, `QUIPU_LLM_BASE_URL`, `QUIPU_LLM_API_KEY`, plus provider-specific keys.
 4. Config file: `./quipu.yaml`, then `~/.quipu/config.yaml`, or an explicit `--config PATH`.
 5. Defaults: an API-key provider auto-detected from the environment, Ollama if localhost is available, otherwise deterministic. In deterministic mode `memory.answer` returns the top current derived fact's value, or else the top raw evidence text.
@@ -206,6 +206,42 @@ kept. Only `options.abstainIfWeak` turns weak answers into `[abstain]`.
 Embedding Zig hosts and tests can supply an in-process reader with
 `ProviderKind.callback` and a `ProviderCallback`. The callback receives the
 same system prompt and user turn that would go over HTTP.
+
+## Fact Extraction
+
+`quipu jobs run extract` (and the `memory.extract.run` RPC) sends each pending
+`extract` job's source messages to a chat model and stores grounded claims as
+`Assertion` nodes (see
+[algorithms.md](algorithms.md#llm-fact-extraction)). The extract provider
+resolves like the answer and entity providers:
+
+| Flag | Environment | Fallback |
+| --- | --- | --- |
+| `--extract-provider ID` | `QUIPU_EXTRACT_PROVIDER` | `--llm-provider`, `QUIPU_LLM_PROVIDER`, config file, auto-detect |
+| `--extract-url URL` | `QUIPU_EXTRACT_URL` | `--llm-base-url`, `QUIPU_LLM_URL`, the provider's default URL |
+| `--extract-model MODEL` | `QUIPU_EXTRACT_MODEL`, `OPENROUTER_EXTRACT_MODEL` | `--llm-model`, `QUIPU_LLM_MODEL`; `openai/gpt-4o-mini` for OpenRouter |
+
+The API key, temperature (default 0) and `max_tokens` come from the shared
+`--llm-*` settings and provider key variables. Extraction needs a chat model:
+with `none` or `deterministic`, `jobs run extract` reports that no extract
+provider is configured and leaves the jobs pending. Requests use the same wire
+formats and JSON mode as the reader, and HTTP calls get the same transient-error
+retries.
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+quipu --db /tmp/quipu.lattice --extract-provider openrouter \
+  --extract-model openai/gpt-4o-mini-2024-07-18 jobs run extract --concurrency 8
+```
+
+`system.health` reports `workers.extractor` (`running` or `unavailable`) and
+`capabilities.extractor: {"configured", "model", "promptVersion"}`. Tests and
+embedding Zig hosts can supply an in-process extractor with
+`ProviderKind.callback`. It receives the exact system prompt and user turn.
+
+On LongMemEval-S with `openai/gpt-4o-mini-2024-07-18` (about 48 sessions and
+520 messages per question), extraction made one call per session, about
+$0.028 per question, and took 50 to 80 seconds at concurrency 8.
 
 ## Reranker
 
