@@ -2037,7 +2037,8 @@ test "lattice adapter backfills property indexes for stores written without them
         .{ .name = "state", .value = "current" },
         .{ .name = "blockKey", .value = "project_summary" },
     }) |match| {
-        const page = try adapter.findNodes(std.testing.allocator, .{ .where = &.{match} });
+        const where = [_]storage.PropertyMatch{match};
+        const page = try adapter.findNodes(std.testing.allocator, .{ .where = &where });
         defer adapter.freeNodePage(std.testing.allocator, page);
         try std.testing.expectEqual(@as(usize, 1), page.qids.len);
     }
