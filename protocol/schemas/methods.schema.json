@@ -43,7 +43,7 @@
         "qid": { "$ref": "#/$defs/qid" },
         "type": {
           "type": "string",
-          "enum": ["raw", "message", "episode", "memory_card", "fact", "preference", "procedure", "core", "summary", "entity"]
+          "enum": ["raw", "message", "episode", "memory_card", "fact", "preference", "procedure", "core", "summary", "entity", "assertion"]
         },
         "text": { "type": "string" },
         "score": { "type": "number", "minimum": 0 },
@@ -155,7 +155,36 @@
             }
           }
         },
-        "rerank": { "$ref": "#/$defs/rerankTrace" }
+        "rerank": { "$ref": "#/$defs/rerankTrace" },
+        "factKeys": { "$ref": "#/$defs/factKeysTrace" }
+      }
+    },
+    "factKeysTrace": {
+      "type": "object",
+      "description": "Present only when options.factKeys was true.",
+      "required": ["assertionHits", "evidenceItems", "keptEvidenceItems", "datedItems"],
+      "additionalProperties": false,
+      "properties": {
+        "assertionHits": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Assertion hits converted to their source chunk or message."
+        },
+        "evidenceItems": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Raw candidates that entered through an assertion hit rather than a better-ranked direct hit."
+        },
+        "keptEvidenceItems": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Of evidenceItems, those left after the token budget."
+        },
+        "datedItems": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Raw candidates carrying at least one claim event date."
+        }
       }
     },
     "rerankTrace": {
@@ -298,6 +327,21 @@
                 "configured": { "type": "boolean" },
                 "model": { "type": ["string", "null"] }
               }
+            },
+            "extractor": {
+              "type": "object",
+              "required": ["configured", "model", "promptVersion"],
+              "additionalProperties": false,
+              "description": "LLM fact extraction for extract jobs (quipu jobs run extract).",
+              "properties": {
+                "configured": { "type": "boolean" },
+                "model": { "type": ["string", "null"] },
+                "promptVersion": { "type": "string" }
+              }
+            },
+            "factKeys": {
+              "type": "boolean",
+              "description": "memory.retrieve and memory.answer accept options.factKeys."
             }
           }
         }
@@ -421,6 +465,10 @@
               "type": "boolean",
               "description": "Append each session header's offset from time.validAt and a Time references line resolving the query's relative dates. Default false."
             },
+            "factKeys": {
+              "type": "boolean",
+              "description": "Let extracted claims (Assertion nodes) act as extra search keys: an assertion hit is returned as its source chunk or message, never as itself, and raw lines show the claims' event dates as [event YYYY-MM-DD]. Default false: assertions take no part in retrieval."
+            },
             "format": { "type": "string", "enum": ["prompt", "json"] }
           }
         }
@@ -533,6 +581,10 @@
             "temporalHints": {
               "type": "boolean",
               "description": "Append each session header's offset from time.validAt and give the reader a Time references line resolving the query's relative dates. Default false."
+            },
+            "factKeys": {
+              "type": "boolean",
+              "description": "Let extracted claims (Assertion nodes) act as extra search keys: an assertion hit is returned as its source chunk or message, never as itself, and raw lines show the claims' event dates as [event YYYY-MM-DD]. Default false: assertions take no part in retrieval."
             },
             "format": { "type": "string", "enum": ["prompt", "json"] }
           }

@@ -200,6 +200,11 @@ pub fn leasePendingJobs(allocator: std.mem.Allocator, store: storage.Adapter, op
 }
 
 pub fn completeJob(allocator: std.mem.Allocator, store: storage.Adapter, qid: []const u8, now_ms: i64) !void {
+    return completeJobWithResult(allocator, store, qid, now_ms, null);
+}
+
+/// Marks the job succeeded and records the worker's result summary (JSON).
+pub fn completeJobWithResult(allocator: std.mem.Allocator, store: storage.Adapter, qid: []const u8, now_ms: i64, result_json: ?[]const u8) !void {
     const node = (try store.getNode(allocator, qid)) orelse return error.NotFound;
     defer store.freeNode(allocator, node);
     const view = try readJobView(allocator, node.properties_json);
@@ -212,6 +217,7 @@ pub fn completeJob(allocator: std.mem.Allocator, store: storage.Adapter, qid: []
         .started_at_ms = null,
         .completed_at_ms = now_ms,
         .error_json = null,
+        .result_json = result_json,
     });
 }
 
@@ -274,6 +280,7 @@ const JobStateUpdate = struct {
     started_at_ms: ?i64,
     completed_at_ms: ?i64,
     error_json: ?[]const u8,
+    result_json: ?[]const u8 = null,
 };
 
 fn readJobView(allocator: std.mem.Allocator, properties_json: []const u8) !JobView {
@@ -320,6 +327,8 @@ fn writeJobState(allocator: std.mem.Allocator, store: storage.Adapter, qid: []co
         .completed_at_ms = update.completed_at_ms,
         .errorJson = update.error_json,
         .error_json = update.error_json,
+        .resultJson = update.result_json,
+        .result_json = update.result_json,
         .payloadHash = view.payload_hash,
         .payload_hash = view.payload_hash,
         .payloadBytes = view.payload_bytes,

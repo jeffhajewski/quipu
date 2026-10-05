@@ -164,6 +164,31 @@ class ProtocolFixtureTests(unittest.TestCase):
         with self.assertRaises(QuipuProtocolError):
             validate_rpc_params("memory.retrieve", {"query": "q", "options": {"readerReasoning": True}})
 
+    def test_fact_keys_option_and_fixture(self):
+        defs = json.loads((SCHEMA_DIR / "methods.schema.json").read_text())["$defs"]
+        for method in ("memoryRetrieveParams", "memoryAnswerParams"):
+            self.assertEqual(defs[method]["properties"]["options"]["properties"]["factKeys"]["type"], "boolean")
+        self.assertIn("factKeys", defs["retrievalTrace"]["properties"])
+        self.assertIn("assertion", defs["memoryItem"]["properties"]["type"]["enum"])
+        capabilities = defs["systemHealthResult"]["properties"]["capabilities"]["properties"]
+        self.assertIn("extractor", capabilities)
+        self.assertEqual(capabilities["factKeys"]["type"], "boolean")
+
+        for method in ("memory.retrieve", "memory.answer"):
+            with self.subTest(method=method):
+                validate_rpc_params(method, {"query": "q", "options": {"factKeys": True}})
+                with self.assertRaises(QuipuProtocolError):
+                    validate_rpc_params(method, {"query": "q", "options": {"factKeys": "yes"}})
+
+        fixture = json.loads((FIXTURE_DIR / "memory.retrieve.fact_keys.json").read_text())
+        self.assertTrue(fixture["request"]["params"]["options"]["factKeys"])
+        result = fixture["response"]["result"]
+        self.assertIn("[event 2023-03-03]", result["prompt"])
+        self.assertEqual([item["type"] for item in result["items"]], ["message"])
+        self.assertEqual(result["trace"]["factKeys"]["assertionHits"], 1)
+        default = json.loads((FIXTURE_DIR / "memory.retrieve.success.json").read_text())
+        self.assertNotIn("factKeys", default["response"]["result"]["trace"])
+
     def test_error_fixture_rejects_bad_request(self):
         fixture = json.loads((FIXTURE_DIR / "memory.retrieve.invalid_request.json").read_text())
         with self.assertRaises(QuipuProtocolError):

@@ -7,6 +7,7 @@ test {
     _ = @import("streams.zig");
     _ = @import("jobs.zig");
     _ = @import("extractor.zig");
+    _ = @import("fact_extraction.zig");
     _ = @import("answer_synthesis.zig");
     _ = @import("providers.zig");
     _ = @import("temporal.zig");

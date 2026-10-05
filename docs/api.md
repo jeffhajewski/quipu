@@ -62,6 +62,14 @@ Two more `memory.answer` options default to `false`:
 `answerTrace` reports `readerMode` (`none`, `direct`, or `reasoning`),
 `temporalHints`, and `timeReferences`.
 
+`options.factKeys` (on `memory.retrieve` and `memory.answer`, default `false`)
+lets claims written by LLM fact extraction (`quipu jobs run extract`) act as
+extra search keys. An assertion hit is returned as its source chunk or message,
+never as the claim, and raw lines show the claims' event dates as
+`[event YYYY-MM-DD]`. The trace gains a `factKeys` block. With the option off,
+assertions take no part in retrieval. See
+[algorithms.md](algorithms.md#fact-keys).
+
 ## Search V0
 
 `memory.search` supports `mode: "fts"`, `"vector"`, `"hybrid"`, and `"graph"`.
@@ -69,6 +77,9 @@ Two more `memory.answer` options default to `false`:
 the backend advertises that capability. `hybrid` uses reciprocal-rank fusion
 over lexical and vector hits. `graph` expands lexical/hybrid seeds through
 resolved entity edges before applying the normal runtime filters.
+
+`Assertion` nodes are hidden from search results unless `labels` includes
+`"Assertion"`; such results have type `assertion`.
 
 `system.health.result.storage` reports backend capability flags, including
 `backend`, `durable`, `fullText`, `vector`, `vectorDimensions`, and

@@ -88,6 +88,8 @@ export type RetrieveRequest = {
     logRetrieval?: boolean;
     abstainIfWeak?: boolean;
     temporalHints?: boolean;
+    /** Let extracted claims act as search keys that return their source evidence. */
+    factKeys?: boolean;
     format?: "prompt" | "json";
     /** Set false to bypass a configured reranker for this request. */
     rerank?: boolean;
@@ -323,6 +325,7 @@ function validateRetrieve(params: Record<string, unknown>): void {
         "rerank",
         "rerankCandidates",
         "temporalHints",
+        "factKeys",
       ]),
       "options",
     );
@@ -334,6 +337,7 @@ function validateRetrieve(params: Record<string, unknown>): void {
       "abstainIfWeak",
       "rerank",
       "temporalHints",
+      "factKeys",
     ]) {
       optionalBoolean(params.options, key, "options");
     }
@@ -385,6 +389,7 @@ function validateAnswer(params: Record<string, unknown>): void {
         "rerankCandidates",
         "readerReasoning",
         "temporalHints",
+        "factKeys",
       ]),
       "options",
     );
@@ -397,6 +402,7 @@ function validateAnswer(params: Record<string, unknown>): void {
       "rerank",
       "readerReasoning",
       "temporalHints",
+      "factKeys",
     ]) {
       optionalBoolean(params.options, key, "options");
     }

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- LLM fact extraction: `quipu jobs run extract` (and the operational
+  `memory.extract.run` RPC) runs the queued `extract` jobs through a chat model
+  configured with `--extract-provider`, `--extract-url` and `--extract-model`
+  (falling back to `--llm-*`). It uses E1's prompt with an optional event date,
+  exact-quote grounding with unique-quote index repair, and bounded retries
+  after malformed JSON. Accepted claims become `Assertion` nodes linked
+  `EVIDENCED_BY` to their message and chunk. Quarantined claims are counted on
+  the job, never stored. Forgetting a message tombstones its assertions.
+- `options.factKeys` on `memory.retrieve` and `memory.answer` (default `false`):
+  assertion hits return their source chunk or message, never the claim, and
+  raw lines show claim event dates as `[event YYYY-MM-DD]`. With it off,
+  assertions take no part in retrieval. `trace.factKeys` reports how claims
+  shaped the candidates, and `system.health` reports the extractor.
+- Memory items may have type `assertion`, but only from `memory.search` with
+  `labels: ["Assertion"]`.
+
 - The Lattice storage adapter targets LatticeDB `0.15.0` and no longer builds
   against `0.8.x` or earlier. **Database files written by earlier LatticeDB
   versions or earlier Quipu builds are not compatible and must be rebuilt** by

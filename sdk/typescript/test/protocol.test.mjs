@@ -110,6 +110,27 @@ test("reader options are validated per method", () => {
   assert.throws(() => validateRpcParams("memory.retrieve", { query: "q", options: { readerReasoning: true } }), QuipuProtocolError);
 });
 
+test("factKeys is a retrieve and answer option with its own trace", () => {
+  const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
+  for (const def of ["memoryRetrieveParams", "memoryAnswerParams"]) {
+    assert.equal(schema.$defs[def].properties.options.properties.factKeys.type, "boolean");
+  }
+  assert.ok(schema.$defs.retrievalTrace.properties.factKeys);
+  assert.ok(schema.$defs.memoryItem.properties.type.enum.includes("assertion"));
+  assert.ok(schema.$defs.systemHealthResult.properties.capabilities.properties.extractor);
+
+  for (const method of ["memory.retrieve", "memory.answer"]) {
+    validateRpcParams(method, { query: "q", options: { factKeys: true } });
+    assert.throws(() => validateRpcParams(method, { query: "q", options: { factKeys: "yes" } }), QuipuProtocolError);
+  }
+
+  const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.retrieve.fact_keys.json"), "utf8"));
+  assert.equal(fixture.request.params.options.factKeys, true);
+  assert.ok(fixture.response.result.prompt.includes("[event 2023-03-03]"));
+  assert.deepEqual(fixture.response.result.items.map((item) => item.type), ["message"]);
+  assert.equal(fixture.response.result.trace.factKeys.assertionHits, 1);
+});
+
 test("method schema accepts slot metadata, support validity, and answer prompt", () => {
   const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
   assert.ok(schema.$defs.memoryItem.properties.slotKey);

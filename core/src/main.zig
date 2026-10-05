@@ -41,6 +41,9 @@ const RuntimeConfig = struct {
     entity_provider: ?[]const u8 = null,
     entity_url: ?[]const u8 = null,
     entity_model: ?[]const u8 = null,
+    extract_provider: ?[]const u8 = null,
+    extract_url: ?[]const u8 = null,
+    extract_model: ?[]const u8 = null,
     reranker_url: ?[]const u8 = null,
     reranker_model: ?[]const u8 = null,
     reranker_api_key: ?[]const u8 = null,
@@ -399,6 +402,33 @@ fn parseRuntimeConfig(args: []const [:0]const u8) RuntimeConfig {
             config.command_index += 1;
             break;
         }
+        if (std.mem.eql(u8, arg, "--extract-provider")) {
+            if (config.command_index + 1 < args.len) {
+                config.extract_provider = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--extract-url")) {
+            if (config.command_index + 1 < args.len) {
+                config.extract_url = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--extract-model")) {
+            if (config.command_index + 1 < args.len) {
+                config.extract_model = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
         if (std.mem.eql(u8, arg, "--reranker-url")) {
             if (config.command_index + 1 < args.len) {
                 config.reranker_url = args[config.command_index + 1];
@@ -613,6 +643,23 @@ fn runtimeOptionsFromConfig(
             "QUIPU_ENTITY_URL",
             "QUIPU_ENTITY_MODEL",
             "OPENROUTER_ENTITY_MODEL",
+            "openai/gpt-4o-mini",
+        ),
+        // LLM fact extraction (`quipu jobs run extract`); falls back to the
+        // shared --llm-* settings like the answer and entity providers.
+        .extract_provider = providerEndpointFromConfig(
+            allocator,
+            io,
+            environ_map,
+            config.extract_provider,
+            config.extract_url,
+            config.extract_model,
+            config,
+            file_config,
+            "QUIPU_EXTRACT_PROVIDER",
+            "QUIPU_EXTRACT_URL",
+            "QUIPU_EXTRACT_MODEL",
+            "OPENROUTER_EXTRACT_MODEL",
             "openai/gpt-4o-mini",
         ),
         .reranker = rerankerEndpointFromConfig(environ_map, config),
@@ -1091,9 +1138,37 @@ fn runCommand(
             try stdout.print("{s}\n", .{response});
             return;
         }
+        if (std.mem.eql(u8, args[command_index + 1], "run") and args.len > command_index + 2 and std.mem.eql(u8, args[command_index + 2], "extract")) {
+            const parsed = parseExtractRunArgs(args[command_index + 3 ..]) catch {
+                return printCliError(stdout, allocator, "invalid jobs run extract arguments");
+            };
+            const result = runtime.runExtractJobs(allocator, parsed.owner, parsed.limit, parsed.concurrency) catch |err| {
+                if (err == error.ProviderUnavailable) {
+                    return printCliError(stdout, allocator, "no extract provider configured; set --extract-provider or --llm-provider");
+                }
+                return err;
+            };
+            const response = try stringifyAlloc(allocator, .{
+                .status = "ok",
+                .worker = "extract",
+                .materializedCount = result.materializedCount,
+                .leasedCount = result.leasedCount,
+                .succeededCount = result.succeededCount,
+                .failedCount = result.failedCount,
+                .lastError = result.lastError,
+                .calls = result.calls,
+                .jsonRetries = result.jsonRetries,
+                .sourceMessages = result.sourceMessages,
+                .assertionsWritten = result.assertionsWritten,
+                .counts = result.counts,
+            });
+            defer allocator.free(response);
+            try stdout.print("{s}\n", .{response});
+            return;
+        }
         if (std.mem.eql(u8, args[command_index + 1], "run")) {
             if (args.len <= command_index + 2 or !std.mem.eql(u8, args[command_index + 2], "entity-resolve")) {
-                return printCliError(stdout, allocator, "usage: quipu jobs run entity-resolve [--limit N] [--owner ID]");
+                return printCliError(stdout, allocator, "usage: quipu jobs run entity-resolve|extract [--limit N] [--owner ID]");
             }
             const parsed = parseLeaseArgsWithDefault(args[command_index + 3 ..], streams.workerKindForStream(streams.entity_resolve_requested)) catch {
                 return printCliError(stdout, allocator, "invalid jobs run entity-resolve arguments");
@@ -1322,7 +1397,7 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--extract-provider openrouter|openai|anthropic|google|ollama|custom] [--extract-url URL] [--extract-model MODEL] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve|extract ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {
@@ -1527,6 +1602,33 @@ fn parseLeaseArgsWithDefault(args: []const [:0]const u8, worker_kind: []const u8
             return error.InvalidArgs;
         }
     }
+    return parsed;
+}
+
+const ExtractRunCliArgs = struct {
+    owner: []const u8 = "cli",
+    limit: usize = 100_000,
+    concurrency: usize = 8,
+};
+
+/// `jobs run extract [--limit N] [--owner ID] [--concurrency N]`; by default
+/// every pending extract job runs, eight provider calls at a time.
+fn parseExtractRunArgs(args: []const [:0]const u8) !ExtractRunCliArgs {
+    var parsed = ExtractRunCliArgs{};
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--owner")) {
+            parsed.owner = try nextArg(args, &index);
+        } else if (std.mem.eql(u8, arg, "--limit")) {
+            parsed.limit = try std.fmt.parseInt(usize, try nextArg(args, &index), 10);
+        } else if (std.mem.eql(u8, arg, "--concurrency")) {
+            parsed.concurrency = try std.fmt.parseInt(usize, try nextArg(args, &index), 10);
+        } else {
+            return error.InvalidArgs;
+        }
+    }
+    if (parsed.limit == 0 or parsed.concurrency == 0) return error.InvalidArgs;
     return parsed;
 }
 
