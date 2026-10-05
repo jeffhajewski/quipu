@@ -77,10 +77,13 @@ const IndexPlan = struct {
     /// Text for `search_property`; null when the node is not searchable.
     text: ?[]u8 = null,
     vector: ?[]f32 = null,
+    /// Values for the native property indexes; see `storage.indexed_properties`.
+    indexed: storage.IndexedValues = @splat(null),
 
     fn deinit(self: IndexPlan, allocator: std.mem.Allocator) void {
         if (self.text) |text| allocator.free(text);
         if (self.vector) |vector| allocator.free(vector);
+        storage.freeIndexedValues(allocator, self.indexed);
     }
 };
 
@@ -229,12 +232,64 @@ pub const LatticeAdapter = struct {
         };
     }
 
-    /// Declares the full-text index. Schema operations cannot run while a write
-    /// transaction is open, so this happens once, at open.
+    /// Declares the full-text index and the equality indexes behind
+    /// `findNodes`. Schema operations cannot run while a write transaction is
+    /// open, so this happens once, at open.
     fn ensureSchema(self: *LatticeAdapter) !void {
         var exists = false;
         try check(c.lattice_node_fts_index_exists(self.db, search_label, search_property, &exists));
         if (!exists) try check(c.lattice_node_fts_index_create(self.db, search_label, search_property));
+
+        var missing: [storage.indexed_properties.len]bool = @splat(false);
+        var any_missing = false;
+        for (storage.indexed_properties, 0..) |name, index| {
+            missing[index] = !try self.propertyIndexExists(name);
+            any_missing = any_missing or missing[index];
+        }
+        if (!any_missing) return;
+        // Copy the values into native properties first: index creation reads
+        // them, and an interrupted backfill is redone because the index is
+        // still missing at the next open.
+        try self.backfillIndexedProperties();
+        for (storage.indexed_properties, 0..) |name, index| {
+            if (!missing[index]) continue;
+            const name_z = try self.allocator.dupeZ(u8, name);
+            defer self.allocator.free(name_z);
+            try check(c.lattice_node_property_index_create(self.db, node_label, name_z.ptr));
+        }
+    }
+
+    /// Lattice reports a lookup on an undeclared index as unsupported.
+    fn propertyIndexExists(self: *LatticeAdapter, name: []const u8) !bool {
+        const name_z = try self.allocator.dupeZ(u8, name);
+        defer self.allocator.free(name_z);
+        const tx = try self.beginRead();
+        defer self.rollbackQuiet(tx);
+        var probe = stringValue("\x00");
+        var ids: [*c]c.lattice_node_id = null;
+        var count: usize = 0;
+        const rc = c.lattice_nodes_find_by_label_property(tx, node_label, name_z.ptr, &probe, 1, &ids, &count);
+        if (ids != null) c.lattice_free_node_ids(ids, count);
+        if (rc == c.LATTICE_ERROR_UNSUPPORTED) return false;
+        try check(rc);
+        return true;
+    }
+
+    /// Writes the native copy of every indexed property for nodes stored before
+    /// the indexes existed.
+    fn backfillIndexedProperties(self: *LatticeAdapter) !void {
+        const tx = try self.beginWrite();
+        errdefer self.rollbackQuiet(tx);
+        const node_ids = try nodesWithLabel(self.allocator, tx, node_label);
+        defer self.allocator.free(node_ids);
+        for (node_ids) |node_id| {
+            const properties_json = (try readNodeString(self.allocator, tx, node_id, "propertiesJson")) orelse continue;
+            defer self.allocator.free(properties_json);
+            const indexed = try storage.indexedValues(self.allocator, properties_json);
+            defer storage.freeIndexedValues(self.allocator, indexed);
+            try writeIndexedProperties(self.allocator, tx, node_id, indexed, true);
+        }
+        try check(c.lattice_commit(tx));
     }
 
     fn loadIndexes(self: *LatticeAdapter) !void {
@@ -293,6 +348,7 @@ pub const LatticeAdapter = struct {
 
         var was_searchable = false;
         var had_vector = false;
+        const existed = self.qid_to_node.contains(node.qid);
         const node_id: u64 = if (self.qid_to_node.get(node.qid)) |entry| blk: {
             was_searchable = entry.searchable;
             had_vector = entry.has_vector;
@@ -314,6 +370,7 @@ pub const LatticeAdapter = struct {
         };
 
         try setNodeString(tx, node_id, "propertiesJson", node.properties_json);
+        try writeIndexedProperties(self.allocator, tx, node_id, plan.indexed, existed);
         if (plan.text) |text| {
             try setNodeString(tx, node_id, search_property, text);
             if (!was_searchable) try check(c.lattice_node_add_label(tx, node_id, search_label));
@@ -338,6 +395,7 @@ pub const LatticeAdapter = struct {
     fn planIndexes(self: *LatticeAdapter, node: storage.Node) !IndexPlan {
         var plan = IndexPlan{};
         errdefer plan.deinit(self.allocator);
+        plan.indexed = try storage.indexedValues(self.allocator, node.properties_json);
         plan.text = try searchTextFor(self.allocator, node.label, node.properties_json);
         if (plan.text) |text| {
             if (isVectorIndexedLabel(node.label)) {
@@ -438,8 +496,9 @@ pub const LatticeAdapter = struct {
         const type_z: ?[:0]u8 = if (query.edge_type) |edge_type| try allocator.dupeZ(u8, edge_type) else null;
         defer if (type_z) |value| allocator.free(value);
         const type_ptr: [*c]const u8 = if (type_z) |value| value.ptr else null;
-        // Ask Lattice for at most `limit` only when it applies every filter.
-        const native_limit: usize = if (from_node != null and to_node != null) 0 else query.limit;
+        // Ask Lattice for at most `limit` only when it applies every filter;
+        // its 0 means unlimited.
+        const native_limit: usize = if ((from_node != null and to_node != null) or query.limit == storage.unlimited) 0 else query.limit;
 
         const tx = try self.beginRead();
         defer self.rollbackQuiet(tx);
@@ -504,6 +563,92 @@ pub const LatticeAdapter = struct {
             });
         }
         return edges.toOwnedSlice(allocator);
+    }
+
+    /// Candidates come from the native equality index of each indexed property
+    /// in `where` (intersected), or else from a label scan. Lattice node ids
+    /// grow with creation, so they order the result and serve as the cursor.
+    /// Unindexed properties are checked against each candidate's JSON.
+    fn findNodes(context: *anyopaque, allocator: std.mem.Allocator, query: storage.NodeQuery) !storage.NodePage {
+        const self = ctx(context);
+        var qids = std.ArrayList([]u8).empty;
+        errdefer {
+            for (qids.items) |qid| allocator.free(qid);
+            qids.deinit(allocator);
+        }
+        for (query.where) |match| {
+            if (match.value.len == 0) return .{ .qids = try qids.toOwnedSlice(allocator) };
+        }
+        if (query.limit == 0) return .{ .qids = try qids.toOwnedSlice(allocator) };
+
+        const tx = try self.beginRead();
+        defer self.rollbackQuiet(tx);
+
+        var candidates: ?[]u64 = null;
+        defer if (candidates) |ids| allocator.free(ids);
+        for (query.where) |match| {
+            if (storage.indexedPropertyIndex(match.name) == null) continue;
+            const ids = try findIdsByProperty(allocator, tx, match.name, match.value);
+            if (candidates) |previous| {
+                defer allocator.free(ids);
+                const kept = intersectSorted(previous, ids);
+                candidates = try allocator.realloc(previous, kept);
+            } else {
+                candidates = ids;
+            }
+        }
+        if (candidates == null) {
+            const ids = try nodesWithLabel(allocator, tx, query.label orelse node_label);
+            std.mem.sort(u64, ids, {}, std.sort.asc(u64));
+            candidates = ids;
+        }
+        const ids = candidates.?;
+
+        var next: ?u64 = null;
+        var position: usize = switch (query.order) {
+            .oldest_first => if (query.after) |after| std.sort.upperBound(u64, ids, after, orderU64) else 0,
+            .newest_first => if (query.after) |after| std.sort.lowerBound(u64, ids, after, orderU64) else ids.len,
+        };
+        while (true) {
+            const node_id = switch (query.order) {
+                .oldest_first => blk: {
+                    if (position >= ids.len) break;
+                    position += 1;
+                    break :blk ids[position - 1];
+                },
+                .newest_first => blk: {
+                    if (position == 0) break;
+                    position -= 1;
+                    break :blk ids[position];
+                },
+            };
+            const qid = self.node_to_qid.get(node_id) orelse continue;
+            if (query.label) |label| {
+                const entry = self.qid_to_node.get(qid) orelse continue;
+                if (!std.mem.eql(u8, entry.label, label)) continue;
+            }
+            if (!try self.matchesUnindexed(allocator, tx, node_id, query.where)) continue;
+            try qids.append(allocator, try allocator.dupe(u8, qid));
+            if (qids.items.len >= query.limit) {
+                next = node_id;
+                break;
+            }
+        }
+        return .{ .qids = try qids.toOwnedSlice(allocator), .next = next };
+    }
+
+    fn matchesUnindexed(self: *LatticeAdapter, allocator: std.mem.Allocator, tx: *c.lattice_txn, node_id: u64, where: []const storage.PropertyMatch) !bool {
+        _ = self;
+        var properties_json: ?[]u8 = null;
+        defer if (properties_json) |json| allocator.free(json);
+        for (where) |match| {
+            if (storage.indexedPropertyIndex(match.name) != null) continue;
+            if (properties_json == null) {
+                properties_json = (try readNodeString(allocator, tx, node_id, "propertiesJson")) orelse return false;
+            }
+            if (!try storage.propertyStringEquals(allocator, properties_json.?, match.name, match.value)) return false;
+        }
+        return true;
     }
 
     /// Empty text enumerates every node, searchable or not, in creation order.
@@ -1117,6 +1262,7 @@ pub const LatticeAdapter = struct {
         .get_node = getNode,
         .put_edge = putEdge,
         .find_edges = findEdges,
+        .find_nodes = findNodes,
         .full_text_search = fullTextSearch,
         .embed_text = embedText,
         .prefetch_embeddings = prefetchEmbeddings,
@@ -1250,6 +1396,60 @@ fn nodesWithLabel(allocator: std.mem.Allocator, tx: *c.lattice_txn, label: []con
     const out = try allocator.alloc(u64, count);
     for (out, 0..) |*slot, index| slot.* = @intCast(ids[index]);
     return out;
+}
+
+/// Sorted ids of the nodes whose native `name` property equals `value`.
+fn findIdsByProperty(allocator: std.mem.Allocator, tx: *c.lattice_txn, name: []const u8, value: []const u8) ![]u64 {
+    const name_z = try allocator.dupeZ(u8, name);
+    defer allocator.free(name_z);
+    var property = stringValue(value);
+    var ids: [*c]c.lattice_node_id = null;
+    var count: usize = 0;
+    try check(c.lattice_nodes_find_by_label_property(tx, node_label, name_z.ptr, &property, std.math.maxInt(usize), &ids, &count));
+    defer if (ids != null) c.lattice_free_node_ids(ids, count);
+    const out = try allocator.alloc(u64, count);
+    for (out, 0..) |*slot, index| slot.* = @intCast(ids[index]);
+    std.mem.sort(u64, out, {}, std.sort.asc(u64));
+    return out;
+}
+
+/// Keeps the ids of sorted `left` that sorted `right` also holds, in place,
+/// and returns how many remain.
+fn intersectSorted(left: []u64, right: []const u64) usize {
+    var kept: usize = 0;
+    var r: usize = 0;
+    for (left) |id| {
+        while (r < right.len and right[r] < id) r += 1;
+        if (r < right.len and right[r] == id) {
+            left[kept] = id;
+            kept += 1;
+        }
+    }
+    return kept;
+}
+
+fn orderU64(context: u64, item: u64) std.math.Order {
+    return std.math.order(context, item);
+}
+
+/// Mirrors each indexed property into a native node property, which the
+/// equality indexes read. Lattice cannot remove a property, so a value the
+/// node no longer has becomes "", which `findNodes` never matches. A new node
+/// only writes the values it has; an existing one rewrites what changed.
+fn writeIndexedProperties(allocator: std.mem.Allocator, tx: *c.lattice_txn, node_id: u64, indexed: storage.IndexedValues, existed: bool) !void {
+    for (storage.indexed_properties, indexed) |name, value| {
+        const name_z = try allocator.dupeZ(u8, name);
+        defer allocator.free(name_z);
+        if (!existed) {
+            if (value) |present| try setNodeString(tx, node_id, name_z.ptr, present);
+            continue;
+        }
+        const current = try readNodeString(allocator, tx, node_id, name_z.ptr);
+        defer if (current) |text| allocator.free(text);
+        const wanted = value orelse "";
+        if (std.mem.eql(u8, current orelse "", wanted)) continue;
+        try setNodeString(tx, node_id, name_z.ptr, wanted);
+    }
 }
 
 fn setNodeString(tx: *c.lattice_txn, node_id: u64, key: [*:0]const u8, value: []const u8) !void {
@@ -1789,6 +1989,58 @@ test "lattice adapter finds entities by canonical name and aliases" {
     try expectSearch(adapter, "hamilton", 10, &.{"q_ent_1"});
     try expectSearch(adapter, "who is maggie", 10, &.{"q_ent_1"});
     try expectSearch(adapter, "person", 10, &.{});
+}
+
+test "lattice adapter finds nodes by label and property in creation order" {
+    var store = try TestStore.init("find-nodes.lattice");
+    defer store.deinit();
+    {
+        var state = try store.open();
+        defer state.deinit();
+        try storage.expectFindNodesContract(state.adapter());
+    }
+    // Indexes and creation order survive a reopen.
+    var state = try store.open();
+    defer state.deinit();
+    const page = try state.adapter().findNodes(std.testing.allocator, .{ .where = &.{.{ .name = "slotKey", .value = "project.package_manager" }} });
+    defer state.adapter().freeNodePage(std.testing.allocator, page);
+    try std.testing.expectEqual(@as(usize, 2), page.qids.len);
+    try std.testing.expectEqualStrings("q_fact_1", page.qids[0]);
+    try std.testing.expectEqualStrings("q_card_4", page.qids[1]);
+}
+
+test "lattice adapter backfills property indexes for stores written without them" {
+    var store = try TestStore.init("find-nodes-backfill.lattice");
+    defer store.deinit();
+    {
+        var state = try store.open();
+        defer state.deinit();
+        try testPut(state.adapter(), "q_fact_1", "Fact", "{\"slotKey\":\"project.test_command\",\"state\":\"current\"}");
+        try testPut(state.adapter(), "q_core_2", "Core", "{\"blockKey\":\"project_summary\"}");
+        // Simulate a store from before the indexes: no native copies, no index.
+        const tx = try state.beginWrite();
+        for ([_][]const u8{ "q_fact_1", "q_core_2" }) |qid| {
+            const node_id = state.qid_to_node.get(qid).?.node_id;
+            try setNodeString(tx, node_id, "slotKey", "");
+            try setNodeString(tx, node_id, "state", "");
+            try setNodeString(tx, node_id, "blockKey", "");
+        }
+        try check(c.lattice_commit(tx));
+        try check(c.lattice_node_property_index_drop(state.db, node_label, "slotKey"));
+        try check(c.lattice_node_property_index_drop(state.db, node_label, "blockKey"));
+    }
+    var state = try store.open();
+    defer state.deinit();
+    const adapter = state.adapter();
+    for ([_]storage.PropertyMatch{
+        .{ .name = "slotKey", .value = "project.test_command" },
+        .{ .name = "state", .value = "current" },
+        .{ .name = "blockKey", .value = "project_summary" },
+    }) |match| {
+        const page = try adapter.findNodes(std.testing.allocator, .{ .where = &.{match} });
+        defer adapter.freeNodePage(std.testing.allocator, page);
+        try std.testing.expectEqual(@as(usize, 1), page.qids.len);
+    }
 }
 
 test "lattice adapter stores edges as native lattice edges" {

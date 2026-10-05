@@ -5,14 +5,20 @@ const NodeRecord = struct {
     qid: []u8,
     label: []u8,
     properties_json: []u8,
+    /// Position in creation order, from 1. Kept when the node is rewritten.
+    seq: u64,
     /// Lexical index for this node. Empty when the node is not searchable.
     index: IndexedText = .{},
+    /// This node's value of each `storage.indexed_properties` entry, so
+    /// `findNodes` compares strings instead of parsing JSON.
+    indexed: storage.IndexedValues = @splat(null),
 
     fn deinit(self: NodeRecord, allocator: std.mem.Allocator) void {
         allocator.free(self.qid);
         allocator.free(self.label);
         allocator.free(self.properties_json);
         self.index.deinit(allocator);
+        storage.freeIndexedValues(allocator, self.indexed);
     }
 };
 
@@ -68,6 +74,9 @@ const StreamRecord = struct {
 pub const InMemoryAdapter = struct {
     allocator: std.mem.Allocator,
     nodes: std.StringHashMap(NodeRecord),
+    /// Node qids in creation order; entry `seq - 1` belongs to the node with
+    /// that `seq`. Borrows the keys of `nodes`, which are never removed.
+    order: std.ArrayList([]const u8),
     edges: std.ArrayList(EdgeRecord),
     streams: std.ArrayList(StreamRecord),
     next_tx_id: u64 = 1,
@@ -77,6 +86,7 @@ pub const InMemoryAdapter = struct {
         return .{
             .allocator = allocator,
             .nodes = std.StringHashMap(NodeRecord).init(allocator),
+            .order = std.ArrayList([]const u8).empty,
             .edges = std.ArrayList(EdgeRecord).empty,
             .streams = std.ArrayList(StreamRecord).empty,
         };
@@ -89,6 +99,7 @@ pub const InMemoryAdapter = struct {
             entry.value_ptr.deinit(self.allocator);
         }
         self.nodes.deinit();
+        self.order.deinit(self.allocator);
 
         for (self.edges.items) |edge| {
             edge.deinit(self.allocator);
@@ -126,23 +137,32 @@ pub const InMemoryAdapter = struct {
         errdefer self.allocator.free(key);
         const index = try buildIndex(self.allocator, node.label, node.properties_json);
         errdefer index.deinit(self.allocator);
+        const indexed = try storage.indexedValues(self.allocator, node.properties_json);
+        errdefer storage.freeIndexedValues(self.allocator, indexed);
         const owned_qid = try self.allocator.dupe(u8, node.qid);
         errdefer self.allocator.free(owned_qid);
         const owned_label = try self.allocator.dupe(u8, node.label);
         errdefer self.allocator.free(owned_label);
         const owned_properties = try self.allocator.dupe(u8, node.properties_json);
         errdefer self.allocator.free(owned_properties);
-        const record = NodeRecord{
+        var record = NodeRecord{
             .qid = owned_qid,
             .label = owned_label,
             .properties_json = owned_properties,
+            .seq = 0,
             .index = index,
+            .indexed = indexed,
         };
 
+        try self.order.ensureUnusedCapacity(self.allocator, 1);
         const entry = try self.nodes.getOrPut(key);
         if (entry.found_existing) {
             self.allocator.free(key);
+            record.seq = entry.value_ptr.seq;
             entry.value_ptr.deinit(self.allocator);
+        } else {
+            self.order.appendAssumeCapacity(key);
+            record.seq = self.order.items.len;
         }
         entry.value_ptr.* = record;
     }
@@ -186,6 +206,7 @@ pub const InMemoryAdapter = struct {
             for (edges.items) |edge| freeEdge(allocator, edge);
             edges.deinit(allocator);
         }
+        if (query.limit == 0) return edges.toOwnedSlice(allocator);
         for (self.edges.items) |edge| {
             if (query.from_qid) |from_qid| {
                 if (!std.mem.eql(u8, edge.from_qid, from_qid)) continue;
@@ -208,8 +229,69 @@ pub const InMemoryAdapter = struct {
         return edges.toOwnedSlice(allocator);
     }
 
+    /// Scans nodes in creation order. Indexed properties compare the values
+    /// cached at write time; other properties parse each node's JSON.
+    fn findNodes(context: *anyopaque, allocator: std.mem.Allocator, query: storage.NodeQuery) !storage.NodePage {
+        const self = ctx(context);
+        var qids = std.ArrayList([]u8).empty;
+        errdefer {
+            for (qids.items) |qid| allocator.free(qid);
+            qids.deinit(allocator);
+        }
+        for (query.where) |match| {
+            if (match.value.len == 0) return .{ .qids = try qids.toOwnedSlice(allocator) };
+        }
+        if (query.limit == 0) return .{ .qids = try qids.toOwnedSlice(allocator) };
+
+        const total: u64 = self.order.items.len;
+        var next: ?u64 = null;
+        switch (query.order) {
+            .oldest_first => {
+                var seq: u64 = (query.after orelse 0) + 1;
+                while (seq <= total) : (seq += 1) {
+                    const record = self.nodes.getPtr(self.order.items[seq - 1]).?;
+                    if (!try recordMatches(allocator, record, query)) continue;
+                    try qids.append(allocator, try allocator.dupe(u8, record.qid));
+                    if (qids.items.len >= query.limit) {
+                        next = seq;
+                        break;
+                    }
+                }
+            },
+            .newest_first => {
+                var seq: u64 = if (query.after) |after| @min(after -| 1, total) else total;
+                while (seq >= 1) : (seq -= 1) {
+                    const record = self.nodes.getPtr(self.order.items[seq - 1]).?;
+                    if (!try recordMatches(allocator, record, query)) continue;
+                    try qids.append(allocator, try allocator.dupe(u8, record.qid));
+                    if (qids.items.len >= query.limit) {
+                        next = seq;
+                        break;
+                    }
+                }
+            },
+        }
+        return .{ .qids = try qids.toOwnedSlice(allocator), .next = next };
+    }
+
+    fn recordMatches(allocator: std.mem.Allocator, record: *const NodeRecord, query: storage.NodeQuery) !bool {
+        if (query.label) |label| {
+            if (!std.mem.eql(u8, record.label, label)) return false;
+        }
+        for (query.where) |match| {
+            if (storage.indexedPropertyIndex(match.name)) |index| {
+                const value = record.indexed[index] orelse return false;
+                if (!std.mem.eql(u8, value, match.value)) return false;
+            } else if (!try storage.propertyStringEquals(allocator, record.properties_json, match.name, match.value)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /// BM25 (k1=1.2, b=0.75) over each searchable node's index text.
-    /// An empty query enumerates every node, including unsearchable ones.
+    /// An empty query enumerates every node, including unsearchable ones, in
+    /// creation order.
     fn fullTextSearch(context: *anyopaque, allocator: std.mem.Allocator, query: storage.FullTextQuery) ![]storage.SearchHit {
         const self = ctx(context);
         var hits = std.ArrayList(storage.SearchHit).empty;
@@ -220,10 +302,9 @@ pub const InMemoryAdapter = struct {
         if (query.limit == 0) return hits.toOwnedSlice(allocator);
 
         if (query.text.len == 0) {
-            var node_it = self.nodes.iterator();
-            while (node_it.next()) |entry| {
+            for (self.order.items) |qid| {
                 try hits.append(allocator, .{
-                    .qid = try allocator.dupe(u8, entry.value_ptr.qid),
+                    .qid = try allocator.dupe(u8, qid),
                     .score = 1.0,
                 });
                 if (hits.items.len >= query.limit) break;
@@ -568,6 +649,7 @@ pub const InMemoryAdapter = struct {
         .get_node = getNode,
         .put_edge = putEdge,
         .find_edges = findEdges,
+        .find_nodes = findNodes,
         .full_text_search = fullTextSearch,
         .embed_text = embedText,
         .prefetch_embeddings = prefetchEmbeddings,
@@ -802,6 +884,12 @@ test "in-memory search skips unsearchable nodes but empty query enumerates them"
     const stop_only = try adapter.fullTextSearch(std.testing.allocator, .{ .text = "what is the", .limit = 10 });
     defer freeTestHits(stop_only);
     try std.testing.expectEqual(@as(usize, 0), stop_only.len);
+}
+
+test "in-memory adapter finds nodes by label and property in creation order" {
+    var adapter_state = InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    try storage.expectFindNodesContract(adapter_state.adapter());
 }
 
 test "in-memory adapter reports storage capabilities" {
