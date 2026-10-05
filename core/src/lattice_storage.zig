@@ -1499,6 +1499,7 @@ fn isVectorIndexedLabel(label: []const u8) bool {
         std.mem.eql(u8, label, "Fact") or
         std.mem.eql(u8, label, "Preference") or
         std.mem.eql(u8, label, "Procedure") or
+        std.mem.eql(u8, label, "Assertion") or
         std.mem.eql(u8, label, "Core");
 }
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const answer_synthesis = @import("answer_synthesis.zig");
 const build_options = @import("build_options");
 const extractor = @import("extractor.zig");
+const fact_extraction = @import("fact_extraction.zig");
 const in_memory_storage = if (build_options.enable_lattice) struct {} else @import("in_memory_storage.zig");
 const jobs = @import("jobs.zig");
 const lattice_storage = if (build_options.enable_lattice) @import("lattice_storage.zig") else struct {};
@@ -39,6 +40,13 @@ const retrieval_candidate_limit: usize = 80;
 const default_rerank_candidates: usize = 50;
 /// Rerank scores listed in the retrieval trace.
 const rerank_trace_top_scores: usize = 10;
+/// Extract jobs whose provider calls run at once (`memory.extract.run`).
+const default_extract_concurrency: usize = 8;
+/// Assertion qids carry this prefix, so search channels can drop assertion
+/// hits without loading the node.
+const assertion_qid_prefix = "q_asrt_";
+/// factKeys: event dates listed on one raw line, earliest first.
+const max_event_dates_per_item: usize = 4;
 
 const Scope = struct {
     tenant_id: ?[]const u8 = null,
@@ -100,6 +108,9 @@ const MessageResult = struct {
     /// Source metadata for raw evidence items (Message and Chunk nodes).
     /// Not serialized; renderers read it from the item directly.
     raw_source: ?RawSource = null,
+    /// factKeys: the item entered the candidates through an Assertion hit.
+    /// Not serialized.
+    via_assertion: bool = false,
 
     pub fn jsonStringify(self: @This(), jw: anytype) !void {
         try jw.beginObject();
@@ -173,6 +184,9 @@ const RawSource = struct {
     /// Slot keys of memories evidenced by this message that are stale at
     /// query time (filled only when the packet holds slot memories).
     stale_slot_keys: []const []const u8 = &.{},
+    /// factKeys: event dates of the claims evidenced by this item
+    /// (`2023-03-03`, `2023-06 planned`), rendered as `[event ...]`.
+    event_dates: []const []const u8 = &.{},
 
     fn deinit(self: RawSource, allocator: std.mem.Allocator) void {
         if (self.role) |value| allocator.free(value);
@@ -183,6 +197,8 @@ const RawSource = struct {
         allocator.free(self.message_qid);
         for (self.stale_slot_keys) |key| allocator.free(key);
         if (self.stale_slot_keys.len > 0) allocator.free(self.stale_slot_keys);
+        for (self.event_dates) |date| allocator.free(date);
+        if (self.event_dates.len > 0) allocator.free(self.event_dates);
     }
 };
 
@@ -217,15 +233,17 @@ const RetrievalTrace = struct {
     droppedItemReasons: []const DroppedItemReason = &.{},
     /// Present only when a reranker is configured.
     rerank: ?RerankTrace = null,
+    /// Present only when `options.factKeys` is true.
+    factKeys: ?FactKeysTrace = null,
 
     pub fn jsonStringify(self: @This(), jw: anytype) !void {
         try jw.beginObject();
         inline for (std.meta.fields(@This())) |field| {
             const value = @field(self, field.name);
-            if (comptime std.mem.eql(u8, field.name, "rerank")) {
-                if (value) |rerank| {
+            if (comptime std.mem.eql(u8, field.name, "rerank") or std.mem.eql(u8, field.name, "factKeys")) {
+                if (value) |present| {
                     try jw.objectField(field.name);
-                    try jw.write(rerank);
+                    try jw.write(present);
                 }
             } else {
                 try jw.objectField(field.name);
@@ -249,6 +267,19 @@ const RerankTrace = struct {
     /// Best scores first, at most `rerank_trace_top_scores`.
     topScores: []const RerankScore = &.{},
     @"error": ?[]const u8 = null,
+};
+
+/// `options.factKeys`: how assertion search keys shaped the candidates.
+const FactKeysTrace = struct {
+    /// Assertion hits converted to their source evidence.
+    assertionHits: usize = 0,
+    /// Raw candidates that entered through an assertion hit (a direct raw hit
+    /// ranked higher keeps the item as its own).
+    evidenceItems: usize = 0,
+    /// Of those, items left after the token budget.
+    keptEvidenceItems: usize = 0,
+    /// Raw candidates carrying at least one event date.
+    datedItems: usize = 0,
 };
 
 const RerankScore = struct {
@@ -355,10 +386,27 @@ pub const EntityJobRunResult = struct {
     lastError: ?[]const u8 = null,
 };
 
+/// Outcome of one `memory.extract.run` / `quipu jobs run extract` pass.
+pub const ExtractJobRunResult = struct {
+    materializedCount: usize = 0,
+    leasedCount: usize = 0,
+    succeededCount: usize = 0,
+    failedCount: usize = 0,
+    lastError: ?[]const u8 = null,
+    /// Provider calls, including E1's bounded retries after malformed JSON.
+    calls: usize = 0,
+    jsonRetries: usize = 0,
+    sourceMessages: usize = 0,
+    assertionsWritten: usize = 0,
+    counts: fact_extraction.Counts = .{},
+};
+
 pub const RuntimeOptions = struct {
     io: ?std.Io = null,
     answer_provider: providers.ProviderEndpoint = .{},
     entity_provider: providers.ProviderEndpoint = .{},
+    /// Chat model for the `extract` job worker (LLM fact extraction).
+    extract_provider: providers.ProviderEndpoint = .{},
     /// Optional cross-encoder stage of memory.retrieve and memory.answer.
     reranker: providers.ProviderEndpoint = .{},
 };
@@ -432,6 +480,7 @@ pub const Runtime = struct {
         if (std.mem.eql(u8, method, "memory.forget")) return self.memoryForget(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.feedback")) return self.memoryFeedback(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.entityResolve.run")) return self.memoryEntityResolveRun(allocator, id, &params);
+        if (std.mem.eql(u8, method, "memory.extract.run")) return self.memoryExtractRun(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.get")) return self.memoryCoreGet(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.update")) return self.memoryCoreUpdate(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.consolidate")) return self.memoryCoreConsolidate(allocator, id, &params);
@@ -452,7 +501,7 @@ pub const Runtime = struct {
                 .schemaVersion = self.health.schema_version,
                 .storage = storageHealth(self.store.capabilities()),
                 .workers = .{
-                    .extractor = "unavailable",
+                    .extractor = if (extractProviderUsable(self.options.extract_provider)) "running" else "unavailable",
                     .consolidator = "unavailable",
                     .entityResolver = if (self.options.entity_provider.kind == .none) "unavailable" else "running",
                     .answerer = if (self.options.answer_provider.kind == .none) "unavailable" else "running",
@@ -462,6 +511,12 @@ pub const Runtime = struct {
                         .configured = self.options.reranker.kind != .none,
                         .model = if (self.options.reranker.kind != .none) self.options.reranker.model else null,
                     },
+                    .extractor = .{
+                        .configured = extractProviderUsable(self.options.extract_provider),
+                        .model = if (extractProviderUsable(self.options.extract_provider)) self.options.extract_provider.model else null,
+                        .promptVersion = fact_extraction.prompt_version,
+                    },
+                    .factKeys = true,
                 },
             },
         };
@@ -484,6 +539,44 @@ pub const Runtime = struct {
                 .succeededCount = result.succeededCount,
                 .failedCount = result.failedCount,
                 .lastError = result.lastError,
+            },
+        };
+        return stringifyAlloc(allocator, response);
+    }
+
+    /// Operational RPC behind `quipu jobs run extract`, for callers that hold
+    /// the daemon open (eval runners). Not part of the SDK surface.
+    fn memoryExtractRun(self: *Runtime, allocator: std.mem.Allocator, id: ?[]const u8, params: *const ObjectMap) ![]u8 {
+        const owner = stringField(params, "owner") orelse "extract-runner";
+        const requested_limit = integerField(params, "limit") orelse 100000;
+        if (requested_limit < 1) {
+            return errorResponse(allocator, id, "invalid_request", "limit must be positive");
+        }
+        const requested_concurrency = integerField(params, "concurrency") orelse default_extract_concurrency;
+        if (requested_concurrency < 1) {
+            return errorResponse(allocator, id, "invalid_request", "concurrency must be positive");
+        }
+        if (!extractProviderUsable(self.options.extract_provider)) {
+            return errorResponse(allocator, id, "provider_error", "no extract provider configured; set --extract-provider or --llm-provider");
+        }
+        const result = try self.runExtractJobs(allocator, owner, @intCast(requested_limit), @intCast(requested_concurrency));
+        const response = .{
+            .jsonrpc = "2.0",
+            .id = id,
+            .result = .{
+                .materializedCount = result.materializedCount,
+                .leasedCount = result.leasedCount,
+                .succeededCount = result.succeededCount,
+                .failedCount = result.failedCount,
+                .lastError = result.lastError,
+                .provider = self.options.extract_provider.name,
+                .model = self.options.extract_provider.model,
+                .promptVersion = fact_extraction.prompt_version,
+                .calls = result.calls,
+                .jsonRetries = result.jsonRetries,
+                .sourceMessages = result.sourceMessages,
+                .assertionsWritten = result.assertionsWritten,
+                .counts = result.counts,
             },
         };
         return stringifyAlloc(allocator, response);
@@ -801,6 +894,7 @@ pub const Runtime = struct {
         const log_retrieval = if (options) |opts| boolField(&opts, "logRetrieval") orelse (boolField(&opts, "logTrace") orelse true) else true;
         const log_audit = if (options) |opts| boolField(&opts, "logAudit") orelse true else true;
         const temporal_hints = if (options) |opts| boolField(&opts, "temporalHints") orelse false else false;
+        const fact_keys = if (options) |opts| boolField(&opts, "factKeys") orelse false else false;
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
         };
@@ -808,7 +902,13 @@ pub const Runtime = struct {
             return errorResponse(allocator, id, "invalid_request", "options.rerankCandidates must be a positive integer");
         };
 
-        var results = try self.collectItems(allocator, query, retrieve_mode, retrieval_candidate_limit, scope, false, null, valid_at, event_window, include_evidence, include_trace);
+        var results = try self.collectItemsWithFactKeys(allocator, query, retrieve_mode, retrieval_candidate_limit, .{
+            .scope = scope,
+            .valid_at = valid_at,
+            .event_window = event_window,
+            .include_evidence = include_evidence,
+            .include_debug = include_trace,
+        }, fact_keys);
         defer results.deinit();
         if (needsIncludes(needs_value, "core")) {
             try self.appendCoreItems(allocator, &results, scope, include_evidence, include_trace);
@@ -869,6 +969,7 @@ pub const Runtime = struct {
             .scoringDetails = scoring_details,
             .droppedItemReasons = dropped_item_reasons,
             .rerank = if (rerank) |*stage| stage.view() else null,
+            .factKeys = results.factKeysTrace(),
         };
 
         const item_qids = try allocator.alloc([]const u8, results.items.items.len);
@@ -942,6 +1043,7 @@ pub const Runtime = struct {
         const abstain_if_weak = if (options) |opts| boolField(&opts, "abstainIfWeak") orelse false else false;
         const reader_reasoning = if (options) |opts| boolField(&opts, "readerReasoning") orelse false else false;
         const temporal_hints = if (options) |opts| boolField(&opts, "temporalHints") orelse false else false;
+        const fact_keys = if (options) |opts| boolField(&opts, "factKeys") orelse false else false;
         const log_retrieval = if (options) |opts| boolField(&opts, "logRetrieval") orelse (boolField(&opts, "logTrace") orelse true) else true;
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
@@ -950,7 +1052,13 @@ pub const Runtime = struct {
             return errorResponse(allocator, id, "invalid_request", "options.rerankCandidates must be a positive integer");
         };
 
-        var results = try self.collectItems(allocator, query, retrieve_mode, retrieval_candidate_limit, scope, false, null, valid_at, event_window, include_evidence, include_trace);
+        var results = try self.collectItemsWithFactKeys(allocator, query, retrieve_mode, retrieval_candidate_limit, .{
+            .scope = scope,
+            .valid_at = valid_at,
+            .event_window = event_window,
+            .include_evidence = include_evidence,
+            .include_debug = include_trace,
+        }, fact_keys);
         defer results.deinit();
         if (needsIncludes(needs_value, "core")) {
             try self.appendCoreItems(allocator, &results, scope, include_evidence, include_trace);
@@ -1010,6 +1118,7 @@ pub const Runtime = struct {
             .scoringDetails = scoring_details,
             .droppedItemReasons = dropped_item_reasons,
             .rerank = if (rerank) |*stage| stage.view() else null,
+            .factKeys = results.factKeysTrace(),
         };
 
         // One answer path: with a reader configured, every non-empty context
@@ -2140,7 +2249,38 @@ pub const Runtime = struct {
             if (!try propertyEquals(allocator, node.properties_json, "evidenceQid", evidence_qid)) continue;
             try refs.append(allocator, node.qid, labelType(node.label), "derived_from");
         }
+        try self.appendAssertionRefsByEdge(allocator, evidence_qid, &refs);
         return refs;
+    }
+
+    /// Assertions evidenced by `evidence_qid`, found through their
+    /// EVIDENCED_BY edges so the node-scan cap above cannot hide them.
+    /// MERGE: drop with the edge-based, label-agnostic forget closure.
+    fn appendAssertionRefsByEdge(self: *Runtime, allocator: std.mem.Allocator, evidence_qid: []const u8, refs: *OwnedNodeRefs) !void {
+        var assertions = try self.liveAssertionsByEdge(allocator, evidence_qid);
+        defer assertions.deinit();
+        outer: for (assertions.items.items) |qid| {
+            for (refs.items.items) |existing| {
+                if (std.mem.eql(u8, existing.qid, qid)) continue :outer;
+            }
+            try refs.append(allocator, qid, "assertion", "derived_from");
+        }
+    }
+
+    fn liveAssertionsByEdge(self: *Runtime, allocator: std.mem.Allocator, evidence_qid: []const u8) !OwnedQids {
+        var qids = OwnedQids{ .allocator = allocator };
+        errdefer qids.deinit();
+        const edges = try self.store.findEdges(allocator, .{ .to_qid = evidence_qid, .edge_type = "EVIDENCED_BY", .limit = 100_000 });
+        defer self.store.freeEdges(allocator, edges);
+        for (edges) |edge| {
+            if (!std.mem.startsWith(u8, edge.from_qid, assertion_qid_prefix)) continue;
+            const node = (try self.store.getNode(allocator, edge.from_qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!std.mem.eql(u8, node.label, "Assertion")) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            try qids.appendUnique(allocator, node.qid);
+        }
+        return qids;
     }
 
     fn tombstoneDerivedByEvidence(self: *Runtime, allocator: std.mem.Allocator, evidence_qid: []const u8, reason: []const u8, mode: []const u8) !usize {
@@ -2154,6 +2294,13 @@ pub const Runtime = struct {
             if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
             if (!try propertyEquals(allocator, node.properties_json, "evidenceQid", evidence_qid)) continue;
             try self.tombstoneNode(allocator, node.qid, node.label, reason, mode);
+            invalidated += 1;
+        }
+        // MERGE: drop with the edge-based, label-agnostic forget closure.
+        var assertions = try self.liveAssertionsByEdge(allocator, evidence_qid);
+        defer assertions.deinit();
+        for (assertions.items.items) |qid| {
+            try self.tombstoneNode(allocator, qid, "Assertion", reason, mode);
             invalidated += 1;
         }
         return invalidated;
@@ -2264,83 +2411,141 @@ pub const Runtime = struct {
         include_evidence: bool,
         include_debug: bool,
     ) !OwnedItems {
-        const hits = try self.collectSearchHits(allocator, query, mode, @max(limit * 4, limit));
+        return self.collectItemsWithFactKeys(allocator, query, mode, limit, .{
+            .scope = scope,
+            .include_deleted = include_deleted,
+            .labels_value = labels_value,
+            .valid_at = valid_at,
+            .event_window = event_window,
+            .include_evidence = include_evidence,
+            .include_debug = include_debug,
+        }, false);
+    }
+
+    /// Candidate items for a query. Without `fact_keys`, Assertion nodes are
+    /// dropped from every search channel before fusion (unless a caller asks
+    /// for the label), so they never take a candidate slot or appear as
+    /// items. With `fact_keys` (E1's assertion_keys), an Assertion hit stands
+    /// in for its source evidence: the chunks its quote lies in, or the whole
+    /// message when unchunked, at the assertion's score. Raw items are
+    /// deduplicated by qid, so the better-ranked route wins, and each raw item
+    /// carries the event dates of the claims evidenced by it.
+    fn collectItemsWithFactKeys(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        query: []const u8,
+        mode: SearchMode,
+        limit: usize,
+        filter: ItemFilter,
+        fact_keys: bool,
+    ) !OwnedItems {
+        const exclude_assertions = !fact_keys and !labelRequestedExplicitly("Assertion", filter.labels_value);
+        const hits = try self.collectSearchHits(allocator, query, mode, @max(limit * 4, limit), exclude_assertions);
         defer freeHits(allocator, hits);
 
         var owned = OwnedItems{ .allocator = allocator };
         errdefer owned.deinit();
+        if (fact_keys) owned.fact_keys = .{};
         for (hits) |hit| {
             const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
             defer self.store.freeNode(allocator, node);
-            if (!include_deleted and try propertyBool(allocator, node.properties_json, "deleted")) continue;
-            if (!try scope.matchesNode(allocator, node)) continue;
-            if (isInternalLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) continue;
-            if (isStructuralLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) continue;
-            if (isHiddenSearchLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) continue;
-            if (!labelAllowed(node.label, labels_value)) continue;
-            // Chunked messages and copy-only episodes are reached through
-            // their chunks/messages; never surface them as items themselves.
-            if (try propertyIsFalse(allocator, node.properties_json, "searchable")) continue;
-            if (!try nodeWithinEventWindow(allocator, node, event_window)) continue;
-            if (!include_deleted and valid_at != null) {
-                if (!try nodeActiveAt(allocator, node, valid_at.?)) continue;
+            if (fact_keys and std.mem.eql(u8, node.label, "Assertion")) {
+                try self.appendAssertionEvidence(allocator, &owned, node, hit.score, filter, limit);
+            } else if (!fact_keys or !owned.containsQid(node.qid)) {
+                _ = try appendNodeItem(allocator, &owned, node, hit.score, filter);
             }
-            if (!include_deleted and valid_at == null and isSlotMemoryLabel(node.label)) {
-                if (!try propertyEquals(allocator, node.properties_json, "state", "current")) continue;
-            }
-            if (!include_deleted and isDerivedLabel(node.label)) {
-                if (valid_at) |timestamp| {
-                    if (!try derivedActiveAt(allocator, node, timestamp)) continue;
-                } else {
-                    if (!try propertyEquals(allocator, node.properties_json, "state", "current")) continue;
-                }
-            }
-
-            const text = itemTextForNode(allocator, node) catch continue;
-            errdefer allocator.free(text);
-            const raw_source = try rawSourceForNode(allocator, node);
-            errdefer if (raw_source) |source| source.deinit(allocator);
-            const evidence = if (!include_evidence)
-                try allocator.alloc(EvidenceResult, 0)
-            else if (std.mem.eql(u8, node.label, "Chunk"))
-                try chunkEvidence(allocator, node, raw_source)
-            else
-                try evidenceForNode(allocator, node);
-            errdefer freeEvidence(allocator, evidence);
-            const state = try stateForNode(allocator, node);
-            errdefer allocator.free(state);
-            const valid_from = try validFromForNode(allocator, node);
-            errdefer if (valid_from) |value_to_free| allocator.free(value_to_free);
-            const valid_to = try readOptionalPropertyString(allocator, node.properties_json, "validTo");
-            errdefer if (valid_to) |value_to_free| allocator.free(value_to_free);
-            const slot_metadata = try slotMetadataForNode(allocator, node);
-            errdefer slot_metadata.deinit(allocator);
-            const result_qid = try allocator.dupe(u8, node.qid);
-            errdefer allocator.free(result_qid);
-            try owned.items.append(allocator, .{
-                .qid = result_qid,
-                .type = labelType(node.label),
-                .text = text,
-                .score = hit.score,
-                .state = state,
-                .validFrom = valid_from,
-                .validTo = valid_to,
-                .evidence = evidence,
-                .includeDebug = include_debug,
-                .slotKey = slot_metadata.slot_key,
-                .subject = slot_metadata.subject,
-                .attribute = slot_metadata.attribute,
-                .value = slot_metadata.value,
-                .numericValue = slot_metadata.numeric_value,
-                .unit = slot_metadata.unit,
-                .aggregationMode = slot_metadata.aggregation_mode,
-                .raw_source = raw_source,
-            });
             if (owned.items.items.len >= limit) break;
         }
         sortItemsByScore(&owned);
-        try self.markStaleRawEvidence(allocator, &owned, valid_at);
+        try self.markStaleRawEvidence(allocator, &owned, filter.valid_at);
+        if (fact_keys) try self.attachEventDates(allocator, &owned);
         return owned;
+    }
+
+    /// factKeys: adds the raw evidence behind one Assertion hit.
+    fn appendAssertionEvidence(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        owned: *OwnedItems,
+        assertion: storage.Node,
+        score: f32,
+        filter: ItemFilter,
+        limit: usize,
+    ) !void {
+        if (try propertyBool(allocator, assertion.properties_json, "deleted")) return;
+        if (!try filter.scope.matchesNode(allocator, assertion)) return;
+        var parsed = try std.json.parseFromSlice(Value, allocator, assertion.properties_json, .{});
+        defer parsed.deinit();
+        const props = objectValue(parsed.value) orelse return;
+        if (owned.fact_keys) |*stats| stats.assertionHits += 1;
+
+        const chunk_qids = arrayValue(props.get("chunkQids"));
+        const message_qid = stringField(&props, "sourceMessageQid") orelse return;
+        const single = [_]Value{.{ .string = message_qid }};
+        const targets: []const Value = if (chunk_qids) |array| (if (array.items.len > 0) array.items else &single) else &single;
+        for (targets) |target| {
+            if (owned.items.items.len >= limit) return;
+            const evidence_qid = stringValue(target) orelse continue;
+            if (owned.containsQid(evidence_qid)) continue;
+            const evidence = (try self.store.getNode(allocator, evidence_qid)) orelse continue;
+            defer self.store.freeNode(allocator, evidence);
+            if (!std.mem.eql(u8, evidence.label, "Chunk") and !std.mem.eql(u8, evidence.label, "Message")) continue;
+            if (try appendNodeItem(allocator, owned, evidence, score, filter)) {
+                owned.items.items[owned.items.items.len - 1].via_assertion = true;
+                if (owned.fact_keys) |*stats| stats.evidenceItems += 1;
+            }
+        }
+    }
+
+    /// factKeys: each raw item lists the event dates of the live claims
+    /// evidenced by it (its chunk, or its message when unchunked). Dates equal
+    /// to the item's own date add nothing and are left out.
+    fn attachEventDates(self: *Runtime, allocator: std.mem.Allocator, owned: *OwnedItems) !void {
+        for (owned.items.items) |*item| {
+            const source = if (item.raw_source) |*value| value else continue;
+            source.event_dates = try self.eventDatesForEvidence(allocator, item.qid, source.created_at);
+            if (source.event_dates.len > 0) {
+                if (owned.fact_keys) |*stats| stats.datedItems += 1;
+            }
+        }
+    }
+
+    fn eventDatesForEvidence(self: *Runtime, allocator: std.mem.Allocator, evidence_qid: []const u8, created_at: ?[]const u8) ![]const []const u8 {
+        const edges = try self.store.findEdges(allocator, .{ .to_qid = evidence_qid, .edge_type = "EVIDENCED_BY", .limit = 4096 });
+        defer self.store.freeEdges(allocator, edges);
+        var dates = OwnedQids{ .allocator = allocator };
+        defer dates.deinit();
+        for (edges) |edge| {
+            if (!std.mem.startsWith(u8, edge.from_qid, assertion_qid_prefix)) continue;
+            const node = (try self.store.getNode(allocator, edge.from_qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!std.mem.eql(u8, node.label, "Assertion")) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            const event_date = (try readOptionalPropertyString(allocator, node.properties_json, "eventDate")) orelse continue;
+            defer allocator.free(event_date);
+            const planned = try propertyBool(allocator, node.properties_json, "planned");
+            if (!planned) {
+                if (created_at) |timestamp| {
+                    if (std.mem.eql(u8, dateKey(timestamp), event_date)) continue;
+                }
+            }
+            const tag = try std.fmt.allocPrint(allocator, "{s}{s}", .{ event_date, if (planned) " planned" else "" });
+            defer allocator.free(tag);
+            try dates.appendUnique(allocator, tag);
+        }
+        std.mem.sort([]const u8, dates.items.items, {}, stringLessThan);
+        const kept = @min(dates.items.items.len, max_event_dates_per_item);
+        const result = try allocator.alloc([]const u8, kept);
+        var moved: usize = 0;
+        errdefer {
+            for (result[0..moved]) |date| allocator.free(date);
+            allocator.free(result);
+        }
+        for (dates.items.items[0..kept]) |date| {
+            result[moved] = try allocator.dupe(u8, date);
+            moved += 1;
+        }
+        return result;
     }
 
     /// Records, on each raw item, the slot keys of memories evidenced by its
@@ -2402,31 +2607,48 @@ pub const Runtime = struct {
         return keys.toOwnedSlice(allocator);
     }
 
-    /// Every mode returns hits sorted by descending score.
-    fn collectSearchHits(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, mode: SearchMode, limit: usize) ![]storage.SearchHit {
+    /// Every mode returns hits sorted by descending score. With
+    /// `exclude_assertions`, each channel drops Assertion hits before fusion.
+    fn collectSearchHits(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, mode: SearchMode, limit: usize, exclude_assertions: bool) ![]storage.SearchHit {
         const hits = switch (mode) {
-            .fts => try self.store.fullTextSearch(allocator, .{ .text = query, .limit = limit }),
-            .graph => try self.graphSearch(allocator, query, limit),
-            .vector => self.vectorTextSearch(allocator, query, limit) catch |err| switch (err) {
+            .fts => try self.lexicalSearch(allocator, query, limit, exclude_assertions),
+            .graph => try self.graphSearch(allocator, query, limit, exclude_assertions),
+            .vector => self.vectorTextSearch(allocator, query, limit, exclude_assertions) catch |err| switch (err) {
                 error.Unsupported => try allocator.alloc(storage.SearchHit, 0),
                 else => |e| return e,
             },
-            .hybrid => try self.hybridSearch(allocator, query, limit),
+            .hybrid => try self.hybridSearch(allocator, query, limit, exclude_assertions),
         };
         sortHitsByScore(hits);
         return hits;
     }
 
-    fn vectorTextSearch(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, limit: usize) ![]storage.SearchHit {
-        const vector = try self.store.embedText(allocator, query);
-        defer allocator.free(vector);
-        return self.store.vectorSearch(allocator, .{ .vector = vector, .limit = limit });
+    fn lexicalSearch(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, limit: usize, exclude_assertions: bool) ![]storage.SearchHit {
+        var request = limit;
+        while (true) {
+            const hits = try self.store.fullTextSearch(allocator, .{ .text = query, .limit = request });
+            if (!exclude_assertions) return hits;
+            if (try withoutAssertionHits(allocator, hits, request, limit)) |kept| return kept;
+            request *= 2;
+        }
     }
 
-    fn hybridSearch(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, limit: usize) ![]storage.SearchHit {
-        const fts_hits = try self.store.fullTextSearch(allocator, .{ .text = query, .limit = limit });
+    fn vectorTextSearch(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, limit: usize, exclude_assertions: bool) ![]storage.SearchHit {
+        const vector = try self.store.embedText(allocator, query);
+        defer allocator.free(vector);
+        var request = limit;
+        while (true) {
+            const hits = try self.store.vectorSearch(allocator, .{ .vector = vector, .limit = request });
+            if (!exclude_assertions) return hits;
+            if (try withoutAssertionHits(allocator, hits, request, limit)) |kept| return kept;
+            request *= 2;
+        }
+    }
+
+    fn hybridSearch(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, limit: usize, exclude_assertions: bool) ![]storage.SearchHit {
+        const fts_hits = try self.lexicalSearch(allocator, query, limit, exclude_assertions);
         defer freeHits(allocator, fts_hits);
-        const vector_hits = self.vectorTextSearch(allocator, query, limit) catch |err| switch (err) {
+        const vector_hits = self.vectorTextSearch(allocator, query, limit, exclude_assertions) catch |err| switch (err) {
             error.Unsupported => try allocator.alloc(storage.SearchHit, 0),
             else => |e| return e,
         };
@@ -2434,11 +2656,11 @@ pub const Runtime = struct {
         return fuseRankedHits(allocator, &.{ fts_hits, vector_hits }, limit);
     }
 
-    fn graphSearch(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, limit: usize) ![]storage.SearchHit {
+    fn graphSearch(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, limit: usize, exclude_assertions: bool) ![]storage.SearchHit {
         const base_hits = if (self.store.capabilities().vector)
-            try self.hybridSearch(allocator, query, @max(limit * 2, limit))
+            try self.hybridSearch(allocator, query, @max(limit * 2, limit), exclude_assertions)
         else
-            try self.store.fullTextSearch(allocator, .{ .text = query, .limit = @max(limit * 2, limit) });
+            try self.lexicalSearch(allocator, query, @max(limit * 2, limit), exclude_assertions);
         defer freeHits(allocator, base_hits);
         sortHitsByScore(base_hits);
 
@@ -2722,7 +2944,373 @@ pub const Runtime = struct {
             try self.putDeterministicEdge(allocator, source_qid, entity_qid, "MENTIONS");
         }
     }
+
+    /// Runs pending `extract` jobs: each job's source messages go to the
+    /// extract provider, the reply is grounded (exact quotes, E1's unique
+    /// repair), and accepted claims are written as Assertion nodes linked
+    /// EVIDENCED_BY to their source message and chunk. Up to `concurrency`
+    /// jobs' provider calls run at once when the runtime has an Io; storage
+    /// reads and writes stay on the calling thread.
+    pub fn runExtractJobs(self: *Runtime, allocator: std.mem.Allocator, owner: []const u8, limit: usize, concurrency: usize) !ExtractJobRunResult {
+        if (!extractProviderUsable(self.options.extract_provider)) return error.ProviderUnavailable;
+        const worker_kind = streams.workerKindForStream(streams.extract_requested);
+        const materialized = try jobs.materializeStream(allocator, self.store, streams.extract_requested, worker_kind, .{ .limit = limit });
+        const leases = try jobs.leasePendingJobs(allocator, self.store, .{
+            .worker_kind = worker_kind,
+            .owner = owner,
+            .limit = limit,
+        });
+        defer jobs.freeLeaseResults(allocator, leases);
+
+        var result = ExtractJobRunResult{ .materializedCount = materialized.createdCount, .leasedCount = leases.len };
+        const batch_size = @max(concurrency, 1);
+        var start: usize = 0;
+        while (start < leases.len) : (start += batch_size) {
+            try self.runExtractBatch(allocator, leases[start..@min(start + batch_size, leases.len)], &result);
+        }
+        return result;
+    }
+
+    fn runExtractBatch(self: *Runtime, allocator: std.mem.Allocator, batch: []const jobs.LeaseResult, result: *ExtractJobRunResult) !void {
+        const tasks = try allocator.alloc(ExtractTask, batch.len);
+        for (tasks, batch) |*task, lease| task.* = .{ .lease = lease };
+        defer {
+            for (tasks) |*task| task.deinit(allocator);
+            allocator.free(tasks);
+        }
+        for (tasks) |*task| {
+            self.prepareExtractTask(allocator, task) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                task.failure = err;
+            };
+        }
+        self.callExtractTasks(allocator, tasks);
+
+        // Ground every reply, then embed all accepted claims in batched
+        // requests before the writes (putNode would embed them one by one).
+        var texts = std.ArrayList([]const u8).empty;
+        defer texts.deinit(allocator);
+        for (tasks) |*task| {
+            if (task.failure != null) continue;
+            const parsed = task.parsed orelse continue;
+            const messages = try task.sourceMessages(allocator);
+            defer allocator.free(messages);
+            task.grounding = fact_extraction.ground(allocator, parsed.value, messages) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                task.failure = err;
+                continue;
+            };
+            for (task.grounding.?.claims) |claim| try texts.append(allocator, claim.text);
+        }
+        self.store.prefetchEmbeddings(texts.items) catch {};
+        defer self.store.clearPrefetchedEmbeddings();
+
+        for (tasks) |*task| {
+            result.calls += task.calls;
+            if (task.calls > 1) result.jsonRetries += task.calls - 1;
+            if (task.failure) |err| {
+                result.failedCount += 1;
+                result.lastError = @errorName(err);
+                const error_json = try stringifyAlloc(allocator, .{ .@"error" = @errorName(err), .calls = task.calls });
+                defer allocator.free(error_json);
+                _ = jobs.failJob(allocator, self.store, task.lease.qid, error_json, 0) catch {};
+                continue;
+            }
+            const written = try self.writeExtractTask(allocator, task);
+            result.succeededCount += 1;
+            result.sourceMessages += task.sources.items.len;
+            result.assertionsWritten += written;
+            if (task.grounding) |grounding| result.counts.add(grounding.counts);
+        }
+    }
+
+    /// Loads the job's source messages (full text, reassembled from chunks)
+    /// and builds the extraction request. A job whose messages were all
+    /// forgotten has nothing to extract and makes no call.
+    fn prepareExtractTask(self: *Runtime, allocator: std.mem.Allocator, task: *ExtractTask) !void {
+        const payload_json = try self.payloadJsonForLease(allocator, task.lease);
+        defer allocator.free(payload_json);
+        task.payload = try std.json.parseFromSlice(Value, allocator, payload_json, .{ .allocate = .alloc_always });
+        const payload = objectValue(task.payload.?.value) orelse return error.InvalidRequest;
+        task.scope = parseScope(&payload);
+        task.session_qid = stringField(&payload, "sessionQid");
+        task.turn_qid = stringField(&payload, "turnQid");
+        const message_qids = arrayValue(payload.get("messageQids")) orelse return error.InvalidRequest;
+        for (message_qids.items) |qid_value| {
+            const message_qid = stringValue(qid_value) orelse continue;
+            const source = (try self.loadExtractSource(allocator, message_qid)) orelse continue;
+            task.sources.append(allocator, source) catch |err| {
+                source.deinit(allocator);
+                return err;
+            };
+        }
+        if (task.sources.items.len == 0) return;
+        const messages = try task.sourceMessages(allocator);
+        defer allocator.free(messages);
+        task.user_content = try fact_extraction.buildUserContent(allocator, task.sources.items[0].created_at, messages);
+    }
+
+    fn loadExtractSource(self: *Runtime, allocator: std.mem.Allocator, message_qid: []const u8) !?ExtractSource {
+        const node = (try self.store.getNode(allocator, message_qid)) orelse return null;
+        defer self.store.freeNode(allocator, node);
+        if (!std.mem.eql(u8, node.label, "Message")) return null;
+        var parsed = try std.json.parseFromSlice(Value, allocator, node.properties_json, .{});
+        defer parsed.deinit();
+        const props = objectValue(parsed.value) orelse return null;
+        if (boolField(&props, "deleted") orelse false) return null;
+
+        var content = std.ArrayList(u8).empty;
+        defer content.deinit(allocator);
+        var chunk_ends = std.ArrayList(usize).empty;
+        defer chunk_ends.deinit(allocator);
+        const chunk_count = integerField(&props, "chunkCount") orelse 0;
+        if (chunk_count > 1) {
+            // The message keeps a clamped copy; its chunks hold the full text.
+            var index: usize = 0;
+            while (index < chunk_count) : (index += 1) {
+                const chunk_qid = try chunkQid(allocator, message_qid, index);
+                defer allocator.free(chunk_qid);
+                const chunk = (try self.store.getNode(allocator, chunk_qid)) orelse return null;
+                defer self.store.freeNode(allocator, chunk);
+                if (try propertyBool(allocator, chunk.properties_json, "deleted")) return null;
+                const text = try readPropertyString(allocator, chunk.properties_json, "content");
+                defer allocator.free(text);
+                try content.appendSlice(allocator, text);
+                try chunk_ends.append(allocator, content.items.len);
+            }
+        } else {
+            try content.appendSlice(allocator, stringField(&props, "content") orelse return null);
+        }
+        if (content.items.len == 0) return null;
+
+        var source = ExtractSource{ .message_qid = try allocator.dupe(u8, message_qid) };
+        errdefer source.deinit(allocator);
+        source.role = try allocator.dupe(u8, stringField(&props, "role") orelse "user");
+        source.created_at = try dupeOptional(allocator, optionalStringField(&props, "createdAt"));
+        source.session_id = try dupeOptional(allocator, optionalStringField(&props, "sessionId"));
+        source.message_index = integerField(&props, "messageIndex");
+        source.content = try content.toOwnedSlice(allocator);
+        source.chunk_ends = try chunk_ends.toOwnedSlice(allocator);
+        return source;
+    }
+
+    fn callExtractTasks(self: *Runtime, allocator: std.mem.Allocator, tasks: []ExtractTask) void {
+        const endpoint = self.options.extract_provider;
+        const io = self.options.io orelse {
+            for (tasks) |*task| callExtractTask(task, allocator, null, endpoint);
+            return;
+        };
+        var group: std.Io.Group = .init;
+        for (tasks) |*task| {
+            if (tasks.len == 1) {
+                callExtractTask(task, allocator, io, endpoint);
+                continue;
+            }
+            group.concurrent(io, callExtractTask, .{ task, allocator, @as(?std.Io, io), endpoint }) catch
+                callExtractTask(task, allocator, io, endpoint);
+        }
+        group.await(io) catch {};
+    }
+
+    /// Writes one job's grounded claims and completes the job with its counts.
+    fn writeExtractTask(self: *Runtime, allocator: std.mem.Allocator, task: *ExtractTask) !usize {
+        var written: usize = 0;
+        if (task.grounding) |grounding| {
+            for (grounding.claims) |claim| {
+                if (try self.writeAssertion(allocator, task, claim)) written += 1;
+            }
+        }
+        const counts = if (task.grounding) |grounding| grounding.counts else fact_extraction.Counts{};
+        const summary = .{
+            .promptVersion = fact_extraction.prompt_version,
+            .provider = self.options.extract_provider.name,
+            .model = self.options.extract_provider.model,
+            .calls = task.calls,
+            .jsonRetries = if (task.calls > 1) task.calls - 1 else 0,
+            .sourceMessages = task.sources.items.len,
+            .assertionsWritten = written,
+            .counts = counts,
+        };
+        const result_json = try stringifyAlloc(allocator, summary);
+        defer allocator.free(result_json);
+        try jobs.completeJobWithResult(allocator, self.store, task.lease.qid, 0, result_json);
+        const event_payload = try stringifyAlloc(allocator, .{
+            .method = "memory.extract.completed",
+            .jobQid = task.lease.qid,
+            .sessionQid = task.session_qid,
+            .turnQid = task.turn_qid,
+            .result = summary,
+        });
+        defer allocator.free(event_payload);
+        _ = try self.publishEvent(streams.extract_completed, event_payload);
+        return written;
+    }
+
+    /// Writes one claim as an Assertion node: its text is a search key, and
+    /// EVIDENCED_BY edges lead to the source message and to every chunk the
+    /// quote overlaps. Qids are content-derived, so rerunning a job rewrites
+    /// the same nodes. Returns false when the source is gone.
+    fn writeAssertion(self: *Runtime, allocator: std.mem.Allocator, task: *ExtractTask, claim: fact_extraction.Claim) !bool {
+        const source = task.sources.items[claim.message_index];
+        // The message may have been forgotten while the provider call ran.
+        const message = (try self.store.getNode(allocator, source.message_qid)) orelse return false;
+        const forgotten = try propertyBool(allocator, message.properties_json, "deleted");
+        self.store.freeNode(allocator, message);
+        if (forgotten) return false;
+
+        const key = try std.fmt.allocPrint(allocator, "{s}\x1f{s}\x1f{s}", .{ source.message_qid, claim.quote, claim.text });
+        defer allocator.free(key);
+        const qid = try hashQid(allocator, "asrt", key);
+        defer allocator.free(qid);
+
+        var chunk_qids = std.ArrayList([]const u8).empty;
+        defer {
+            for (chunk_qids.items) |chunk_qid| allocator.free(chunk_qid);
+            chunk_qids.deinit(allocator);
+        }
+        if (source.chunk_ends.len > 1) {
+            if (fact_extraction.quoteChunkRange(source.content, claim.quote, source.chunk_ends)) |range| {
+                var index = range.first;
+                while (index <= range.last) : (index += 1) {
+                    const chunk_qid = try chunkQid(allocator, source.message_qid, index);
+                    chunk_qids.append(allocator, chunk_qid) catch |err| {
+                        allocator.free(chunk_qid);
+                        return err;
+                    };
+                }
+            }
+        }
+
+        const text = try clampPropertyText(allocator, claim.text);
+        defer allocator.free(text);
+        const quote = try clampPropertyText(allocator, claim.quote);
+        defer allocator.free(quote);
+        const props = try stringifyAlloc(allocator, .{
+            .kind = "assertion",
+            .qtype = "assertion",
+            .text = text,
+            .quote = quote,
+            .eventDate = claim.event_date,
+            .planned = claim.planned,
+            .sourceMessageQid = source.message_qid,
+            .evidenceQid = source.message_qid,
+            .chunkQids = chunk_qids.items,
+            .messageIndex = source.message_index,
+            .role = source.role,
+            .createdAt = source.created_at,
+            .sessionQid = task.session_qid,
+            .sessionId = source.session_id,
+            .turnQid = task.turn_qid,
+            .tenantId = task.scope.tenant_id,
+            .userId = task.scope.user_id,
+            .agentId = task.scope.agent_id,
+            .projectId = task.scope.project_id,
+            .extractorProvider = self.options.extract_provider.name,
+            .extractorModel = self.options.extract_provider.model,
+            .promptVersion = fact_extraction.prompt_version,
+            .groundingRepaired = claim.repaired,
+            .jobQid = task.lease.qid,
+            .state = "current",
+            .deleted = false,
+        });
+        defer allocator.free(props);
+        try self.store.putNode(.{ .qid = qid, .label = "Assertion", .properties_json = props });
+        try self.putDeterministicEdge(allocator, qid, source.message_qid, "EVIDENCED_BY");
+        for (chunk_qids.items) |chunk_qid| {
+            try self.putDeterministicEdge(allocator, qid, chunk_qid, "EVIDENCED_BY");
+        }
+        return true;
+    }
 };
+
+/// One message of an extract job's source episode. Strings are owned.
+const ExtractSource = struct {
+    message_qid: []u8,
+    role: []u8 = &.{},
+    /// Full message text.
+    content: []u8 = &.{},
+    created_at: ?[]u8 = null,
+    session_id: ?[]u8 = null,
+    message_index: ?i64 = null,
+    /// End offset of each chunk in `content`; empty for unchunked messages.
+    chunk_ends: []usize = &.{},
+
+    fn deinit(self: ExtractSource, allocator: std.mem.Allocator) void {
+        allocator.free(self.message_qid);
+        allocator.free(self.role);
+        allocator.free(self.content);
+        if (self.created_at) |value| allocator.free(value);
+        if (self.session_id) |value| allocator.free(value);
+        allocator.free(self.chunk_ends);
+    }
+};
+
+/// One leased extract job through prepare, call, ground and write.
+const ExtractTask = struct {
+    lease: jobs.LeaseResult,
+    /// The job payload; `scope`, `session_qid` and `turn_qid` borrow from it.
+    payload: ?std.json.Parsed(Value) = null,
+    scope: Scope = .{},
+    session_qid: ?[]const u8 = null,
+    turn_qid: ?[]const u8 = null,
+    sources: std.ArrayList(ExtractSource) = .empty,
+    user_content: ?[]u8 = null,
+    parsed: ?std.json.Parsed(Value) = null,
+    grounding: ?fact_extraction.Grounding = null,
+    calls: usize = 0,
+    failure: ?anyerror = null,
+
+    fn sourceMessages(self: *const ExtractTask, allocator: std.mem.Allocator) ![]fact_extraction.SourceMessage {
+        const messages = try allocator.alloc(fact_extraction.SourceMessage, self.sources.items.len);
+        for (self.sources.items, messages) |source, *message| {
+            message.* = .{ .role = source.role, .content = source.content, .created_at = source.created_at };
+        }
+        return messages;
+    }
+
+    fn deinit(self: *ExtractTask, allocator: std.mem.Allocator) void {
+        if (self.grounding) |grounding| grounding.deinit(allocator);
+        if (self.parsed) |parsed| parsed.deinit();
+        if (self.user_content) |content| allocator.free(content);
+        for (self.sources.items) |source| source.deinit(allocator);
+        self.sources.deinit(allocator);
+        if (self.payload) |payload| payload.deinit();
+    }
+};
+
+/// The provider half of an extract job; touches no storage, so it may run on
+/// another thread. Malformed replies get E1's two bounded retries, each with
+/// its own prompt suffix.
+fn callExtractTask(task: *ExtractTask, allocator: std.mem.Allocator, io: ?std.Io, endpoint: providers.ProviderEndpoint) void {
+    const user_content = task.user_content orelse return;
+    if (task.failure != null) return;
+    for (fact_extraction.attempt_prompts) |prompt| {
+        task.calls += 1;
+        const reply = providers.completeChat(allocator, io, endpoint, .{
+            .system_prompt = prompt,
+            .user_content = user_content,
+            .json_mode = true,
+        }) catch |err| {
+            task.failure = err;
+            return;
+        };
+        defer allocator.free(reply);
+        task.parsed = fact_extraction.parseReply(allocator, reply) catch |err| {
+            if (err == error.OutOfMemory) {
+                task.failure = err;
+                return;
+            }
+            continue;
+        };
+        return;
+    }
+    task.failure = error.MalformedExtraction;
+}
+
+/// An extract provider must be a chat model; `deterministic` cannot extract.
+fn extractProviderUsable(endpoint: providers.ProviderEndpoint) bool {
+    return endpoint.kind == .http or endpoint.kind == .callback;
+}
 
 const RerankSettings = struct {
     enabled: bool = true,
@@ -2827,6 +3415,18 @@ const OwnedRerankTrace = struct {
 const OwnedItems = struct {
     allocator: std.mem.Allocator,
     items: std.ArrayList(MessageResult) = .empty,
+    /// Set when the items were collected with `options.factKeys`.
+    fact_keys: ?FactKeysTrace = null,
+
+    /// The fact-keys trace with the evidence items still in the packet.
+    fn factKeysTrace(self: *const OwnedItems) ?FactKeysTrace {
+        var trace = self.fact_keys orelse return null;
+        trace.keptEvidenceItems = 0;
+        for (self.items.items) |item| {
+            if (item.via_assertion) trace.keptEvidenceItems += 1;
+        }
+        return trace;
+    }
 
     fn deinit(self: *OwnedItems) void {
         for (self.items.items) |item| {
@@ -2955,6 +3555,93 @@ const OwnedItems = struct {
         freeEvidence(self.allocator, item.evidence);
     }
 };
+
+/// Which nodes may become retrieval items, and how they are rendered.
+const ItemFilter = struct {
+    scope: Scope = .{},
+    include_deleted: bool = false,
+    labels_value: ?Value = null,
+    valid_at: ?[]const u8 = null,
+    event_window: EventWindow = .{},
+    include_evidence: bool = true,
+    include_debug: bool = false,
+};
+
+/// Appends `node` as an item scored `score` when it passes `filter`.
+fn appendNodeItem(allocator: std.mem.Allocator, owned: *OwnedItems, node: storage.Node, score: f32, filter: ItemFilter) !bool {
+    const include_deleted = filter.include_deleted;
+    const labels_value = filter.labels_value;
+    const valid_at = filter.valid_at;
+    if (!include_deleted and try propertyBool(allocator, node.properties_json, "deleted")) return false;
+    if (!try filter.scope.matchesNode(allocator, node)) return false;
+    if (isInternalLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) return false;
+    if (isStructuralLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) return false;
+    if (isHiddenSearchLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) return false;
+    if (!labelAllowed(node.label, labels_value)) return false;
+    // Chunked messages and copy-only episodes are reached through
+    // their chunks/messages; never surface them as items themselves.
+    if (try propertyIsFalse(allocator, node.properties_json, "searchable")) return false;
+    if (!try nodeWithinEventWindow(allocator, node, filter.event_window)) return false;
+    if (!include_deleted and valid_at != null) {
+        if (!try nodeActiveAt(allocator, node, valid_at.?)) return false;
+    }
+    if (!include_deleted and valid_at == null and isSlotMemoryLabel(node.label)) {
+        if (!try propertyEquals(allocator, node.properties_json, "state", "current")) return false;
+    }
+    if (!include_deleted and isDerivedLabel(node.label)) {
+        if (valid_at) |timestamp| {
+            if (!try derivedActiveAt(allocator, node, timestamp)) return false;
+        } else {
+            if (!try propertyEquals(allocator, node.properties_json, "state", "current")) return false;
+        }
+    }
+
+    const text = itemTextForNode(allocator, node) catch return false;
+    errdefer allocator.free(text);
+    const raw_source = try rawSourceForNode(allocator, node);
+    errdefer if (raw_source) |source| source.deinit(allocator);
+    const evidence = if (!filter.include_evidence)
+        try allocator.alloc(EvidenceResult, 0)
+    else if (std.mem.eql(u8, node.label, "Chunk"))
+        try chunkEvidence(allocator, node, raw_source)
+    else
+        try evidenceForNode(allocator, node);
+    errdefer freeEvidence(allocator, evidence);
+    const state = try stateForNode(allocator, node);
+    errdefer allocator.free(state);
+    const valid_from = try validFromForNode(allocator, node);
+    errdefer if (valid_from) |value_to_free| allocator.free(value_to_free);
+    const valid_to = try readOptionalPropertyString(allocator, node.properties_json, "validTo");
+    errdefer if (valid_to) |value_to_free| allocator.free(value_to_free);
+    const slot_metadata = try slotMetadataForNode(allocator, node);
+    errdefer slot_metadata.deinit(allocator);
+    const result_qid = try allocator.dupe(u8, node.qid);
+    errdefer allocator.free(result_qid);
+    try owned.items.append(allocator, .{
+        .qid = result_qid,
+        .type = labelType(node.label),
+        .text = text,
+        .score = score,
+        .state = state,
+        .validFrom = valid_from,
+        .validTo = valid_to,
+        .evidence = evidence,
+        .includeDebug = filter.include_debug,
+        .slotKey = slot_metadata.slot_key,
+        .subject = slot_metadata.subject,
+        .attribute = slot_metadata.attribute,
+        .value = slot_metadata.value,
+        .numericValue = slot_metadata.numeric_value,
+        .unit = slot_metadata.unit,
+        .aggregationMode = slot_metadata.aggregation_mode,
+        .raw_source = raw_source,
+    });
+    return true;
+}
+
+fn stringLessThan(_: void, left: []const u8, right: []const u8) bool {
+    return std.mem.order(u8, left, right) == .lt;
+}
 
 /// Evidence handed to answer synthesis, in retrieval rank order. Strings are
 /// borrowed from `items` and must not outlive them; `evidenceQids` let readers
@@ -3485,7 +4172,7 @@ fn textForNode(allocator: std.mem.Allocator, node: storage.Node) ![]u8 {
     if (std.mem.eql(u8, node.label, "Episode")) {
         return readPropertyString(allocator, node.properties_json, "summary");
     }
-    if (std.mem.eql(u8, node.label, "MemoryCard")) {
+    if (std.mem.eql(u8, node.label, "MemoryCard") or std.mem.eql(u8, node.label, "Assertion")) {
         return readPropertyString(allocator, node.properties_json, "text");
     }
     if (isDerivedLabel(node.label)) {
@@ -3555,6 +4242,7 @@ fn labelType(label: []const u8) []const u8 {
     if (std.mem.eql(u8, label, "Observation")) return "raw";
     if (std.mem.eql(u8, label, "Entity")) return "entity";
     if (std.mem.eql(u8, label, "Core")) return "core";
+    if (std.mem.eql(u8, label, "Assertion")) return "assertion";
     if (std.mem.eql(u8, label, "Feedback")) return "raw";
     return "raw";
 }
@@ -3568,7 +4256,8 @@ fn isSlotMemoryLabel(label: []const u8) bool {
 }
 
 fn isEvidenceLinkedLabel(label: []const u8) bool {
-    return isDerivedLabel(label) or std.mem.eql(u8, label, "MemoryCard") or std.mem.eql(u8, label, "Episode");
+    return isDerivedLabel(label) or std.mem.eql(u8, label, "MemoryCard") or std.mem.eql(u8, label, "Episode") or
+        std.mem.eql(u8, label, "Assertion");
 }
 
 fn isConsolidatableLabel(label: []const u8) bool {
@@ -3589,8 +4278,11 @@ fn isStructuralLabel(label: []const u8) bool {
     return std.mem.eql(u8, label, "Session") or std.mem.eql(u8, label, "Turn");
 }
 
+/// Search keys that are never items themselves unless a caller asks for the
+/// label: entities seed graph search, and assertions stand in for their
+/// source evidence under `options.factKeys`.
 fn isHiddenSearchLabel(label: []const u8) bool {
-    return std.mem.eql(u8, label, "Entity");
+    return std.mem.eql(u8, label, "Entity") or std.mem.eql(u8, label, "Assertion");
 }
 
 fn labelRequestedExplicitly(label: []const u8, labels_value: ?Value) bool {
@@ -3644,7 +4336,7 @@ fn nodeWithinEventWindow(allocator: std.mem.Allocator, node: storage.Node, windo
 }
 
 fn eventTimestampForNode(allocator: std.mem.Allocator, node: storage.Node) !?[]u8 {
-    if (std.mem.eql(u8, node.label, "Message") or std.mem.eql(u8, node.label, "Chunk")) {
+    if (std.mem.eql(u8, node.label, "Message") or std.mem.eql(u8, node.label, "Chunk") or std.mem.eql(u8, node.label, "Assertion")) {
         return readOptionalPropertyString(allocator, node.properties_json, "createdAt");
     }
     if (std.mem.eql(u8, node.label, "Episode")) {
@@ -3660,7 +4352,7 @@ fn eventTimestampForNode(allocator: std.mem.Allocator, node: storage.Node) !?[]u
 }
 
 fn validFromForNode(allocator: std.mem.Allocator, node: storage.Node) !?[]u8 {
-    if (std.mem.eql(u8, node.label, "Message") or std.mem.eql(u8, node.label, "Chunk")) {
+    if (std.mem.eql(u8, node.label, "Message") or std.mem.eql(u8, node.label, "Chunk") or std.mem.eql(u8, node.label, "Assertion")) {
         return readOptionalPropertyString(allocator, node.properties_json, "createdAt");
     }
     if (std.mem.eql(u8, node.label, "Episode")) {
@@ -3918,7 +4610,17 @@ fn recencyScore(item: MessageResult) f32 {
 /// averages about 4.5 bytes per o200k token on LongMemEval-S; 3.5 left a 4K
 /// budget about a quarter empty.
 fn estimateItemTokens(item: MessageResult) usize {
-    return (item.text.len * 5 + 20) / 21 + 16;
+    return (item.text.len * 5 + 20) / 21 + 16 + eventTagTokens(item);
+}
+
+/// factKeys: the ` [event 2023-03-03, ...]` tag on a raw line. Dates
+/// tokenize at about 3 bytes per token. Zero for items without event dates.
+fn eventTagTokens(item: MessageResult) usize {
+    const source = item.raw_source orelse return 0;
+    if (source.event_dates.len == 0) return 0;
+    var bytes: usize = " [event ]".len;
+    for (source.event_dates) |date| bytes += date.len + 2;
+    return (bytes + 2) / 3;
 }
 
 /// ceil(prompt_bytes / 4.2): the item estimator's rate applied to the rendered
@@ -4123,6 +4825,17 @@ fn writeSessionSection(arena: std.mem.Allocator, out: *std.Io.Writer, entries: [
                         try out.print(" ({d}/{d})", .{ chunk_index + 1, count });
                         labelled = true;
                     }
+                }
+            }
+            if (entry.item.raw_source) |source| {
+                if (source.event_dates.len > 0) {
+                    try out.writeAll(" [event ");
+                    for (source.event_dates, 0..) |date, date_index| {
+                        if (date_index > 0) try out.writeAll(", ");
+                        try out.writeAll(date);
+                    }
+                    try out.writeByte(']');
+                    labelled = true;
                 }
             }
             try out.writeAll(if (labelled) ": " else " ");
@@ -4494,6 +5207,34 @@ fn freeStreamEntries(allocator: std.mem.Allocator, entries: []storage.StreamEntr
         allocator.free(entry.payload_json);
     }
     allocator.free(entries);
+}
+
+/// Drops Assertion hits from one search channel. Returns the remaining hits
+/// (at most `limit`) and frees `hits`, or returns null when assertions left
+/// the channel short and it may hold more: the caller then asks for more than
+/// `requested`. A channel with no assertion hits comes back unchanged.
+fn withoutAssertionHits(allocator: std.mem.Allocator, hits: []storage.SearchHit, requested: usize, limit: usize) !?[]storage.SearchHit {
+    var kept: usize = 0;
+    for (hits) |hit| {
+        if (!std.mem.startsWith(u8, hit.qid, assertion_qid_prefix)) kept += 1;
+    }
+    if (kept == hits.len and hits.len <= limit) return hits;
+    if (kept < limit and hits.len >= requested) {
+        freeHits(allocator, hits);
+        return null;
+    }
+    const result = try allocator.alloc(storage.SearchHit, @min(kept, limit));
+    var written: usize = 0;
+    for (hits) |hit| {
+        if (written < result.len and !std.mem.startsWith(u8, hit.qid, assertion_qid_prefix)) {
+            result[written] = hit;
+            written += 1;
+        } else {
+            allocator.free(hit.qid);
+        }
+    }
+    allocator.free(hits);
+    return result;
 }
 
 /// Reciprocal-rank fusion (k = 60) of several channels. RRF is rank based,
@@ -5639,7 +6380,7 @@ test "runtime without a reranker leaves retrieval unchanged" {
 
     const health = try runtime.dispatch(std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
     defer std.testing.allocator.free(health);
-    try std.testing.expect(std.mem.indexOf(u8, health, "\"capabilities\":{\"reranker\":{\"configured\":false,\"model\":null}}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"capabilities\":{\"reranker\":{\"configured\":false,\"model\":null},") != null);
 
     var reranker = TestReranker{};
     defer reranker.deinit();
@@ -6607,4 +7348,459 @@ fn freeVerificationIssues(allocator: std.mem.Allocator, issues: []const storage.
         if (issue.qid) |qid| allocator.free(qid);
     }
     allocator.free(issues);
+}
+
+/// In-process extraction model for the extract worker tests: replies by
+/// needle in the user turn, optionally malformed for the first calls.
+const TestExtractor = struct {
+    calls: usize = 0,
+    replies: []const [2][]const u8 = &.{},
+    malformed_first: usize = 0,
+    last_system: ?[]u8 = null,
+    /// Every user turn, in call order.
+    users: std.ArrayList([]u8) = .empty,
+    last_json_mode: bool = false,
+
+    fn endpoint(self: *TestExtractor) providers.ProviderEndpoint {
+        return .{
+            .kind = .callback,
+            .name = "test-extractor",
+            .model = "test-extract-model",
+            .callback = .{ .context = self, .respond = respond },
+        };
+    }
+
+    fn respond(context: ?*anyopaque, allocator: std.mem.Allocator, turn: providers.ChatTurn) anyerror![]u8 {
+        const self: *TestExtractor = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        if (self.last_system) |previous| std.testing.allocator.free(previous);
+        self.last_system = try std.testing.allocator.dupe(u8, turn.system_prompt);
+        try self.users.append(std.testing.allocator, try std.testing.allocator.dupe(u8, turn.user_content));
+        self.last_json_mode = turn.json_mode;
+        if (self.calls <= self.malformed_first) return allocator.dupe(u8, "{\"assertions\":[{\"text\":");
+        for (self.replies) |pair| {
+            if (std.mem.indexOf(u8, turn.user_content, pair[0]) != null) return allocator.dupe(u8, pair[1]);
+        }
+        return allocator.dupe(u8, "{\"assertions\":[]}");
+    }
+
+    fn deinit(self: *TestExtractor) void {
+        if (self.last_system) |value| std.testing.allocator.free(value);
+        for (self.users.items) |value| std.testing.allocator.free(value);
+        self.users.deinit(std.testing.allocator);
+    }
+
+    fn userContaining(self: *const TestExtractor, needle: []const u8) ?[]const u8 {
+        for (self.users.items) |user| {
+            if (std.mem.indexOf(u8, user, needle) != null) return user;
+        }
+        return null;
+    }
+};
+
+const flat_reply =
+    \\{"assertions":[
+    \\{"text":"The user received the keys to a new apartment.","messageIndex":0,"quote":"Got the keys to the new flat","eventDate":"2023-03-03"},
+    \\{"text":"The landlord left the user a bottle of wine.","messageIndex":1,"quote":"The landlord left a bottle of wine"},
+    \\{"text":"Wine was mentioned.","messageIndex":5,"quote":"wine"},
+    \\{"text":"The user moved in on March 9.","messageIndex":0,"quote":"Got the keys","eventDate":"2023-03-09"}
+    \\]}
+;
+const kyoto_reply =
+    \\{"assertions":[{"text":"The user plans a trip to Japan to see sakura.","messageIndex":0,"quote":"flying to Kyoto for the cherry blossoms","eventDate":"2023-04","planned":true}]}
+;
+const fact_test_replies = [_][2][]const u8{
+    .{ "new flat", flat_reply },
+    .{ "Kyoto", kyoto_reply },
+};
+
+const FactSessions = struct {
+    flat_message: []u8,
+    flat_job: []u8,
+    kyoto_message: []u8,
+
+    fn deinit(self: FactSessions) void {
+        std.testing.allocator.free(self.flat_message);
+        std.testing.allocator.free(self.flat_job);
+        std.testing.allocator.free(self.kyoto_message);
+    }
+};
+
+fn resultArrayFirst(allocator: std.mem.Allocator, response: []const u8, key: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(Value, allocator, response, .{});
+    defer parsed.deinit();
+    const array = parsed.value.object.get("result").?.object.get(key).?.array.items;
+    return allocator.dupe(u8, array[0].string);
+}
+
+/// Two sessions: a short one about a new flat and one whose long user message
+/// is chunked, with the Kyoto plan in its second chunk.
+fn rememberFactSessions(runtime: *Runtime) !FactSessions {
+    const allocator = std.testing.allocator;
+    const flat = try runtime.dispatch(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:facts\"},\"sessionId\":\"s-flat\",\"messages\":[{\"role\":\"user\",\"content\":\"Got the keys to the new flat yesterday! The landlord left a bottle of wine.\",\"createdAt\":\"2023-03-04T09:00:00Z\"},{\"role\":\"assistant\",\"content\":\"Congratulations on the new flat! Enjoy the wine.\",\"createdAt\":\"2023-03-04T09:00:00Z\"}]}}",
+    );
+    defer allocator.free(flat);
+    var filler: std.Io.Writer.Allocating = .init(allocator);
+    defer filler.deinit();
+    for (0..20) |_| try filler.writer.writeAll("We walked along the river and talked about nothing in particular. ");
+    try filler.writer.writeAll("Next month I am flying to Kyoto for the cherry blossoms.");
+    const request = try stringifyAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = "r2",
+        .method = "memory.remember",
+        .params = .{
+            .scope = .{ .projectId = "repo:facts" },
+            .sessionId = "s-trip",
+            .messages = &[_]struct { role: []const u8, content: []const u8, createdAt: []const u8 }{
+                .{ .role = "user", .content = filler.written(), .createdAt = "2023-03-10T09:00:00Z" },
+            },
+        },
+    });
+    defer allocator.free(request);
+    const trip = try runtime.dispatch(allocator, request);
+    defer allocator.free(trip);
+
+    const flat_message = try resultArrayFirst(allocator, flat, "messageQids");
+    errdefer allocator.free(flat_message);
+    const flat_job = try resultArrayFirst(allocator, flat, "queuedJobs");
+    errdefer allocator.free(flat_job);
+    return .{
+        .flat_message = flat_message,
+        .flat_job = flat_job,
+        .kyoto_message = try resultArrayFirst(allocator, trip, "messageQids"),
+    };
+}
+
+fn retrieveFacts(runtime: *Runtime, query: []const u8, options_json: []const u8) ![]u8 {
+    const request = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"q\",\"method\":\"memory.retrieve\",\"params\":{{\"query\":\"{s}\",\"scope\":{{\"projectId\":\"repo:facts\"}},\"time\":{{\"validAt\":\"2023-03-20T09:00:00Z\"}},\"options\":{{\"includeDebug\":true,\"logRetrieval\":false,\"logAudit\":false{s}}}}}}}",
+        .{ query, options_json },
+    );
+    defer std.testing.allocator.free(request);
+    return runtime.dispatch(std.testing.allocator, request);
+}
+
+fn searchAssertions(runtime: *Runtime, query: []const u8, mode: []const u8) ![]u8 {
+    const request = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"s\",\"method\":\"memory.search\",\"params\":{{\"query\":\"{s}\",\"mode\":\"{s}\",\"scope\":{{\"projectId\":\"repo:facts\"}},\"labels\":[\"Assertion\"],\"limit\":20}}}}",
+        .{ query, mode },
+    );
+    defer std.testing.allocator.free(request);
+    return runtime.dispatch(std.testing.allocator, request);
+}
+
+fn firstResultQid(allocator: std.mem.Allocator, response: []const u8) !?[]u8 {
+    var parsed = try std.json.parseFromSlice(Value, allocator, response, .{});
+    defer parsed.deinit();
+    const results = parsed.value.object.get("result").?.object.get("results").?.array.items;
+    if (results.len == 0) return null;
+    return try allocator.dupe(u8, results[0].object.get("qid").?.string);
+}
+
+test "extract worker sends the E1 prompt and grounds claims into assertions" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+    var extractor_model = TestExtractor{ .replies = &fact_test_replies };
+    defer extractor_model.deinit();
+    var runtime = Runtime.initWithOptions(store, harness.health(), .{ .extract_provider = extractor_model.endpoint() });
+    defer runtime.deinit();
+    const sessions = try rememberFactSessions(&runtime);
+    defer sessions.deinit();
+
+    const run = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x1\",\"method\":\"memory.extract.run\",\"params\":{\"owner\":\"test\"}}");
+    defer allocator.free(run);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"leasedCount\":2,\"succeededCount\":2,\"failedCount\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"model\":\"test-extract-model\",\"promptVersion\":\"quipu.extract.e1-eventdate.v1\",\"calls\":2,\"jsonRetries\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"assertionsWritten\":4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"candidates\":5,\"accepted\":4,\"repaired\":1,\"duplicates\":0,\"quarantined\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"quoteAmbiguous\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"eventDates\":2,\"eventDatesRejected\":1,\"planned\":1") != null);
+
+    // The turn: E1's prompt in JSON mode; the user content is the session date
+    // and the full message text, reassembled from its chunks.
+    try std.testing.expectEqualStrings(fact_extraction.system_prompt, extractor_model.last_system.?);
+    try std.testing.expect(extractor_model.last_json_mode);
+    const user = extractor_model.userContaining("Kyoto") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.startsWith(u8, user, "{\"conversationTime\":\"2023-03-10T09:00:00Z\",\"messages\":[{\"role\":\"user\",\"content\":\"We walked"));
+    try std.testing.expect(std.mem.endsWith(u8, user, "Next month I am flying to Kyoto for the cherry blossoms.\"}]}"));
+    try std.testing.expect(std.mem.indexOf(u8, user, "repo:facts") == null);
+    const body = try providers.buildChatRequestBody(allocator, .{
+        .kind = .http,
+        .name = "openrouter",
+        .url = "http://127.0.0.1/v1/chat/completions",
+        .capabilities = .{ .supports_json_mode = true },
+    }, "openai/gpt-4o-mini-2024-07-18", .{ .system_prompt = fact_extraction.system_prompt, .user_content = user, .json_mode = true });
+    defer allocator.free(body);
+    try std.testing.expect(std.mem.startsWith(u8, body, "{\"model\":\"openai/gpt-4o-mini-2024-07-18\",\"messages\":[{\"role\":\"system\",\"content\":\"Extract atomic claims from the source episode"));
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":0") != null);
+    try std.testing.expect(std.mem.endsWith(u8, body, "\"response_format\":{\"type\":\"json_object\"}}"));
+
+    // Assertion nodes carry the claim, quote, date and provenance, and link
+    // EVIDENCED_BY to their message (and chunk, for the long message).
+    const flat_search = try searchAssertions(&runtime, "apartment", "fts");
+    defer allocator.free(flat_search);
+    try std.testing.expect(std.mem.indexOf(u8, flat_search, "\"type\":\"assertion\"") != null);
+    const flat_qid = (try firstResultQid(allocator, flat_search)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(flat_qid);
+    try std.testing.expect(std.mem.startsWith(u8, flat_qid, assertion_qid_prefix));
+    const flat_node = (try store.getNode(allocator, flat_qid)) orelse return error.TestUnexpectedResult;
+    defer store.freeNode(allocator, flat_node);
+    try std.testing.expectEqualStrings("Assertion", flat_node.label);
+    for ([_][]const u8{
+        "\"text\":\"The user received the keys to a new apartment.\"",
+        "\"quote\":\"Got the keys to the new flat\"",
+        "\"eventDate\":\"2023-03-03\"",
+        "\"planned\":false",
+        "\"chunkQids\":[]",
+        "\"role\":\"user\"",
+        "\"createdAt\":\"2023-03-04T09:00:00Z\"",
+        "\"sessionId\":\"s-flat\"",
+        "\"projectId\":\"repo:facts\"",
+        "\"extractorModel\":\"test-extract-model\"",
+        "\"promptVersion\":\"quipu.extract.e1-eventdate.v1\"",
+    }) |needle| {
+        if (std.mem.indexOf(u8, flat_node.properties_json, needle) == null) {
+            std.debug.print("missing {s} in {s}\n", .{ needle, flat_node.properties_json });
+            return error.TestUnexpectedResult;
+        }
+    }
+    const source_needle = try std.fmt.allocPrint(allocator, "\"sourceMessageQid\":\"{s}\"", .{sessions.flat_message});
+    defer allocator.free(source_needle);
+    try std.testing.expect(std.mem.indexOf(u8, flat_node.properties_json, source_needle) != null);
+    const flat_edges = try store.findEdges(allocator, .{ .from_qid = flat_qid, .edge_type = "EVIDENCED_BY", .limit = 10 });
+    defer store.freeEdges(allocator, flat_edges);
+    try std.testing.expectEqual(@as(usize, 1), flat_edges.len);
+    try std.testing.expectEqualStrings(sessions.flat_message, flat_edges[0].to_qid);
+
+    const kyoto_search = try searchAssertions(&runtime, "Japan sakura", "fts");
+    defer allocator.free(kyoto_search);
+    const kyoto_qid = (try firstResultQid(allocator, kyoto_search)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(kyoto_qid);
+    const second_chunk = try chunkQid(allocator, sessions.kyoto_message, 1);
+    defer allocator.free(second_chunk);
+    const kyoto_edges = try store.findEdges(allocator, .{ .from_qid = kyoto_qid, .edge_type = "EVIDENCED_BY", .limit = 10 });
+    defer store.freeEdges(allocator, kyoto_edges);
+    try std.testing.expectEqual(@as(usize, 2), kyoto_edges.len);
+    var linked_message = false;
+    var linked_chunk = false;
+    for (kyoto_edges) |edge| {
+        if (std.mem.eql(u8, edge.to_qid, sessions.kyoto_message)) linked_message = true;
+        if (std.mem.eql(u8, edge.to_qid, second_chunk)) linked_chunk = true;
+    }
+    try std.testing.expect(linked_message and linked_chunk);
+
+    // The job records its counts; rerunning finds nothing pending.
+    const job = (try store.getNode(allocator, sessions.flat_job)) orelse return error.TestUnexpectedResult;
+    defer store.freeNode(allocator, job);
+    try std.testing.expect(std.mem.indexOf(u8, job.properties_json, "\"status\":\"succeeded\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, job.properties_json, "\\\"accepted\\\":3,\\\"repaired\\\":1,\\\"duplicates\\\":0,\\\"quarantined\\\":1") != null);
+    const rerun = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x2\",\"method\":\"memory.extract.run\",\"params\":{}}");
+    defer allocator.free(rerun);
+    try std.testing.expect(std.mem.indexOf(u8, rerun, "\"leasedCount\":0") != null);
+    try std.testing.expectEqual(@as(usize, 2), extractor_model.calls);
+}
+
+test "extract worker retries malformed JSON a bounded number of times" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+
+    // One malformed reply: E1's Unicode retry prompt recovers it.
+    var recovering = TestExtractor{ .replies = &fact_test_replies, .malformed_first = 1 };
+    defer recovering.deinit();
+    var runtime = Runtime.initWithOptions(store, harness.health(), .{ .extract_provider = recovering.endpoint() });
+    defer runtime.deinit();
+    const sessions = try rememberFactSessions(&runtime);
+    defer sessions.deinit();
+    const first = try runtime.runExtractJobs(allocator, "test", 1, 1);
+    try std.testing.expectEqual(@as(usize, 1), first.succeededCount);
+    try std.testing.expectEqual(@as(usize, 2), first.calls);
+    try std.testing.expectEqual(@as(usize, 1), first.jsonRetries);
+    try std.testing.expectEqualStrings(fact_extraction.unicode_retry_prompt, recovering.last_system.?);
+
+    // Always malformed: three calls, then the job fails and stays retryable.
+    var broken = TestExtractor{ .malformed_first = 100 };
+    defer broken.deinit();
+    runtime.options.extract_provider = broken.endpoint();
+    const second = try runtime.runExtractJobs(allocator, "test", 1, 1);
+    try std.testing.expectEqual(@as(usize, 1), second.failedCount);
+    try std.testing.expectEqual(@as(usize, 3), second.calls);
+    try std.testing.expectEqualStrings("MalformedExtraction", second.lastError.?);
+    try std.testing.expectEqualStrings(fact_extraction.syntax_retry_prompt, broken.last_system.?);
+    try std.testing.expectEqual(@as(usize, 0), second.counts.accepted);
+
+    var unconfigured = Runtime.init(store, harness.health());
+    const refused = try unconfigured.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"memory.extract.run\",\"params\":{}}");
+    defer allocator.free(refused);
+    try std.testing.expect(std.mem.indexOf(u8, refused, "\"code\":\"provider_error\"") != null);
+}
+
+test "factKeys off leaves retrieval unchanged and never returns assertions" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var extractor_model = TestExtractor{ .replies = &fact_test_replies };
+    defer extractor_model.deinit();
+    var runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{ .extract_provider = extractor_model.endpoint() });
+    defer runtime.deinit();
+    const sessions = try rememberFactSessions(&runtime);
+    defer sessions.deinit();
+
+    const queries = [_][]const u8{ "keys flat wine", "apartment keys", "Kyoto cherry blossoms Japan" };
+    var before: [queries.len][]u8 = undefined;
+    var before_qids: [queries.len]ResponseQids = undefined;
+    for (queries, 0..) |query, index| {
+        const response = try retrieveFacts(&runtime, query, "");
+        defer allocator.free(response);
+        before[index] = try resultStringField(allocator, response, "prompt");
+        before_qids[index] = try responseItemQids(response);
+    }
+    defer for (&before, &before_qids) |prompt, *qids| {
+        allocator.free(prompt);
+        qids.deinit();
+    };
+
+    const run = try runtime.runExtractJobs(allocator, "test", 100, 1);
+    try std.testing.expectEqual(@as(usize, 4), run.assertionsWritten);
+
+    for (queries, 0..) |query, index| {
+        for ([_][]const u8{ "", ",\"factKeys\":false" }) |option| {
+            const response = try retrieveFacts(&runtime, query, option);
+            defer allocator.free(response);
+            const prompt = try resultStringField(allocator, response, "prompt");
+            defer allocator.free(prompt);
+            try std.testing.expectEqualStrings(before[index], prompt);
+            var qids = try responseItemQids(response);
+            defer qids.deinit();
+            try std.testing.expectEqual(before_qids[index].qids.len, qids.qids.len);
+            for (before_qids[index].qids, qids.qids) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+            try std.testing.expect(std.mem.indexOf(u8, response, assertion_qid_prefix) == null);
+            try std.testing.expect(std.mem.indexOf(u8, response, "\"factKeys\"") == null);
+        }
+    }
+    // A default search does not surface assertions either.
+    const search = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"s\",\"method\":\"memory.search\",\"params\":{\"query\":\"apartment\",\"scope\":{\"projectId\":\"repo:facts\"}}}");
+    defer allocator.free(search);
+    try std.testing.expect(std.mem.indexOf(u8, search, assertion_qid_prefix) == null);
+}
+
+test "factKeys turns assertion hits into their raw evidence with event dates" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var extractor_model = TestExtractor{ .replies = &fact_test_replies };
+    defer extractor_model.deinit();
+    var runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{ .extract_provider = extractor_model.endpoint() });
+    defer runtime.deinit();
+    const sessions = try rememberFactSessions(&runtime);
+    defer sessions.deinit();
+    _ = try runtime.runExtractJobs(allocator, "test", 100, 1);
+
+    // "apartment" occurs only in a claim: off finds nothing, on finds the
+    // source message, never the assertion itself.
+    const off = try retrieveFacts(&runtime, "apartment", "");
+    defer allocator.free(off);
+    try std.testing.expect(std.mem.indexOf(u8, off, sessions.flat_message) == null);
+    const on = try retrieveFacts(&runtime, "apartment", ",\"factKeys\":true");
+    defer allocator.free(on);
+    var on_qids = try responseItemQids(on);
+    defer on_qids.deinit();
+    try std.testing.expectEqual(@as(usize, 1), on_qids.qids.len);
+    try std.testing.expectEqualStrings(sessions.flat_message, on_qids.qids[0]);
+    try std.testing.expect(std.mem.indexOf(u8, on, assertion_qid_prefix) == null);
+    try std.testing.expect(std.mem.indexOf(u8, on, "\"type\":\"message\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, on, "\"factKeys\":{\"assertionHits\":1,\"evidenceItems\":1,\"keptEvidenceItems\":1,\"datedItems\":1}") != null);
+    const prompt = try resultStringField(allocator, on, "prompt");
+    defer allocator.free(prompt);
+    // The rejected 2023-03-09 date is gone; the line's own date is implied.
+    const line = try std.fmt.allocPrint(allocator, "[{s}] user [event 2023-03-03]: Got the keys to the new flat yesterday!", .{sessions.flat_message});
+    defer allocator.free(line);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, line) != null);
+
+    // A long message is reached through the chunk holding the quote.
+    const plan = try retrieveFacts(&runtime, "Japan sakura", ",\"factKeys\":true");
+    defer allocator.free(plan);
+    var plan_qids = try responseItemQids(plan);
+    defer plan_qids.deinit();
+    const second_chunk = try chunkQid(allocator, sessions.kyoto_message, 1);
+    defer allocator.free(second_chunk);
+    try std.testing.expectEqual(@as(usize, 1), plan_qids.qids.len);
+    try std.testing.expectEqualStrings(second_chunk, plan_qids.qids[0]);
+    const plan_prompt = try resultStringField(allocator, plan, "prompt");
+    defer allocator.free(plan_prompt);
+    try std.testing.expect(std.mem.indexOf(u8, plan_prompt, "(2/2) [event 2023-04 planned]: ") != null);
+
+    // A raw hit and an assertion hit on the same message yield one item.
+    const both = try retrieveFacts(&runtime, "keys flat apartment", ",\"factKeys\":true");
+    defer allocator.free(both);
+    var both_qids = try responseItemQids(both);
+    defer both_qids.deinit();
+    var flat_items: usize = 0;
+    for (both_qids.qids) |qid| {
+        if (std.mem.eql(u8, qid, sessions.flat_message)) flat_items += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), flat_items);
+}
+
+test "forgetting a message tombstones its assertions" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+    var extractor_model = TestExtractor{ .replies = &fact_test_replies };
+    defer extractor_model.deinit();
+    var runtime = Runtime.initWithOptions(store, harness.health(), .{ .extract_provider = extractor_model.endpoint() });
+    defer runtime.deinit();
+    const sessions = try rememberFactSessions(&runtime);
+    defer sessions.deinit();
+    _ = try runtime.runExtractJobs(allocator, "test", 100, 1);
+
+    const found = try searchAssertions(&runtime, "apartment", "fts");
+    defer allocator.free(found);
+    const flat_qid = (try firstResultQid(allocator, found)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(flat_qid);
+
+    const request = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"f\",\"method\":\"memory.forget\",\"params\":{{\"mode\":\"hard_delete\",\"selector\":{{\"qids\":[\"{s}\"]}},\"dryRun\":false,\"reason\":\"test\"}}}}",
+        .{sessions.flat_message},
+    );
+    defer allocator.free(request);
+    const forget = try runtime.dispatch(allocator, request);
+    defer allocator.free(forget);
+    const reported = try std.fmt.allocPrint(allocator, "{{\"qid\":\"{s}\",\"type\":\"assertion\",\"action\":\"invalidated\"}}", .{flat_qid});
+    defer allocator.free(reported);
+    try std.testing.expect(std.mem.indexOf(u8, forget, reported) != null);
+
+    // Tombstoned: no text left, out of search and retrieval.
+    const node = (try store.getNode(allocator, flat_qid)) orelse return error.TestUnexpectedResult;
+    defer store.freeNode(allocator, node);
+    try std.testing.expect(std.mem.indexOf(u8, node.properties_json, "\"deleted\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, node.properties_json, "apartment") == null);
+    for ([_][]const u8{ "apartment", "wine landlord" }) |query| {
+        const search = try searchAssertions(&runtime, query, "fts");
+        defer allocator.free(search);
+        try std.testing.expect(std.mem.indexOf(u8, search, "\"results\":[]") != null);
+        const retrieve = try retrieveFacts(&runtime, query, ",\"factKeys\":true");
+        defer allocator.free(retrieve);
+        try std.testing.expect(std.mem.indexOf(u8, retrieve, sessions.flat_message) == null);
+        try std.testing.expect(std.mem.indexOf(u8, retrieve, "Got the keys") == null);
+    }
+    if (build_options.enable_lattice) {
+        const vector = try searchAssertions(&runtime, "The user received the keys to a new apartment.", "vector");
+        defer allocator.free(vector);
+        try std.testing.expect(std.mem.indexOf(u8, vector, flat_qid) == null);
+    }
+
+    // Claims from other messages survive.
+    const kept = try searchAssertions(&runtime, "Japan sakura", "fts");
+    defer allocator.free(kept);
+    try std.testing.expect(std.mem.indexOf(u8, kept, "\"type\":\"assertion\"") != null);
 }
