@@ -95,7 +95,10 @@ const Scenario = struct {
     store: storage.Adapter,
     remembered: std.ArrayList(Remembered) = .empty,
     /// Markers of forgotten text; none may be reachable afterwards.
-    forgotten_markers: std.ArrayList([]u8) = .empty,
+    forgotten_markers: forgetting.QidList,
+    /// The forgotten markers searched for one by one; a sample of large
+    /// forgets keeps the run short. Borrows from `forgotten_markers`.
+    query_markers: std.ArrayList([]const u8) = .empty,
     /// Every qid a forget reported, with its action.
     forgotten_qids: forgetting.QidList,
 
@@ -105,14 +108,15 @@ const Scenario = struct {
             .runtime = runtime_mod.Runtime.init(store, protocol.Health.default()),
             .store = store,
             .forgotten_qids = forgetting.QidList.init(allocator),
+            .forgotten_markers = forgetting.QidList.init(allocator),
         };
     }
 
     fn deinit(self: *Scenario) void {
         for (self.remembered.items) |item| item.deinit(self.allocator);
         self.remembered.deinit(self.allocator);
-        for (self.forgotten_markers.items) |marker| self.allocator.free(marker);
-        self.forgotten_markers.deinit(self.allocator);
+        self.query_markers.deinit(self.allocator);
+        self.forgotten_markers.deinit();
         self.forgotten_qids.deinit();
     }
 
@@ -260,21 +264,25 @@ const Scenario = struct {
     fn addForgottenMarkers(self: *Scenario, text: ForgottenText) !void {
         const item = self.remembered.items[text.index];
         if (text.user) {
-            try self.forgotten_markers.append(self.allocator, try std.fmt.allocPrint(self.allocator, "orca{d:0>4}zz", .{item.index}));
-            if (item.kind == .long) {
-                try self.forgotten_markers.append(self.allocator, try std.fmt.allocPrint(self.allocator, "tail{d:0>4}zz", .{item.index}));
-            }
+            try self.addMarker("orca", item.index, text.query);
+            if (item.kind == .long) try self.addMarker("tail", item.index, text.query);
         }
-        if (text.reply) {
-            try self.forgotten_markers.append(self.allocator, try std.fmt.allocPrint(self.allocator, "reply{d:0>4}zz", .{item.index}));
-        }
+        if (text.reply) try self.addMarker("reply", item.index, text.query);
+    }
+
+    fn addMarker(self: *Scenario, prefix: []const u8, index: usize, query: bool) !void {
+        var buffer: [32]u8 = undefined;
+        const marker = try std.fmt.bufPrint(&buffer, "{s}{d:0>4}zz", .{ prefix, index });
+        if (!try self.forgotten_markers.appendUnique(marker)) return;
+        const items = self.forgotten_markers.items.items;
+        if (query) try self.query_markers.append(self.allocator, items[items.len - 1]);
     }
 
     /// No forgotten marker is reachable through search, vector search,
     /// retrieve, answer, inspect or core get, and verify finds no leak.
     fn expectNothingReachable(self: *Scenario) !void {
         const allocator = self.allocator;
-        for (self.forgotten_markers.items) |marker| {
+        for (self.query_markers.items) |marker| {
             const methods = [_][]const u8{
                 "{{\"jsonrpc\":\"2.0\",\"id\":\"s\",\"method\":\"memory.search\",\"params\":{{\"query\":\"{s}\",\"limit\":50}}}}",
                 "{{\"jsonrpc\":\"2.0\",\"id\":\"s\",\"method\":\"memory.search\",\"params\":{{\"query\":\"{s}\",\"mode\":\"hybrid\",\"limit\":50}}}}",
@@ -284,7 +292,7 @@ const Scenario = struct {
             inline for (methods) |format| {
                 const response = try self.call(format, .{marker});
                 defer allocator.free(response);
-                try expectNoMarker(response, marker);
+                try self.expectNoForgottenMarker(response);
                 try self.expectNoForgottenQid(response);
             }
             try self.expectVectorSearchClean(marker);
@@ -293,13 +301,13 @@ const Scenario = struct {
         for (self.forgotten_qids.items.items) |qid| {
             const response = try self.call("{{\"jsonrpc\":\"2.0\",\"id\":\"i\",\"method\":\"memory.inspect\",\"params\":{{\"qid\":\"{s}\"}}}}", .{qid});
             defer allocator.free(response);
-            for (self.forgotten_markers.items) |marker| try expectNoMarker(response, marker);
+            try self.expectNoForgottenMarker(response);
             try std.testing.expect(std.mem.indexOf(u8, response, "\\\"deleted\\\":true") != null);
         }
 
         const core = try self.call("{{\"jsonrpc\":\"2.0\",\"id\":\"g\",\"method\":\"memory.core.get\",\"params\":{{}}}}", .{});
         defer allocator.free(core);
-        for (self.forgotten_markers.items) |marker| try expectNoMarker(core, marker);
+        try self.expectNoForgottenMarker(core);
 
         const issues = try forgetting.verify(allocator, self.store, .{ .leaks = true });
         defer forgetting.freeIssues(allocator, issues);
@@ -330,14 +338,34 @@ const Scenario = struct {
         }
     }
 
-    fn expectNoForgottenQid(self: *Scenario, response: []const u8) !void {
-        for (self.forgotten_qids.items.items) |qid| {
-            const quoted = try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{qid});
-            defer self.allocator.free(quoted);
-            if (std.mem.indexOf(u8, response, quoted) != null) {
-                std.debug.print("response names forgotten {s}: {s}\n", .{ qid, response[0..@min(response.len, 600)] });
+    /// Fails when `response` holds any forgotten marker. Markers are
+    /// `orca`, `tail` or `reply`, four digits and `zz`.
+    fn expectNoForgottenMarker(self: *Scenario, response: []const u8) !void {
+        for ([_][]const u8{ "orca", "tail", "reply" }) |prefix| {
+            var start: usize = 0;
+            while (std.mem.indexOfPos(u8, response, start, prefix)) |at| {
+                start = at + prefix.len;
+                const end = at + prefix.len + 6;
+                if (end > response.len) break;
+                const marker = response[at..end];
+                if (!self.forgotten_markers.contains(marker)) continue;
+                std.debug.print("forgotten {s} is reachable: ...{s}...\n", .{ marker, response[at -| 200..@min(response.len, at + 200)] });
                 return error.TestUnexpectedResult;
             }
+        }
+    }
+
+    /// Fails when `response` names a forgotten node.
+    fn expectNoForgottenQid(self: *Scenario, response: []const u8) !void {
+        var start: usize = 0;
+        while (std.mem.indexOfPos(u8, response, start, "\"q_")) |at| {
+            const qid_start = at + 1;
+            const qid_end = std.mem.indexOfScalarPos(u8, response, qid_start, '"') orelse break;
+            start = qid_end + 1;
+            const qid = response[qid_start..qid_end];
+            if (!self.forgotten_qids.contains(qid)) continue;
+            std.debug.print("response names forgotten {s}: {s}\n", .{ qid, response[0..@min(response.len, 600)] });
+            return error.TestUnexpectedResult;
         }
     }
 
@@ -352,6 +380,9 @@ const ForgottenText = struct {
     index: usize,
     user: bool = true,
     reply: bool = false,
+    /// Search for its markers one by one; inspect, core get and verify
+    /// cover every forgotten marker regardless.
+    query: bool = true,
 };
 
 fn expectNoMarker(response: []const u8, marker: []const u8) !void {
@@ -433,8 +464,30 @@ fn runForgetScale(count: usize, min_nodes: usize, report_timings: bool) !void {
         try std.testing.expectEqual(@as(i64, 3), result.get("rootsMatched").?.integer);
         try std.testing.expectEqual(@as(i64, 1), result.get("summariesContaminated").?.integer);
     }
-    // By query: one late marker.
+    // Evidence spread across the whole store, in one request: whatever order
+    // a backend enumerates in, a capped scan would miss some of it.
     const query_index = count - 12;
+    const session_index = count / 2 - 4;
+    {
+        const reserved = [_]usize{ 0, 1, 2, 3, 4, count - 1, count - 2, count - 3, count - 4, query_index, count - 13, session_index };
+        var selector = std.ArrayList(u8).empty;
+        defer selector.deinit(allocator);
+        var spread = std.ArrayList(ForgottenText).empty;
+        defer spread.deinit(allocator);
+        try selector.appendSlice(allocator, "{\"qids\":[");
+        var index: usize = 6;
+        while (index < count) : (index += 7) {
+            if (std.mem.indexOfScalar(usize, &reserved, index) != null) continue;
+            if (spread.items.len > 0) try selector.append(allocator, ',');
+            try selector.print(allocator, "\"{s}\"", .{items[index].user_qid});
+            try spread.append(allocator, .{ .index = index, .query = spread.items.len % 4 == 0 });
+        }
+        try selector.appendSlice(allocator, "]}");
+        var parsed = try scenario.forget(selector.items, spread.items);
+        defer parsed.deinit();
+        try std.testing.expectEqual(@as(i64, @intCast(spread.items.len)), parsed.value.object.get("result").?.object.get("rootsMatched").?.integer);
+    }
+    // By query: one late marker.
     {
         const selector = try std.fmt.allocPrint(allocator, "{{\"query\":\"orca{d:0>4}zz\"}}", .{query_index});
         defer allocator.free(selector);
@@ -443,7 +496,6 @@ fn runForgetScale(count: usize, min_nodes: usize, report_timings: bool) !void {
         try std.testing.expectEqual(@as(i64, 1), parsed.value.object.get("result").?.object.get("rootsMatched").?.integer);
     }
     // By session: a mid-store session forgets both of its messages.
-    const session_index = count / 2 - 4;
     {
         const selector = try std.fmt.allocPrint(allocator, "{{\"qids\":[\"{s}\"]}}", .{items[session_index].session_qid});
         defer allocator.free(selector);
