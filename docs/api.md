@@ -96,8 +96,12 @@ config file examples.
 
 `memory.inspect` returns the stored node, provenance references, dependent
 derived memories, and stream-backed audit records that mention the inspected
-qid. Audit records currently expose the stream name, sequence, and raw JSON
-payload.
+qid. Provenance lists the targets of the node's `EVIDENCED_BY`, `DERIVED_FROM`
+and `COMPILED_FROM` edges (relations `evidenced_by`, `derived_from`,
+`compiled_from`), plus its `evidenceQid` when no edge records it. Dependents
+are the live nodes derived directly from it, whatever their label. Audit
+records come from the whole audit stream, read page by page, and match the qid
+as a JSON string. They expose the stream name, sequence, and raw JSON payload.
 
 ## Forgetting V0
 
@@ -105,8 +109,15 @@ payload.
 `selector.query`, `selector.scope`, and `selector.timeWindow`. Dry runs return
 the same closure report without mutating storage.
 
-When propagation is enabled, forgetting a raw evidence node tombstones derived
-facts, preferences, procedures, memory cards, episodes, and any core summaries
-compiled from those nodes. The result reports matched roots, deleted or redacted
-roots, invalidated fact-like memories, contaminated summaries, and per-node
-actions in `report`.
+A query selector selects every full-text match, not only the best-ranked ones,
+so a dry run reports the full set a forget would touch.
+
+When propagation is enabled, forgetting a raw evidence node tombstones every
+node derived from it through `EVIDENCED_BY` or `DERIVED_FROM` edges, whatever
+its label and at any depth: facts, preferences, procedures, memory cards,
+episodes, and any new derived label. Core summaries compiled from those nodes
+are contaminated and tombstoned. Each node is reported once per request. The
+result reports matched roots, deleted or redacted roots, invalidated fact-like
+memories, contaminated summaries, and per-node actions in `report`. The
+closure follows edges, so it is complete at any store size. See
+[algorithms.md](algorithms.md#forgetting-v0).

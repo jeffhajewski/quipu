@@ -1245,6 +1245,12 @@ deleted_at_ms
 hash_before_delete
 ```
 
+The V0 daemon tombstones in place: the forgotten node keeps its qid and label,
+and its properties become `kind`, `deleted`, `state`, `mode`, `reason`,
+`previousLabel` and, for raw text, `leakFingerprints` (hashes of 8-token
+windows that `quipu verify leaks` uses to find surviving copies without
+keeping the text).
+
 Edges:
 
 ```text
@@ -2369,6 +2375,23 @@ Closure rules:
 - MemoryBlocks compiled from contaminated summaries must be rebuilt or temporarily disabled.
 - RetrievalTrace can keep metadata but must not leak deleted text.
 
+Closure computation must follow provenance edges and indexed lookups, never an
+enumeration of the store with a cap: a capped scan silently misses derived
+memory once the store outgrows it. The V0 daemon computes it as follows (see
+`docs/algorithms.md`, Forgetting V0):
+
+- Roots come from explicit qids, from every full-text match of a query
+  selector, or from the messages of a selected Session or Turn.
+- A message's chunks are forgotten with it.
+- Every live node with an `EVIDENCED_BY` or `DERIVED_FROM` edge, or an
+  `evidenceQid`, to forgotten evidence is invalidated, whatever its label, and
+  the rule repeats on what it invalidates.
+- Every live node with a `COMPILED_FROM` edge to a forgotten node that still
+  lists it in `evidenceQids` is contaminated and tombstoned. V0 does not
+  rebuild contaminated blocks.
+- V0 tombstones every derived node in the closure, even one that still has live
+  evidence. It does not yet keep facts with remaining evidence.
+
 ### 10.15 Utility learning
 
 Update memory utility based on feedback and implicit signals.
@@ -3034,8 +3057,15 @@ quipu verify temporal
 quipu verify indexes
 quipu verify forgetting
 quipu verify streams
+quipu verify leaks
 quipu verify retrieval --fixture fixtures/basic.yaml
 ```
+
+`quipu verify leaks` (or `--leaks`) scans every live node's text for
+fingerprints of forgotten raw text that no live source of that node explains.
+`quipu verify all` includes it. The forgetting checks enumerate the store page
+by page through the adapter, so they cover every node regardless of store
+size.
 
 ### 13.3 Schema invariants
 

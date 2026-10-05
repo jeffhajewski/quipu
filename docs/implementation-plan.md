@@ -138,15 +138,18 @@ Acceptance:
 
 ### 8. Consolidation, Utility, and Forgetting
 
-Status: deterministic core consolidation and evidence-based forgetting closure
-exist.
+Status: deterministic core consolidation and an edge-based forgetting closure
+exist. The closure, supersession and verification have no store-size caps and
+are tested past 5,000 nodes. `quipu verify leaks` checks tombstoned raw text
+against fingerprints.
 
 Remaining:
 
 - Add evidence-linked `Summary` and `Reflection` nodes.
 - Rebuild contaminated summaries when forgetting mixed-evidence memories.
 - Update utility scores from retrieval traces and explicit feedback.
-- Add exact-string index leak tests and tombstone privacy checks.
+- Extend the exact-string leak scan (`quipu verify leaks`) beyond tombstoned
+  raw text to stream payloads such as logged queries.
 - Close deletion over persisted retrieval traces.
 
 Acceptance:
