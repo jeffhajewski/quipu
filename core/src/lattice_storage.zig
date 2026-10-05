@@ -628,7 +628,8 @@ pub const LatticeAdapter = struct {
                 if (!std.mem.eql(u8, entry.label, label)) continue;
             }
             if (!try self.matchesUnindexed(allocator, tx, node_id, query.where)) continue;
-            try qids.append(allocator, try allocator.dupe(u8, qid));
+            try qids.ensureUnusedCapacity(allocator, 1);
+            qids.appendAssumeCapacity(try allocator.dupe(u8, qid));
             if (qids.items.len >= query.limit) {
                 next = node_id;
                 break;

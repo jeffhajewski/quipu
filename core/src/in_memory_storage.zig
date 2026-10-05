@@ -332,7 +332,8 @@ pub const InMemoryAdapter = struct {
                 while (seq <= total) : (seq += 1) {
                     const candidate = &self.records.items[seq - 1];
                     if (!try recordMatches(allocator, candidate, query)) continue;
-                    try qids.append(allocator, try allocator.dupe(u8, candidate.qid));
+                    try qids.ensureUnusedCapacity(allocator, 1);
+                    qids.appendAssumeCapacity(try allocator.dupe(u8, candidate.qid));
                     if (qids.items.len >= query.limit) {
                         next = seq;
                         break;
@@ -344,7 +345,8 @@ pub const InMemoryAdapter = struct {
                 while (seq >= 1) : (seq -= 1) {
                     const candidate = &self.records.items[seq - 1];
                     if (!try recordMatches(allocator, candidate, query)) continue;
-                    try qids.append(allocator, try allocator.dupe(u8, candidate.qid));
+                    try qids.ensureUnusedCapacity(allocator, 1);
+                    qids.appendAssumeCapacity(try allocator.dupe(u8, candidate.qid));
                     if (qids.items.len >= query.limit) {
                         next = seq;
                         break;
