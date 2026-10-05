@@ -708,3 +708,46 @@ test "superseding keeps a memory card's own fields" {
         }
     }
 }
+
+test "forgetting the last message that mentions an entity forgets the entity" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit(allocator);
+    const store = harness.adapter();
+    var scenario = Scenario.init(allocator, store);
+    defer scenario.deinit();
+
+    var message_qids: [2][]u8 = undefined;
+    for (&message_qids, [_][]const u8{ "Biscuit the beagle chewed the blue flowerpot.", "Rex and Biscuit met at the park." }) |*qid, content| {
+        const remembered = try scenario.call("{{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"method\":\"memory.remember\",\"params\":{{\"messages\":[{{\"role\":\"user\",\"content\":\"{s}\"}}],\"extract\":false}}}}", .{content});
+        defer allocator.free(remembered);
+        qid.* = try firstMessageQid(allocator, remembered);
+    }
+    defer for (message_qids) |qid| allocator.free(qid);
+    try putTestNode(store, "q_entity_flowerpot", "Entity", "{\"canonicalName\":\"Blue Flowerpot\",\"searchText\":\"Blue Flowerpot\",\"deleted\":false}");
+    try putTestNode(store, "q_entity_biscuit", "Entity", "{\"canonicalName\":\"Biscuit\",\"searchText\":\"Biscuit\",\"deleted\":false}");
+    try putTestEdge(store, "q_edge_m1", message_qids[0], "q_entity_flowerpot", "MENTIONS");
+    try putTestEdge(store, "q_edge_m2", message_qids[0], "q_entity_biscuit", "MENTIONS");
+    try putTestEdge(store, "q_edge_m3", message_qids[1], "q_entity_biscuit", "MENTIONS");
+
+    const selector = try std.fmt.allocPrint(allocator, "{{\"qids\":[\"{s}\"]}}", .{message_qids[0]});
+    defer allocator.free(selector);
+    var first = try scenario.forget(selector, &.{});
+    first.deinit();
+    // Only the forgotten message named the flowerpot; Biscuit is still
+    // mentioned by a live message.
+    try expectTombstone(store, "q_entity_flowerpot");
+    try std.testing.expect(!scenario.forgotten_qids.contains("q_entity_biscuit"));
+    var issues = try forgetting.verify(allocator, store, .{ .leaks = true });
+    try expectNoIssues(issues);
+    forgetting.freeIssues(allocator, issues);
+
+    // Without propagation the last mention leaves Biscuit behind, and verify
+    // says so.
+    const second = try scenario.call("{{\"jsonrpc\":\"2.0\",\"id\":\"f\",\"method\":\"memory.forget\",\"params\":{{\"mode\":\"hard_delete\",\"propagate\":false,\"selector\":{{\"qids\":[\"{s}\"]}}}}}}", .{message_qids[1]});
+    allocator.free(second);
+    issues = try forgetting.verify(allocator, store, .{});
+    defer forgetting.freeIssues(allocator, issues);
+    try std.testing.expect(hasIssue(issues, "entity_only_from_deleted_evidence", "q_entity_biscuit"));
+}
+

@@ -358,6 +358,9 @@ Closure, for each root:
    consolidation writes) is contaminated and tombstoned. A block rebuilt in
    place keeps its old edges, so a block whose `evidenceQids` no longer lists
    the forgotten node is left alone.
+4. An entity that a forgotten node `MENTIONS` is forgotten once no live node
+   outside the request mentions it, since its name came only from forgotten
+   text. An entity another live message still mentions stays.
 
 A node reached from several roots is reported and tombstoned once. Dry runs
 report the same closure without writing.
@@ -381,6 +384,8 @@ interface, alongside the schema and adapter checks:
   `propagate: false` leaves these by design.
 - `core_compiled_from_deleted_evidence`: a live core block still cites a
   tombstone.
+- `entity_only_from_deleted_evidence`: a live entity whose every mention comes
+  from a tombstone.
 - `duplicate_current_slot`: two current single-value memories share a label,
   scope and slot key.
 

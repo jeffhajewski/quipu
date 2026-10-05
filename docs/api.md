@@ -116,7 +116,8 @@ When propagation is enabled, forgetting a raw evidence node tombstones every
 node derived from it through `EVIDENCED_BY` or `DERIVED_FROM` edges, whatever
 its label and at any depth: facts, preferences, procedures, memory cards,
 episodes, and any new derived label. Core summaries compiled from those nodes
-are contaminated and tombstoned. Each node is reported once per request. The
+are contaminated and tombstoned, and entities that only forgotten messages
+mention are forgotten. Each node is reported once per request. The
 result reports matched roots, deleted or redacted roots, invalidated fact-like
 memories, contaminated summaries, and per-node actions in `report`. The
 closure follows edges, so it is complete at any store size. See

@@ -34,12 +34,13 @@
 - The forget closure follows `EVIDENCED_BY`, `DERIVED_FROM` and
   `COMPILED_FROM` edges (and `evidenceQid`) for any label, transitively.
   Forgetting any message of a turn now forgets the turn's episode, not only
-  forgetting its first message. Forget-by-query selects every match instead of
-  the top 1,000.
+  forgetting its first message. An entity mentioned only by forgotten messages
+  is forgotten with them. Forget-by-query selects every match instead of the
+  top 1,000.
 - Tombstones of raw text keep `leakFingerprints`, hashes of 8-token windows of
   the forgotten text. `quipu verify` adds forgetting checks (tombstones without
-  text, live memory derived or compiled from forgotten evidence, duplicate
-  current slots), and `quipu verify leaks` / `--leaks` / `all` scans live
+  text, live memory derived or compiled from forgotten evidence, entities
+  mentioned only by forgotten nodes, duplicate current slots), and `quipu verify leaks` / `--leaks` / `all` scans live
   text for copies of forgotten text. Verification issues can carry
   `relatedQid`.
 - Superseding a memory now changes only `state` and `validTo`, so a

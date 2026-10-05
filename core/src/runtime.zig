@@ -1223,6 +1223,7 @@ pub const Runtime = struct {
 
             var dependents = try self.dependentClosure(allocator, forgotten.items.items, &handled);
             defer dependents.deinit();
+            try self.appendOrphanedEntities(allocator, forgotten.items.items, &handled, &dependents);
             for (dependents.items.items) |dependent| {
                 if (isFactLikeType(dependent.type)) facts_invalidated += 1;
                 try report.append(allocator, dependent.qid, dependent.type, dependent_action);
@@ -1426,6 +1427,40 @@ pub const Runtime = struct {
             }
         }
         return refs;
+    }
+
+    /// Adds to `dependents` each live entity that `sources` mention and that
+    /// no node outside this request mentions: its name came only from
+    /// forgotten text.
+    fn appendOrphanedEntities(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        sources: []const []const u8,
+        handled: *forgetting.QidList,
+        dependents: *OwnedNodeRefs,
+    ) !void {
+        const Context = struct {
+            handled: *const forgetting.QidList,
+
+            fn isForgotten(context: @This(), inner_allocator: std.mem.Allocator, store: storage.Adapter, qid: []const u8) !bool {
+                if (context.handled.contains(qid)) return true;
+                const node = (try store.getNode(inner_allocator, qid)) orelse return true;
+                defer store.freeNode(inner_allocator, node);
+                return propertyBool(inner_allocator, node.properties_json, "deleted");
+            }
+        };
+        for (sources) |source| {
+            var entities = try forgetting.orphanedEntityQids(allocator, self.store, source, Context{ .handled = handled }, Context.isForgotten);
+            defer entities.deinit();
+            for (entities.items.items) |entity_qid| {
+                if (handled.contains(entity_qid)) continue;
+                const node = (try self.store.getNode(allocator, entity_qid)) orelse continue;
+                defer self.store.freeNode(allocator, node);
+                if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+                _ = try handled.appendUnique(entity_qid);
+                try dependents.append(allocator, entity_qid, labelType(node.label), "mentioned_by");
+            }
+        }
     }
 
     /// Adds every live node compiled from `source_qid` (core blocks, through

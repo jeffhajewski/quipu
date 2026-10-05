@@ -2389,6 +2389,7 @@ memory once the store outgrows it. The V0 daemon computes it as follows (see
 - Every live node with a `COMPILED_FROM` edge to a forgotten node that still
   lists it in `evidenceQids` is contaminated and tombstoned. V0 does not
   rebuild contaminated blocks.
+- An entity whose every `MENTIONS` source is forgotten is forgotten too.
 - V0 tombstones every derived node in the closure, even one that still has live
   evidence. It does not yet keep facts with remaining evidence.
 

@@ -76,6 +76,36 @@ pub fn dependentQids(allocator: std.mem.Allocator, store: storage.Adapter, qid: 
     return out;
 }
 
+/// Edge type from a message to an entity it names. An entity is shared by
+/// every message that mentions it, so it is forgotten only once all of them
+/// are.
+pub const mention_edge_type = "MENTIONS";
+
+/// Entities `qid` mentions whose every mention comes from a node that
+/// `isForgotten` accepts. They hold names taken only from forgotten text.
+pub fn orphanedEntityQids(
+    allocator: std.mem.Allocator,
+    store: storage.Adapter,
+    qid: []const u8,
+    context: anytype,
+    comptime isForgotten: fn (@TypeOf(context), std.mem.Allocator, storage.Adapter, []const u8) anyerror!bool,
+) !QidList {
+    var out = QidList.init(allocator);
+    errdefer out.deinit();
+    const mentions = try store.findEdges(allocator, .{ .from_qid = qid, .edge_type = mention_edge_type, .limit = storage.unlimited });
+    defer store.freeEdges(allocator, mentions);
+    next_entity: for (mentions) |mention| {
+        if (out.contains(mention.to_qid)) continue;
+        const sources = try store.findEdges(allocator, .{ .to_qid = mention.to_qid, .edge_type = mention_edge_type, .limit = storage.unlimited });
+        defer store.freeEdges(allocator, sources);
+        for (sources) |source| {
+            if (!try isForgotten(context, allocator, store, source.from_qid)) continue :next_entity;
+        }
+        _ = try out.appendUnique(mention.to_qid);
+    }
+    return out;
+}
+
 /// Nodes compiled from `qid` (sources of incoming COMPILED_FROM edges) that
 /// still cite it. A block rebuilt in place keeps its old edges, so one whose
 /// `evidenceQids` no longer lists `qid` is skipped.
@@ -357,6 +387,8 @@ pub const VerifyOptions = struct {
 ///   (or `evidenceQid`) to a tombstone. Chunks of a forgotten message count.
 /// - `core_compiled_from_deleted_evidence`: a live core block still cites a
 ///   tombstone.
+/// - `entity_only_from_deleted_evidence`: a live entity whose every mention
+///   comes from a tombstone.
 /// - `duplicate_current_slot`: more than one current single-value memory per
 ///   label, scope and slot.
 /// - `forgotten_text_leak` (with `leaks`): a live node holds a fingerprinted
@@ -419,6 +451,14 @@ pub fn verify(allocator: std.mem.Allocator, store: storage.Adapter, options: Ver
             defer store.freeNode(allocator, node);
             if (try isDeleted(allocator, node.properties_json)) continue;
             try appendIssue(allocator, &issues, "active_derived_from_deleted_evidence", "live node is derived from forgotten evidence", dependent, tombstone);
+        }
+        var entities = try orphanedEntityQids(allocator, store, tombstone, {}, isDeletedQid);
+        defer entities.deinit();
+        for (entities.items.items) |entity| {
+            const node = (try store.getNode(allocator, entity)) orelse continue;
+            defer store.freeNode(allocator, node);
+            if (try isDeleted(allocator, node.properties_json)) continue;
+            try appendIssue(allocator, &issues, "entity_only_from_deleted_evidence", "live entity is mentioned only by forgotten nodes", entity, tombstone);
         }
         var compiled = try compiledFromQids(allocator, store, tombstone);
         defer compiled.deinit();
@@ -582,6 +622,12 @@ fn checkCurrentSlot(
         allocator.free(key);
         return err;
     };
+}
+
+fn isDeletedQid(_: void, allocator: std.mem.Allocator, store: storage.Adapter, qid: []const u8) !bool {
+    const node = (try store.getNode(allocator, qid)) orelse return true;
+    defer store.freeNode(allocator, node);
+    return isDeleted(allocator, node.properties_json);
 }
 
 fn isDeleted(allocator: std.mem.Allocator, properties_json: []const u8) !bool {
