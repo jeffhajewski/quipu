@@ -7516,7 +7516,7 @@ test "extract worker sends the E1 prompt and grounds claims into assertions" {
     const run = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x1\",\"method\":\"memory.extract.run\",\"params\":{\"owner\":\"test\"}}");
     defer allocator.free(run);
     try std.testing.expect(std.mem.indexOf(u8, run, "\"leasedCount\":2,\"succeededCount\":2,\"failedCount\":0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, run, "\"model\":\"test-extract-model\",\"promptVersion\":\"quipu.extract.e1-eventdate.v1\",\"calls\":2,\"jsonRetries\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"model\":\"test-extract-model\",\"promptVersion\":\"quipu.extract.e1-eventdate.v3\",\"calls\":2,\"jsonRetries\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, run, "\"assertionsWritten\":4") != null);
     try std.testing.expect(std.mem.indexOf(u8, run, "\"candidates\":5,\"accepted\":4,\"repaired\":1,\"duplicates\":0,\"quarantined\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, run, "\"quoteAmbiguous\":1") != null);
@@ -7563,7 +7563,7 @@ test "extract worker sends the E1 prompt and grounds claims into assertions" {
         "\"sessionId\":\"s-flat\"",
         "\"projectId\":\"repo:facts\"",
         "\"extractorModel\":\"test-extract-model\"",
-        "\"promptVersion\":\"quipu.extract.e1-eventdate.v1\"",
+        "\"promptVersion\":\"quipu.extract.e1-eventdate.v3\"",
     }) |needle| {
         if (std.mem.indexOf(u8, flat_node.properties_json, needle) == null) {
             std.debug.print("missing {s} in {s}\n", .{ needle, flat_node.properties_json });

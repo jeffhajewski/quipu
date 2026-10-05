@@ -39,7 +39,7 @@
         "extractor": {
           "configured": false,
           "model": null,
-          "promptVersion": "quipu.extract.e1-eventdate.v1"
+          "promptVersion": "quipu.extract.e1-eventdate.v3"
         },
         "factKeys": true
       }
