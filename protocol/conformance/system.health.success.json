@@ -41,7 +41,16 @@
           "model": null,
           "promptVersion": "quipu.extract.e1-eventdate.v3"
         },
-        "factKeys": true
+        "factKeys": true,
+        "queryExpansion": {
+          "modes": [
+            "off",
+            "rules",
+            "llm"
+          ],
+          "llmConfigured": false,
+          "model": null
+        }
       }
     }
   }

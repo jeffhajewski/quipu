@@ -95,8 +95,16 @@ export type RetrieveRequest = {
     rerank?: boolean;
     /** Leading candidates sent to a configured reranker (default 50). */
     rerankCandidates?: number;
+    /**
+     * Query decomposition before candidate generation (default "off"): "rules"
+     * splits recognizable choices and intervals, "llm" asks the daemon's
+     * expansion provider for sub-queries. The daemon fuses the results.
+     */
+    queryExpansion?: QueryExpansionMode;
   };
 };
+
+export type QueryExpansionMode = "off" | "rules" | "llm";
 
 export type AnswerRequest = Omit<RetrieveRequest, "options"> & {
   options?: RetrieveRequest["options"] & {
@@ -195,6 +203,15 @@ function validateRerankCandidates(options: Record<string, unknown>): void {
   const count = options.rerankCandidates;
   if (!Number.isInteger(count) || Number(count) < 1) {
     throw new QuipuProtocolError("options.rerankCandidates must be a positive integer");
+  }
+}
+
+const QUERY_EXPANSION_MODES = new Set(["off", "rules", "llm"]);
+
+function validateQueryExpansion(options: Record<string, unknown>): void {
+  if (!("queryExpansion" in options)) return;
+  if (typeof options.queryExpansion !== "string" || !QUERY_EXPANSION_MODES.has(options.queryExpansion)) {
+    throw new QuipuProtocolError("options.queryExpansion must be off, rules, or llm");
   }
 }
 
@@ -326,6 +343,7 @@ function validateRetrieve(params: Record<string, unknown>): void {
         "rerankCandidates",
         "temporalHints",
         "factKeys",
+        "queryExpansion",
       ]),
       "options",
     );
@@ -345,6 +363,7 @@ function validateRetrieve(params: Record<string, unknown>): void {
       throw new QuipuProtocolError("options.format is invalid");
     }
     validateRerankCandidates(params.options);
+    validateQueryExpansion(params.options);
   }
 }
 
@@ -390,6 +409,7 @@ function validateAnswer(params: Record<string, unknown>): void {
         "readerReasoning",
         "temporalHints",
         "factKeys",
+        "queryExpansion",
       ]),
       "options",
     );
@@ -410,6 +430,7 @@ function validateAnswer(params: Record<string, unknown>): void {
       throw new QuipuProtocolError("options.format is invalid");
     }
     validateRerankCandidates(params.options);
+    validateQueryExpansion(params.options);
   }
 }
 

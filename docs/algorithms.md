@@ -74,6 +74,8 @@ advertises a non-hash embedding model. Callers can override this with
 3. Map hits to items and sort them by score (ties: newer first). A chunk hit is
    a raw-evidence item of type `message` whose qid is the chunk and whose
    evidence points at the parent message.
+   With `options.queryExpansion`, steps 1–3 run once per query and the
+   per-query lists are fused (see [Query expansion](#query-expansion)).
 4. Optionally add scoped core blocks when `needs` includes `core`.
 5. Filter candidates by requested memory needs.
 6. Apply the raw-evidence policy. Raw items stay eligible and compete by rank
@@ -108,6 +110,65 @@ Forgetting a message, whether selected by qid, by a query selector, or through
 its `Session` / `Turn`, tombstones and redacts all of its chunks. A query
 selector that matches a chunk resolves to the parent message, so the whole
 message and every chunk are forgotten together.
+
+### Query expansion
+
+A question that compares or combines two things ("Which did I buy first, the
+necklace for my sister or the photo album for my mom?") often retrieves
+evidence for only one of them: one fused query ranks one side's messages
+throughout the budget. `options.queryExpansion` (on `memory.retrieve` and
+`memory.answer`) decomposes the question first. The default `off` runs the
+query alone and is byte-identical to a request without the option.
+
+- `rules` is deterministic and needs no provider. It examines the question's
+  last sentence ending in `?` and splits only these forms:
+  - a choice list after a `,` or `:` whose clause has a which/who word or a
+    comparative cue (`first`, `earlier`, `later`, `more`, `less`, `recently`,
+    `prefer`, ...): "Which trip did I take first, X or Y?", "Which did I visit
+    first: A, B, or C?";
+  - an `X or Y` pair after a comparative cue, both sides starting like a noun
+    phrase: "Which came first the chicken or the egg?";
+  - `between X and Y`, including "how many days/weeks/months passed between
+    the day I X and the day I Y". The "the day I" wrapper is dropped, leaving
+    "I X". With several `and`s, the one followed by the interval's own first
+    word (or by a determiner or subject) splits.
+
+  It never splits inside quotes, at fixed pairs (`rock and roll`, `salt and
+  pepper`, `before or after`, ...), on clause-like pieces ("..., or less?",
+  "buy, sell, or fix"), or on bare `and`/`or` coordination ("Do I prefer coffee
+  or tea?"). At most four sub-queries are added.
+- `llm` makes one call to the expansion provider (`--expand-*`, defaulting to
+  the answer provider; see [providers.md](providers.md#query-expansion)). Only
+  the question text is sent, never memory. The reply must be
+  `{"queries":[...]}` with at most four strings, each non-empty and at most 200
+  characters; they are deduplicated case-insensitively. If the call fails or
+  the reply is invalid, the original query runs alone and the
+  `query_expansion_failed` warning is added.
+
+The original query always runs too. Each query goes through the unchanged
+candidate generation (steps 1–3) and keeps up to 80 items. The lists are fused
+by reciprocal rank, `sum 1 / (60 + rank)` over the lists that hold an item,
+with every query weighted alike; the fused score becomes the item `score`.
+
+Plain RRF is not enough. Items that several overlapping queries share score
+highest. The original query and the sub-query for the side it already finds
+agree on many items, so the other side's best hit, found by one sub-query
+alone, scores at most 1/61 and can fall below the budget cut. So the first two
+items of every query lead the fused list, interleaved by rank (every query's
+first item, then every query's second). The rest follow by fused score, and the
+list is cut to 80 items. Two rather than one, because a chunk or an assistant
+reply often takes rank 1 ahead of the user line that states the fact. The cost
+is at most two items per query of the budget.
+
+Stale-evidence marking is redone on the fused list, then steps 4–9 run as
+usual. A configured reranker scores against the original question, so it may
+move a sub-query's lead item below the budget cut.
+
+`trace.queryExpansion` and `answerTrace.queryExpansion` (both absent when off)
+report `mode`, `status` (`expanded`, `unchanged` when nothing split, or
+`failed`), the expansion `model`, `latencyMs`, `error`, and every query with its
+`source` (`original`, `rules`, `llm`), `hitCount` before fusion, and `topQids`
+(its lead items).
 
 ### Context rendering
 

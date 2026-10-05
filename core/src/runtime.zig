@@ -8,6 +8,7 @@ const jobs = @import("jobs.zig");
 const lattice_storage = if (build_options.enable_lattice) @import("lattice_storage.zig") else struct {};
 const protocol = @import("protocol.zig");
 const providers = @import("providers.zig");
+const query_expansion = @import("query_expansion.zig");
 const schema = @import("schema.zig");
 const storage = @import("storage.zig");
 const streams = @import("streams.zig");
@@ -47,6 +48,9 @@ const default_extract_concurrency: usize = 8;
 const assertion_qid_prefix = "q_asrt_";
 /// factKeys: event dates listed on one raw line, earliest first.
 const max_event_dates_per_item: usize = 4;
+/// With `options.queryExpansion`, each query's leading candidates that lead
+/// the fused list (see `fuseQueryItems`).
+const expansion_leaders_per_query: usize = 2;
 
 const Scope = struct {
     tenant_id: ?[]const u8 = null,
@@ -235,12 +239,14 @@ const RetrievalTrace = struct {
     rerank: ?RerankTrace = null,
     /// Present only when `options.factKeys` is true.
     factKeys: ?FactKeysTrace = null,
+    /// Present only when `options.queryExpansion` is not off.
+    queryExpansion: ?query_expansion.Trace = null,
 
     pub fn jsonStringify(self: @This(), jw: anytype) !void {
         try jw.beginObject();
         inline for (std.meta.fields(@This())) |field| {
             const value = @field(self, field.name);
-            if (comptime std.mem.eql(u8, field.name, "rerank") or std.mem.eql(u8, field.name, "factKeys")) {
+            if (comptime (std.mem.eql(u8, field.name, "rerank") or std.mem.eql(u8, field.name, "factKeys") or std.mem.eql(u8, field.name, "queryExpansion"))) {
                 if (value) |present| {
                     try jw.objectField(field.name);
                     try jw.write(present);
@@ -404,6 +410,9 @@ pub const ExtractJobRunResult = struct {
 pub const RuntimeOptions = struct {
     io: ?std.Io = null,
     answer_provider: providers.ProviderEndpoint = .{},
+    /// Chat provider for `options.queryExpansion: "llm"`; unset means the
+    /// answer provider.
+    expansion_provider: providers.ProviderEndpoint = .{},
     entity_provider: providers.ProviderEndpoint = .{},
     /// Chat model for the `extract` job worker (LLM fact extraction).
     extract_provider: providers.ProviderEndpoint = .{},
@@ -489,6 +498,8 @@ pub const Runtime = struct {
     }
 
     fn systemHealth(self: *Runtime, allocator: std.mem.Allocator, id: ?[]const u8) ![]u8 {
+        const expansion = self.expansionEndpoint();
+        const expansion_llm = expansion.kind == .http or expansion.kind == .callback;
         const response = .{
             .jsonrpc = "2.0",
             .id = id,
@@ -517,6 +528,11 @@ pub const Runtime = struct {
                         .promptVersion = fact_extraction.prompt_version,
                     },
                     .factKeys = true,
+                    .queryExpansion = .{
+                        .modes = [_][]const u8{ "off", "rules", "llm" },
+                        .llmConfigured = expansion_llm,
+                        .model = if (expansion_llm) expansion.model else null,
+                    },
                 },
             },
         };
@@ -907,8 +923,13 @@ pub const Runtime = struct {
         const rerank_settings = parseRerankSettings(options) orelse {
             return errorResponse(allocator, id, "invalid_request", "options.rerankCandidates must be a positive integer");
         };
+        const expansion_mode = parseQueryExpansion(options) orelse {
+            return errorResponse(allocator, id, "invalid_request", "options.queryExpansion must be off, rules, or llm");
+        };
 
-        var results = try self.collectItemsWithFactKeys(allocator, query, retrieve_mode, retrieval_candidate_limit, .{
+        var expansion = try self.expandQuery(allocator, query, expansion_mode);
+        defer expansion.deinit();
+        var results = try self.collectExpandedItems(allocator, &expansion, retrieve_mode, retrieval_candidate_limit, .{
             .scope = scope,
             .valid_at = valid_at,
             .event_window = event_window,
@@ -937,6 +958,7 @@ pub const Runtime = struct {
         if (rerank) |*stage| {
             if (stage.failed()) try warnings.append(allocator, "rerank_failed");
         }
+        if (expansion.failed()) try warnings.append(allocator, "query_expansion_failed");
         try appendRetrievalWarnings(allocator, &warnings, results.items.items, include_evidence);
 
         var context = try OwnedContextPacket.fromItems(allocator, results.items.items, warnings.items);
@@ -960,6 +982,7 @@ pub const Runtime = struct {
         defer allocator.free(scoring_details);
         const dropped_item_reasons = try buildDroppedItemReasons(allocator, dropped_for_needs, dropped_for_budget);
         defer allocator.free(dropped_item_reasons);
+        const expansion_trace = try expansion.traceView();
         const trace = RetrievalTrace{
             .query = query,
             .requestedNeedsCount = needsCount(needs_value),
@@ -976,6 +999,7 @@ pub const Runtime = struct {
             .droppedItemReasons = dropped_item_reasons,
             .rerank = if (rerank) |*stage| stage.view() else null,
             .factKeys = results.factKeysTrace(),
+            .queryExpansion = expansion_trace,
         };
 
         const item_qids = try allocator.alloc([]const u8, results.items.items.len);
@@ -1057,8 +1081,13 @@ pub const Runtime = struct {
         const rerank_settings = parseRerankSettings(options) orelse {
             return errorResponse(allocator, id, "invalid_request", "options.rerankCandidates must be a positive integer");
         };
+        const expansion_mode = parseQueryExpansion(options) orelse {
+            return errorResponse(allocator, id, "invalid_request", "options.queryExpansion must be off, rules, or llm");
+        };
 
-        var results = try self.collectItemsWithFactKeys(allocator, query, retrieve_mode, retrieval_candidate_limit, .{
+        var expansion = try self.expandQuery(allocator, query, expansion_mode);
+        defer expansion.deinit();
+        var results = try self.collectExpandedItems(allocator, &expansion, retrieve_mode, retrieval_candidate_limit, .{
             .scope = scope,
             .valid_at = valid_at,
             .event_window = event_window,
@@ -1083,6 +1112,7 @@ pub const Runtime = struct {
         if (rerank) |*stage| {
             if (stage.failed()) try warnings.append(allocator, "rerank_failed");
         }
+        if (expansion.failed()) try warnings.append(allocator, "query_expansion_failed");
 
         try appendRetrievalWarnings(allocator, &warnings, results.items.items, include_evidence);
 
@@ -1109,6 +1139,7 @@ pub const Runtime = struct {
         defer allocator.free(scoring_details);
         const dropped_item_reasons = try buildDroppedItemReasons(allocator, dropped_for_needs, dropped_for_budget);
         defer allocator.free(dropped_item_reasons);
+        const expansion_trace = try expansion.traceView();
         const trace = RetrievalTrace{
             .query = query,
             .requestedNeedsCount = needsCount(needs_value),
@@ -1125,6 +1156,7 @@ pub const Runtime = struct {
             .droppedItemReasons = dropped_item_reasons,
             .rerank = if (rerank) |*stage| stage.view() else null,
             .factKeys = results.factKeysTrace(),
+            .queryExpansion = expansion_trace,
         };
 
         // One answer path: with a reader configured, every non-empty context
@@ -1171,6 +1203,7 @@ pub const Runtime = struct {
         defer synthesized.deinit();
         synthesized.trace.temporalHints = hint_date != null;
         synthesized.trace.timeReferences = time_references;
+        synthesized.trace.queryExpansion = expansion_trace;
         for (synthesized.trace.validation.warnings) |warning| {
             if (!containsWarning(warnings.items, warning)) try warnings.append(allocator, warning);
         }
@@ -2411,6 +2444,96 @@ pub const Runtime = struct {
         return stage;
     }
 
+    /// The queries one retrieval runs: the original, then the sub-queries of
+    /// `mode`. A failed LLM call or invalid reply leaves the original alone
+    /// and marks the expansion failed.
+    fn expandQuery(self: *Runtime, allocator: std.mem.Allocator, query: []const u8, mode: query_expansion.Mode) !OwnedExpansion {
+        var expansion = OwnedExpansion{ .allocator = allocator, .mode = mode };
+        errdefer expansion.deinit();
+        try expansion.append(query, query_expansion.source_original);
+        if (mode == .off) return expansion;
+
+        const started = if (self.options.io) |io| std.Io.Timestamp.now(io, .awake) else null;
+        const sub_queries = switch (mode) {
+            .off => unreachable,
+            .rules => try query_expansion.ruleQueries(allocator, query),
+            .llm => blk: {
+                const endpoint = self.expansionEndpoint();
+                expansion.model = endpoint.model;
+                break :blk query_expansion.requestQueries(allocator, self.options.io, endpoint, query) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                    expansion.status = query_expansion.status_failed;
+                    expansion.error_name = @errorName(err);
+                    break :blk try allocator.alloc([]u8, 0);
+                };
+            },
+        };
+        defer query_expansion.freeQueries(allocator, sub_queries);
+        if (started) |timestamp| {
+            const elapsed_ns: f64 = @floatFromInt(timestamp.untilNow(self.options.io.?, .awake).toNanoseconds());
+            expansion.latency_ms = @round(elapsed_ns / 1000) / 1000;
+        }
+        const source = if (mode == .rules) query_expansion.source_rules else query_expansion.source_llm;
+        for (sub_queries) |sub_query| try expansion.append(sub_query, source);
+        if (sub_queries.len > 0) expansion.status = query_expansion.status_expanded;
+        return expansion;
+    }
+
+    /// `options.queryExpansion: "llm"` uses the expansion provider when one
+    /// is configured, else the reader.
+    fn expansionEndpoint(self: *const Runtime) providers.ProviderEndpoint {
+        if (self.options.expansion_provider.kind != .none) return self.options.expansion_provider;
+        return self.options.answer_provider;
+    }
+
+    /// Candidate generation for every query of `expansion`. One query is
+    /// exactly `collectItems`; several are fused by `fuseQueryItems`.
+    fn collectExpandedItems(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        expansion: *OwnedExpansion,
+        mode: SearchMode,
+        limit: usize,
+        filter: ItemFilter,
+        fact_keys: bool,
+    ) !OwnedItems {
+        const queries = expansion.queries.items;
+        const lists = try allocator.alloc(OwnedItems, queries.len);
+        var built: usize = 0;
+        defer {
+            for (lists[0..built]) |*list| list.deinit();
+            allocator.free(lists);
+        }
+        for (queries, 0..) |entry, index| {
+            lists[index] = try self.collectItemsWithFactKeys(allocator, entry.text, mode, limit, filter, fact_keys);
+            built += 1;
+            try expansion.recordHits(index, lists[index].items.items);
+        }
+        if (lists.len == 1) {
+            const single = lists[0];
+            lists[0] = .{ .allocator = allocator };
+            return single;
+        }
+        var fused = try fuseQueryItems(allocator, lists, limit);
+        errdefer fused.deinit();
+        if (fact_keys) {
+            // Counters sum over the expanded queries; kept items are recounted
+            // from `via_assertion` after packing.
+            var stats = FactKeysTrace{};
+            for (lists) |list| {
+                const part = list.fact_keys orelse continue;
+                stats.assertionHits += part.assertionHits;
+                stats.evidenceItems += part.evidenceItems;
+                stats.datedItems += part.datedItems;
+            }
+            fused.fact_keys = stats;
+        }
+        // Raw items from a list without slot memories were never checked for
+        // stale evidence; the fused list may now hold such memories.
+        try self.markStaleRawEvidence(allocator, &fused, filter.valid_at);
+        return fused;
+    }
+
     fn collectItems(
         self: *Runtime,
         allocator: std.mem.Allocator,
@@ -2577,6 +2700,7 @@ pub const Runtime = struct {
         if (!has_slot_item) return;
         for (owned.items.items) |*item| {
             if (item.raw_source) |*source| {
+                if (source.stale_slot_keys.len > 0) continue; // already marked
                 source.stale_slot_keys = try self.staleSlotKeysForMessage(allocator, source.message_qid, valid_at);
             }
         }
@@ -3425,6 +3549,166 @@ const OwnedRerankTrace = struct {
         self.top_scores.deinit(self.allocator);
     }
 };
+
+/// `options.queryExpansion` (default `off`). Null when it is not one of the
+/// mode names.
+fn parseQueryExpansion(options: ?ObjectMap) ?query_expansion.Mode {
+    const opts = options orelse return .off;
+    const value = opts.get("queryExpansion") orelse return .off;
+    return switch (value) {
+        .null => .off,
+        .string => |text| query_expansion.parseMode(text),
+        else => null,
+    };
+}
+
+const ExpansionQuery = struct {
+    text: []const u8,
+    source: []const u8,
+    hit_count: usize = 0,
+    top_qids: std.ArrayList([]const u8) = .empty,
+};
+
+/// The queries of one retrieval, the original first, with what each one
+/// retrieved for the trace. Owns the query texts and recorded qids.
+const OwnedExpansion = struct {
+    allocator: std.mem.Allocator,
+    mode: query_expansion.Mode,
+    status: []const u8 = query_expansion.status_unchanged,
+    model: ?[]const u8 = null,
+    latency_ms: f64 = 0,
+    error_name: ?[]const u8 = null,
+    queries: std.ArrayList(ExpansionQuery) = .empty,
+    query_traces: std.ArrayList(query_expansion.QueryTrace) = .empty,
+
+    fn append(self: *OwnedExpansion, text: []const u8, source: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, text);
+        errdefer self.allocator.free(owned);
+        try self.queries.append(self.allocator, .{ .text = owned, .source = source });
+    }
+
+    fn failed(self: *const OwnedExpansion) bool {
+        return std.mem.eql(u8, self.status, query_expansion.status_failed);
+    }
+
+    /// Records how many candidates query `index` returned and its leading
+    /// qids. Nothing is recorded when expansion is off.
+    fn recordHits(self: *OwnedExpansion, index: usize, items: []const MessageResult) !void {
+        if (self.mode == .off) return;
+        const entry = &self.queries.items[index];
+        entry.hit_count = items.len;
+        for (items[0..@min(items.len, expansion_leaders_per_query)]) |item| {
+            const qid = try self.allocator.dupe(u8, item.qid);
+            errdefer self.allocator.free(qid);
+            try entry.top_qids.append(self.allocator, qid);
+        }
+    }
+
+    /// The trace, or null when expansion is off. Borrows from `self`.
+    fn traceView(self: *OwnedExpansion) !?query_expansion.Trace {
+        if (self.mode == .off) return null;
+        self.query_traces.clearRetainingCapacity();
+        for (self.queries.items) |entry| {
+            try self.query_traces.append(self.allocator, .{
+                .query = entry.text,
+                .source = entry.source,
+                .hitCount = entry.hit_count,
+                .topQids = entry.top_qids.items,
+            });
+        }
+        return .{
+            .mode = @tagName(self.mode),
+            .status = self.status,
+            .model = self.model,
+            .latencyMs = self.latency_ms,
+            .queries = self.query_traces.items,
+            .@"error" = self.error_name,
+        };
+    }
+
+    fn deinit(self: *OwnedExpansion) void {
+        for (self.queries.items) |*entry| {
+            self.allocator.free(entry.text);
+            for (entry.top_qids.items) |qid| self.allocator.free(qid);
+            entry.top_qids.deinit(self.allocator);
+        }
+        self.queries.deinit(self.allocator);
+        self.query_traces.deinit(self.allocator);
+    }
+};
+
+/// Fuses per-query candidate lists (the original query's first) into one,
+/// taking ownership of every item and leaving `lists` empty.
+///
+/// Each item scores the reciprocal-rank sum over the lists that hold it
+/// (k = 60, every query weighted alike). Plain RRF favors items that several
+/// overlapping queries share: the original query and the sub-query for the
+/// side it already finds agree on many items, so the other side's best hit,
+/// found by one sub-query alone, scores at most 1/61 and can fall below the
+/// budget cut. So each query's first `expansion_leaders_per_query` items lead
+/// the list, interleaved by rank (every query's first item, then every
+/// query's second); the rest follow by fused score. Two rather than one,
+/// because a chunk or an assistant reply often takes rank 1 ahead of the
+/// user line that states the fact. At most `limit` items are kept.
+fn fuseQueryItems(allocator: std.mem.Allocator, lists: []OwnedItems, limit: usize) !OwnedItems {
+    var fused = OwnedItems{ .allocator = allocator };
+    errdefer fused.deinit();
+    var index_by_qid: std.StringHashMapUnmanaged(usize) = .empty;
+    defer index_by_qid.deinit(allocator);
+    var leaders = std.ArrayList([]const u8).empty;
+    defer leaders.deinit(allocator);
+    const leader_slots = try allocator.alloc(?[]const u8, lists.len * expansion_leaders_per_query);
+    defer allocator.free(leader_slots);
+    @memset(leader_slots, null);
+
+    for (lists, 0..) |*list, list_index| {
+        const incoming = list.items.items;
+        // Reserve first so that moving items out of `list` cannot fail midway.
+        try fused.items.ensureUnusedCapacity(allocator, incoming.len);
+        try index_by_qid.ensureUnusedCapacity(allocator, @intCast(incoming.len));
+        for (incoming, 0..) |item, rank| {
+            const score = reciprocalRank(rank);
+            const qid = if (index_by_qid.get(item.qid)) |at| blk: {
+                fused.items.items[at].score += score;
+                list.freeItem(item);
+                break :blk fused.items.items[at].qid;
+            } else blk: {
+                var moved = item;
+                moved.score = score;
+                fused.items.appendAssumeCapacity(moved);
+                index_by_qid.putAssumeCapacity(moved.qid, fused.items.items.len - 1);
+                break :blk moved.qid;
+            };
+            if (rank < expansion_leaders_per_query) leader_slots[rank * lists.len + list_index] = qid;
+        }
+        list.items.items.len = 0;
+    }
+
+    sortItemsByScore(&fused);
+    for (leader_slots) |slot| {
+        const qid = slot orelse continue;
+        if (!stringListContains(leaders.items, qid)) try leaders.append(allocator, qid);
+    }
+    var ordered = try std.ArrayList(MessageResult).initCapacity(allocator, fused.items.items.len);
+    defer ordered.deinit(allocator);
+    for (leaders.items) |qid| {
+        for (fused.items.items) |item| {
+            if (std.mem.eql(u8, item.qid, qid)) {
+                ordered.appendAssumeCapacity(item);
+                break;
+            }
+        }
+    }
+    for (fused.items.items) |item| {
+        if (!stringListContains(leaders.items, item.qid)) ordered.appendAssumeCapacity(item);
+    }
+    @memcpy(fused.items.items, ordered.items);
+    if (fused.items.items.len > limit) {
+        for (fused.items.items[limit..]) |item| fused.freeItem(item);
+        fused.items.shrinkRetainingCapacity(limit);
+    }
+    return fused;
+}
 
 const OwnedItems = struct {
     allocator: std.mem.Allocator,
@@ -6443,6 +6727,7 @@ test "runtime without a reranker leaves retrieval unchanged" {
     const health = try runtime.dispatch(std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
     defer std.testing.allocator.free(health);
     try std.testing.expect(std.mem.indexOf(u8, health, "\"capabilities\":{\"reranker\":{\"configured\":false,\"model\":null},") != null);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"queryExpansion\":{\"modes\":[\"off\",\"rules\",\"llm\"],\"llmConfigured\":false,\"model\":null}") != null);
 
     var reranker = TestReranker{};
     defer reranker.deinit();
@@ -6451,6 +6736,373 @@ test "runtime without a reranker leaves retrieval unchanged" {
     const configured_health = try configured.dispatch(std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
     defer std.testing.allocator.free(configured_health);
     try std.testing.expect(std.mem.indexOf(u8, configured_health, "\"reranker\":{\"configured\":true,\"model\":\"test-cross-encoder\"}") != null);
+}
+
+/// An owned candidate list with one item per qid, best first.
+fn testCandidates(qids: []const []const u8) !OwnedItems {
+    const allocator = std.testing.allocator;
+    var owned = OwnedItems{ .allocator = allocator };
+    errdefer owned.deinit();
+    for (qids, 0..) |qid, rank| {
+        const owned_qid = try allocator.dupe(u8, qid);
+        errdefer allocator.free(owned_qid);
+        const text = try std.fmt.allocPrint(allocator, "text of {s}", .{qid});
+        errdefer allocator.free(text);
+        const state = try allocator.dupe(u8, "current");
+        errdefer allocator.free(state);
+        try owned.items.append(allocator, .{
+            .qid = owned_qid,
+            .type = "message",
+            .text = text,
+            .state = state,
+            .score = 1.0 / @as(f32, @floatFromInt(rank + 1)),
+            .evidence = &.{},
+        });
+    }
+    return owned;
+}
+
+test "query fusion leads with each query's top items, then fused rank" {
+    var lists = [_]OwnedItems{
+        // The original query and the necklace sub-query agree on the
+        // necklace items; only the album sub-query finds the album.
+        try testCandidates(&.{ "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8" }),
+        try testCandidates(&.{ "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8" }),
+        try testCandidates(&.{ "a1", "x1", "n9" }),
+    };
+    defer for (&lists) |*list| list.deinit();
+
+    var fused = try fuseQueryItems(std.testing.allocator, &lists, retrieval_candidate_limit);
+    defer fused.deinit();
+    for (lists) |list| try std.testing.expectEqual(@as(usize, 0), list.items.items.len);
+    const expected = [_][]const u8{ "n1", "a1", "n2", "x1", "n3", "n4", "n5", "n6", "n7", "n8", "n9" };
+    try std.testing.expectEqual(expected.len, fused.items.items.len);
+    for (expected, fused.items.items) |qid, item| try std.testing.expectEqualStrings(qid, item.qid);
+    // Scores are reciprocal-rank sums: plain RRF would put the album last
+    // among the necklace items.
+    try std.testing.expectEqual(2 * reciprocalRank(0), fused.items.items[0].score);
+    try std.testing.expectEqual(reciprocalRank(0), fused.items.items[1].score);
+    try std.testing.expect(fused.items.items[1].score < fused.items.items[9].score);
+
+    var short_lists = [_]OwnedItems{
+        try testCandidates(&.{ "n1", "n2", "n3" }),
+        try testCandidates(&.{ "a1", "n1" }),
+    };
+    defer for (&short_lists) |*list| list.deinit();
+    var limited = try fuseQueryItems(std.testing.allocator, &short_lists, 3);
+    defer limited.deinit();
+    const kept = [_][]const u8{ "n1", "a1", "n2" };
+    try std.testing.expectEqual(kept.len, limited.items.items.len);
+    for (kept, limited.items.items) |qid, item| try std.testing.expectEqualStrings(qid, item.qid);
+}
+
+const gift_question = "Which gift did I buy first, the necklace for my sister or the photo album for my mom?";
+
+/// Six necklace messages that share most of the question's words, one album
+/// message that shares a single word with it, and unrelated filler.
+fn rememberGiftSessions(runtime: *Runtime) !void {
+    const requests = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"userId\":\"u1\"},\"sessionId\":\"s-necklace\",\"extract\":false,\"messages\":[" ++
+            "{\"role\":\"user\",\"content\":\"I bought a silver necklace as a gift for my sister.\",\"createdAt\":\"2023-05-10T10:00:00Z\"}," ++
+            "{\"role\":\"user\",\"content\":\"The necklace for my sister was the first gift I picked.\",\"createdAt\":\"2023-05-10T10:01:00Z\"}," ++
+            "{\"role\":\"user\",\"content\":\"My sister loved the necklace gift so much.\",\"createdAt\":\"2023-05-10T10:02:00Z\"}," ++
+            "{\"role\":\"user\",\"content\":\"I wrapped the necklace gift for my sister.\",\"createdAt\":\"2023-05-10T10:03:00Z\"}," ++
+            "{\"role\":\"user\",\"content\":\"My sister wears the necklace gift every day.\",\"createdAt\":\"2023-05-10T10:04:00Z\"}," ++
+            "{\"role\":\"user\",\"content\":\"The necklace gift came in a box for my sister.\",\"createdAt\":\"2023-05-10T10:05:00Z\"}]}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"userId\":\"u1\"},\"sessionId\":\"s-album\",\"extract\":false,\"messages\":[" ++
+            "{\"role\":\"user\",\"content\":\"I ordered an album of old pictures for her birthday.\",\"createdAt\":\"2023-05-02T09:00:00Z\"}]}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r3\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"userId\":\"u1\"},\"sessionId\":\"s-other\",\"extract\":false,\"messages\":[" ++
+            "{\"role\":\"user\",\"content\":\"The weather was rainy on Tuesday.\",\"createdAt\":\"2023-05-03T09:00:00Z\"}," ++
+            "{\"role\":\"user\",\"content\":\"Our team shipped the quarterly report.\",\"createdAt\":\"2023-05-03T09:01:00Z\"}," ++
+            "{\"role\":\"user\",\"content\":\"Lunch was a bowl of ramen downtown.\",\"createdAt\":\"2023-05-03T09:02:00Z\"}," ++
+            "{\"role\":\"user\",\"content\":\"The train was late again this morning.\",\"createdAt\":\"2023-05-03T09:03:00Z\"}," ++
+            "{\"role\":\"user\",\"content\":\"We planted tomatoes in the garden.\",\"createdAt\":\"2023-05-03T09:04:00Z\"}," ++
+            "{\"role\":\"user\",\"content\":\"The concert tickets sold out quickly.\",\"createdAt\":\"2023-05-03T09:05:00Z\"}]}}",
+    };
+    for (requests) |request| {
+        const response = try runtime.dispatch(std.testing.allocator, request);
+        defer std.testing.allocator.free(response);
+        try std.testing.expect(std.mem.indexOf(u8, response, "\"status\":\"stored\"") != null);
+    }
+}
+
+fn retrieveGifts(runtime: *Runtime, options_json: []const u8) ![]u8 {
+    const request = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"g\",\"method\":\"memory.retrieve\",\"params\":{{\"query\":\"{s}\",\"scope\":{{\"userId\":\"u1\"}},\"needs\":[\"raw\"],\"budgetTokens\":120,\"options\":{{\"includeDebug\":true,\"logRetrieval\":false,\"logAudit\":false{s}}}}}}}",
+        .{ gift_question, options_json },
+    );
+    defer std.testing.allocator.free(request);
+    return runtime.dispatch(std.testing.allocator, request);
+}
+
+/// The result's `trace.queryExpansion` (or `answerTrace.queryExpansion`).
+fn expansionTrace(parsed: *const std.json.Parsed(Value), trace_key: []const u8) ?ObjectMap {
+    const result = parsed.value.object.get("result").?.object;
+    const trace = result.get(trace_key) orelse return null;
+    if (trace != .object) return null;
+    const expansion = trace.object.get("queryExpansion") orelse return null;
+    return expansion.object;
+}
+
+/// A chat provider that answers query expansion calls with `reply` and acts
+/// as a reader otherwise.
+const TestExpander = struct {
+    calls: usize = 0,
+    reader_calls: usize = 0,
+    reply: []const u8 = "{\"queries\":[\"photo album for my mom\",\"necklace for my sister\"]}",
+    fail: bool = false,
+    last_question: ?[]u8 = null,
+    json_mode: bool = false,
+
+    fn endpoint(self: *TestExpander) providers.ProviderEndpoint {
+        return .{
+            .kind = .callback,
+            .name = "test-expander",
+            .model = "test-expansion-model",
+            .callback = .{ .context = self, .respond = respond },
+        };
+    }
+
+    fn respond(context: ?*anyopaque, allocator: std.mem.Allocator, turn: providers.ChatTurn) anyerror![]u8 {
+        const self: *TestExpander = @ptrCast(@alignCast(context.?));
+        if (!std.mem.eql(u8, turn.system_prompt, query_expansion.llm_system_prompt)) {
+            self.reader_calls += 1;
+            const qid = lineQid(turn.user_content, "album of old pictures") orelse "q_missing";
+            return std.fmt.allocPrint(allocator, "{{\"answer\":\"the photo album\",\"answerable\":true,\"supportQids\":[\"{s}\"],\"confidence\":0.8}}", .{qid});
+        }
+        self.calls += 1;
+        if (self.last_question) |previous| std.testing.allocator.free(previous);
+        self.last_question = try std.testing.allocator.dupe(u8, turn.user_content);
+        self.json_mode = turn.json_mode;
+        if (self.fail) return error.ProviderRequestFailed;
+        return allocator.dupe(u8, self.reply);
+    }
+
+    fn deinit(self: *TestExpander) void {
+        if (self.last_question) |previous| std.testing.allocator.free(previous);
+    }
+};
+
+test "runtime rules expansion surfaces both sides of a comparison within the budget" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
+    defer runtime.deinit();
+    try rememberGiftSessions(&runtime);
+
+    // One query ranks every necklace message above the album message, so the
+    // budget fills before the album is reached.
+    const single = try retrieveGifts(&runtime, "");
+    defer std.testing.allocator.free(single);
+    const single_prompt = try resultStringField(std.testing.allocator, single, "prompt");
+    defer std.testing.allocator.free(single_prompt);
+    try std.testing.expect(std.mem.indexOf(u8, single_prompt, "necklace") != null);
+    try std.testing.expect(std.mem.indexOf(u8, single_prompt, "album of old pictures") == null);
+    try std.testing.expect(std.mem.indexOf(u8, single, "queryExpansion") == null);
+
+    const expanded = try retrieveGifts(&runtime, ",\"queryExpansion\":\"rules\"");
+    defer std.testing.allocator.free(expanded);
+    const prompt = try resultStringField(std.testing.allocator, expanded, "prompt");
+    defer std.testing.allocator.free(prompt);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "necklace") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "album of old pictures") != null);
+    try std.testing.expect(std.mem.indexOf(u8, expanded, "\"warnings\":[\"token_budget_truncated\"]") != null);
+
+    var parsed = try std.json.parseFromSlice(Value, std.testing.allocator, expanded, .{});
+    defer parsed.deinit();
+    const trace = expansionTrace(&parsed, "trace").?;
+    try std.testing.expectEqualStrings("rules", trace.get("mode").?.string);
+    try std.testing.expectEqualStrings("expanded", trace.get("status").?.string);
+    try std.testing.expect(trace.get("model").? == .null);
+    try std.testing.expect(trace.get("error").? == .null);
+    const queries = trace.get("queries").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), queries.len);
+    const expected = [_][2][]const u8{
+        .{ gift_question, "original" },
+        .{ "the necklace for my sister", "rules" },
+        .{ "the photo album for my mom", "rules" },
+    };
+    for (expected, queries) |want, query| {
+        try std.testing.expectEqualStrings(want[0], query.object.get("query").?.string);
+        try std.testing.expectEqualStrings(want[1], query.object.get("source").?.string);
+        try std.testing.expect(query.object.get("hitCount").?.integer > 0);
+        try std.testing.expect(query.object.get("topQids").?.array.items.len > 0);
+    }
+    // The album sub-query's best hit is the album message, and it is packed.
+    const album_qid = queries[2].object.get("topQids").?.array.items[0].string;
+    var item_qids = try responseItemQids(expanded);
+    defer item_qids.deinit();
+    try std.testing.expect(stringListContains(item_qids.qids, album_qid));
+}
+
+test "runtime query expansion off and unsplittable rules leave retrieval unchanged" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var reader = TestReader{};
+    defer reader.deinit();
+    var runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{ .answer_provider = reader.endpoint() });
+    defer runtime.deinit();
+    try rememberPetSessions(&runtime);
+
+    const plain = try retrievePets(&runtime, "");
+    defer std.testing.allocator.free(plain);
+    const off = try retrievePets(&runtime, ",\"queryExpansion\":\"off\"");
+    defer std.testing.allocator.free(off);
+    const null_option = try retrievePets(&runtime, ",\"queryExpansion\":null");
+    defer std.testing.allocator.free(null_option);
+    // Byte-identical apart from the retrieval id.
+    const plain_id = try resultStringField(std.testing.allocator, plain, "retrievalId");
+    defer std.testing.allocator.free(plain_id);
+    for ([_][]const u8{ off, null_option }) |response| {
+        const retrieval_id = try resultStringField(std.testing.allocator, response, "retrievalId");
+        defer std.testing.allocator.free(retrieval_id);
+        const normalized = try std.mem.replaceOwned(u8, std.testing.allocator, response, retrieval_id, plain_id);
+        defer std.testing.allocator.free(normalized);
+        try std.testing.expectEqualStrings(plain, normalized);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, plain, "queryExpansion") == null);
+
+    // "rules" with nothing to split runs the original query alone.
+    const rules = try retrievePets(&runtime, ",\"queryExpansion\":\"rules\"");
+    defer std.testing.allocator.free(rules);
+    var plain_qids = try responseItemQids(plain);
+    defer plain_qids.deinit();
+    var rules_qids = try responseItemQids(rules);
+    defer rules_qids.deinit();
+    try std.testing.expectEqual(plain_qids.qids.len, rules_qids.qids.len);
+    for (plain_qids.qids, rules_qids.qids) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+    const plain_prompt = try resultStringField(std.testing.allocator, plain, "prompt");
+    defer std.testing.allocator.free(plain_prompt);
+    const rules_prompt = try resultStringField(std.testing.allocator, rules, "prompt");
+    defer std.testing.allocator.free(rules_prompt);
+    try std.testing.expectEqualStrings(plain_prompt, rules_prompt);
+    try std.testing.expect(std.mem.indexOf(u8, rules, "\"queryExpansion\":{\"mode\":\"rules\",\"status\":\"unchanged\"") != null);
+
+    // memory.answer: no queryExpansion key in either trace when off.
+    const answer = try runtime.dispatch(
+        std.testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"What is my cat called?\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"options\":{\"includeDebug\":true,\"logRetrieval\":false,\"queryExpansion\":\"off\"}}}",
+    );
+    defer std.testing.allocator.free(answer);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"answer\":\"Miso\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "queryExpansion") == null);
+    try std.testing.expectEqual(@as(usize, 1), reader.calls);
+
+    for ([_][]const u8{ ",\"queryExpansion\":\"LLM\"", ",\"queryExpansion\":true", ",\"queryExpansion\":\"\"" }) |bad| {
+        const invalid = try retrievePets(&runtime, bad);
+        defer std.testing.allocator.free(invalid);
+        try std.testing.expect(std.mem.indexOf(u8, invalid, "\"code\":\"invalid_request\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, invalid, "options.queryExpansion must be off, rules, or llm") != null);
+    }
+}
+
+test "runtime llm expansion sends only the question and fuses the reply" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var expander = TestExpander{};
+    defer expander.deinit();
+    // No expansion provider: the reader's provider expands too.
+    var runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{ .answer_provider = expander.endpoint() });
+    defer runtime.deinit();
+    try rememberGiftSessions(&runtime);
+
+    const health = try runtime.dispatch(std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
+    defer std.testing.allocator.free(health);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"queryExpansion\":{\"modes\":[\"off\",\"rules\",\"llm\"],\"llmConfigured\":true,\"model\":\"test-expansion-model\"}") != null);
+
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"memory.answer\",\"params\":{\"query\":\"" ++ gift_question ++ "\",\"scope\":{\"userId\":\"u1\"},\"needs\":[\"raw\"],\"budgetTokens\":120,\"options\":{\"includeDebug\":true,\"logRetrieval\":false,\"queryExpansion\":\"llm\"}}}";
+    const answer = try runtime.dispatch(std.testing.allocator, request);
+    defer std.testing.allocator.free(answer);
+    try std.testing.expectEqual(@as(usize, 1), expander.calls);
+    try std.testing.expectEqual(@as(usize, 1), expander.reader_calls);
+    try std.testing.expectEqualStrings(gift_question, expander.last_question.?);
+    try std.testing.expect(expander.json_mode);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"answer\":\"the photo album\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "query_expansion_failed") == null);
+    const prompt = try resultStringField(std.testing.allocator, answer, "prompt");
+    defer std.testing.allocator.free(prompt);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "album of old pictures") != null);
+
+    var parsed = try std.json.parseFromSlice(Value, std.testing.allocator, answer, .{});
+    defer parsed.deinit();
+    // Reported in both traces, identically.
+    const trace = expansionTrace(&parsed, "answerTrace").?;
+    try std.testing.expectEqualStrings("llm", trace.get("mode").?.string);
+    try std.testing.expectEqualStrings("expanded", trace.get("status").?.string);
+    try std.testing.expectEqualStrings("test-expansion-model", trace.get("model").?.string);
+    const queries = trace.get("queries").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), queries.len);
+    try std.testing.expectEqualStrings("original", queries[0].object.get("source").?.string);
+    try std.testing.expectEqualStrings("photo album for my mom", queries[1].object.get("query").?.string);
+    try std.testing.expectEqualStrings("llm", queries[1].object.get("source").?.string);
+    try std.testing.expectEqualStrings("necklace for my sister", queries[2].object.get("query").?.string);
+    const retrieval_trace = expansionTrace(&parsed, "trace").?;
+    try std.testing.expectEqual(queries.len, retrieval_trace.get("queries").?.array.items.len);
+
+    // A configured expansion provider takes precedence over the reader.
+    var dedicated = TestExpander{ .reply = "{\"queries\":[\"album of old pictures\"]}" };
+    defer dedicated.deinit();
+    var split_runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{
+        .answer_provider = expander.endpoint(),
+        .expansion_provider = dedicated.endpoint(),
+    });
+    defer split_runtime.deinit();
+    const split = try split_runtime.dispatch(std.testing.allocator, request);
+    defer std.testing.allocator.free(split);
+    try std.testing.expectEqual(@as(usize, 1), dedicated.calls);
+    try std.testing.expectEqual(@as(usize, 0), dedicated.reader_calls);
+    try std.testing.expectEqual(@as(usize, 1), expander.calls);
+    try std.testing.expectEqual(@as(usize, 2), expander.reader_calls);
+    try std.testing.expect(std.mem.indexOf(u8, split, "\"query\":\"album of old pictures\",\"source\":\"llm\"") != null);
+}
+
+test "runtime llm expansion failures fall back to the original query with a warning" {
+    var harness = try RuntimeTestHarness.init(std.testing.allocator);
+    defer harness.deinit();
+    var expander = TestExpander{};
+    defer expander.deinit();
+    var runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{ .expansion_provider = expander.endpoint() });
+    defer runtime.deinit();
+    try rememberGiftSessions(&runtime);
+
+    const baseline = try retrieveGifts(&runtime, "");
+    defer std.testing.allocator.free(baseline);
+    var baseline_qids = try responseItemQids(baseline);
+    defer baseline_qids.deinit();
+
+    const cases = [_]struct { reply: []const u8, fail: bool, @"error": []const u8 }{
+        .{ .reply = "", .fail = true, .@"error" = "ProviderRequestFailed" },
+        .{ .reply = "not json", .fail = false, .@"error" = "InvalidExpansionResponse" },
+        .{ .reply = "{\"queries\":[\"a\",\"b\",\"c\",\"d\",\"e\"]}", .fail = false, .@"error" = "InvalidExpansionResponse" },
+        .{ .reply = "{\"queries\":[\"\"]}", .fail = false, .@"error" = "InvalidExpansionResponse" },
+    };
+    for (cases, 1..) |case, call_count| {
+        expander.reply = case.reply;
+        expander.fail = case.fail;
+        const response = try retrieveGifts(&runtime, ",\"queryExpansion\":\"llm\"");
+        defer std.testing.allocator.free(response);
+        try std.testing.expectEqual(call_count, expander.calls);
+        try std.testing.expect(std.mem.indexOf(u8, response, "\"query_expansion_failed\"") != null);
+        var parsed = try std.json.parseFromSlice(Value, std.testing.allocator, response, .{});
+        defer parsed.deinit();
+        const trace = expansionTrace(&parsed, "trace").?;
+        try std.testing.expectEqualStrings("failed", trace.get("status").?.string);
+        try std.testing.expectEqualStrings(case.@"error", trace.get("error").?.string);
+        try std.testing.expectEqual(@as(usize, 1), trace.get("queries").?.array.items.len);
+        var qids = try responseItemQids(response);
+        defer qids.deinit();
+        try std.testing.expectEqual(baseline_qids.qids.len, qids.qids.len);
+        for (baseline_qids.qids, qids.qids) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+    }
+
+    // No chat provider at all: nothing to call, same fallback.
+    var bare = Runtime.init(harness.adapter(), harness.health());
+    defer bare.deinit();
+    const unavailable = try retrieveGifts(&bare, ",\"queryExpansion\":\"llm\"");
+    defer std.testing.allocator.free(unavailable);
+    try std.testing.expect(std.mem.indexOf(u8, unavailable, "\"query_expansion_failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unavailable, "\"error\":\"ProviderUnavailable\"") != null);
 }
 
 test "prompt renderer orders sessions, items and derived memory deterministically" {
@@ -7803,6 +8455,41 @@ test "factKeys off leaves retrieval unchanged and never returns assertions" {
     const search = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"s\",\"method\":\"memory.search\",\"params\":{\"query\":\"apartment\",\"scope\":{\"projectId\":\"repo:facts\"}}}");
     defer allocator.free(search);
     try std.testing.expect(std.mem.indexOf(u8, search, assertion_qid_prefix) == null);
+}
+
+test "query expansion runs each sub-query through fact keys" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var extractor_model = TestExtractor{ .replies = &fact_test_replies };
+    defer extractor_model.deinit();
+    var runtime = Runtime.initWithOptions(harness.adapter(), harness.health(), .{ .extract_provider = extractor_model.endpoint() });
+    defer runtime.deinit();
+    const sessions = try rememberFactSessions(&runtime);
+    defer sessions.deinit();
+    _ = try runtime.runExtractJobs(allocator, "test", 100, 1);
+
+    // The rules split hands each side to the fact-key collector; the Kyoto
+    // plan is reached through the chunk its claim quotes.
+    const query = "Which came first, the new apartment or the sakura trip to Japan?";
+    const combined = try retrieveFacts(&runtime, query, ",\"factKeys\":true,\"queryExpansion\":\"rules\"");
+    defer allocator.free(combined);
+    var qids = try responseItemQids(combined);
+    defer qids.deinit();
+    const second_chunk = try chunkQid(allocator, sessions.kyoto_message, 1);
+    defer allocator.free(second_chunk);
+    try std.testing.expect(stringListContains(qids.qids, sessions.flat_message));
+    try std.testing.expect(stringListContains(qids.qids, second_chunk));
+    try std.testing.expect(std.mem.indexOf(u8, combined, assertion_qid_prefix) == null);
+    try std.testing.expect(std.mem.indexOf(u8, combined, "\"queryExpansion\":{\"mode\":\"rules\",\"status\":\"expanded\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, combined, "\"factKeys\":{\"assertionHits\":") != null);
+
+    // Without fact keys, expansion still runs but assertions take no part.
+    const plain = try retrieveFacts(&runtime, query, ",\"queryExpansion\":\"rules\"");
+    defer allocator.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "\"queryExpansion\":{\"mode\":\"rules\",\"status\":\"expanded\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "\"factKeys\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, assertion_qid_prefix) == null);
 }
 
 test "factKeys turns assertion hits into their raw evidence with event dates" {

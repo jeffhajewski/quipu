@@ -38,6 +38,9 @@ const RuntimeConfig = struct {
     answer_provider: ?[]const u8 = null,
     answer_url: ?[]const u8 = null,
     answer_model: ?[]const u8 = null,
+    expand_provider: ?[]const u8 = null,
+    expand_url: ?[]const u8 = null,
+    expand_model: ?[]const u8 = null,
     entity_provider: ?[]const u8 = null,
     entity_url: ?[]const u8 = null,
     entity_model: ?[]const u8 = null,
@@ -375,6 +378,33 @@ fn parseRuntimeConfig(args: []const [:0]const u8) RuntimeConfig {
             config.command_index += 1;
             break;
         }
+        if (std.mem.eql(u8, arg, "--expand-provider")) {
+            if (config.command_index + 1 < args.len) {
+                config.expand_provider = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--expand-url")) {
+            if (config.command_index + 1 < args.len) {
+                config.expand_url = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--expand-model")) {
+            if (config.command_index + 1 < args.len) {
+                config.expand_model = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
         if (std.mem.eql(u8, arg, "--entity-provider")) {
             if (config.command_index + 1 < args.len) {
                 config.entity_provider = args[config.command_index + 1];
@@ -630,6 +660,7 @@ fn runtimeOptionsFromConfig(
             "OPENROUTER_ANSWER_MODEL",
             "openai/gpt-4o",
         ),
+        .expansion_provider = expansionEndpointFromConfig(allocator, io, environ_map, config, file_config),
         .entity_provider = providerEndpointFromConfig(
             allocator,
             io,
@@ -664,6 +695,39 @@ fn runtimeOptionsFromConfig(
         ),
         .reranker = rerankerEndpointFromConfig(environ_map, config),
     };
+}
+
+/// The provider for `options.queryExpansion: "llm"`. With no `--expand-*`
+/// flag or `QUIPU_EXPAND_*` variable it stays unset and the runtime uses the
+/// answer provider. A model or URL alone keeps the answer provider for the
+/// rest, so `--expand-model` picks a cheaper model on the same endpoint.
+fn expansionEndpointFromConfig(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *std.process.Environ.Map,
+    config: RuntimeConfig,
+    file_config: FileConfig,
+) providers.ProviderEndpoint {
+    const provider = config.expand_provider orelse environ_map.get("QUIPU_EXPAND_PROVIDER");
+    const url = config.expand_url orelse environ_map.get("QUIPU_EXPAND_URL");
+    const model = config.expand_model orelse environ_map.get("QUIPU_EXPAND_MODEL");
+    if (provider == null and url == null and model == null) return .{};
+    const same_provider = provider == null;
+    return providerEndpointFromConfig(
+        allocator,
+        io,
+        environ_map,
+        provider orelse config.answer_provider orelse environ_map.get("QUIPU_ANSWER_PROVIDER"),
+        url orelse if (same_provider) config.answer_url orelse environ_map.get("QUIPU_ANSWER_URL") else null,
+        model orelse if (same_provider) config.answer_model orelse environ_map.get("QUIPU_ANSWER_MODEL") else null,
+        config,
+        file_config,
+        "QUIPU_EXPAND_PROVIDER",
+        "QUIPU_EXPAND_URL",
+        "QUIPU_EXPAND_MODEL",
+        "OPENROUTER_EXPAND_MODEL",
+        "openai/gpt-4o-mini",
+    );
 }
 
 /// The optional cross-encoder reranker: a Cohere/Jina-compatible `/rerank`
@@ -1397,7 +1461,7 @@ fn runCommand(
         return;
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--extract-provider openrouter|openai|anthropic|google|ollama|custom] [--extract-url URL] [--extract-model MODEL] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve|extract ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--expand-provider PROVIDER] [--expand-url URL] [--expand-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--extract-provider openrouter|openai|anthropic|google|ollama|custom] [--extract-url URL] [--extract-model MODEL] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams]... | jobs materialize|lease|complete|fail|run entity-resolve|extract ... | rpc-stdin | serve\n", .{});
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {

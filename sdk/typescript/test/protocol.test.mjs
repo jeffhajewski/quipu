@@ -163,6 +163,55 @@ test("rerank options are part of the retrieve and answer contract", () => {
   }
 });
 
+test("query expansion is part of the retrieve and answer contract", () => {
+  const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
+  assert.deepEqual(schema.$defs.queryExpansionMode.enum, ["off", "rules", "llm"]);
+  for (const def of ["memoryRetrieveParams", "memoryAnswerParams"]) {
+    assert.deepEqual(schema.$defs[def].properties.options.properties.queryExpansion, { $ref: "#/$defs/queryExpansionMode" });
+  }
+  for (const def of ["retrievalTrace", "answerTrace"]) {
+    assert.deepEqual(schema.$defs[def].properties.queryExpansion, { $ref: "#/$defs/queryExpansionTrace" });
+    assert.equal((schema.$defs[def].required ?? []).includes("queryExpansion"), false);
+  }
+  assert.deepEqual(schema.$defs.queryExpansionTrace.properties.queries.items.properties.source.enum, ["original", "rules", "llm"]);
+  assert.ok(schema.$defs.systemHealthResult.properties.capabilities.properties.queryExpansion);
+
+  for (const method of ["memory.retrieve", "memory.answer"]) {
+    for (const mode of ["off", "rules", "llm"]) {
+      validateRpcParams(method, { query: "q", options: { queryExpansion: mode } });
+    }
+    for (const bad of ["LLM", "", null, true, ["rules"]]) {
+      assert.throws(() => validateRpcParams(method, { query: "q", options: { queryExpansion: bad } }), QuipuProtocolError);
+    }
+  }
+});
+
+test("query expansion fixture reports the queries in both traces", () => {
+  const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.answer.query_expansion.json"), "utf8"));
+  const result = fixture.response.result;
+  assert.equal(fixture.request.params.options.queryExpansion, "rules");
+  const expansion = result.answerTrace.queryExpansion;
+  assert.deepEqual(expansion, result.trace.queryExpansion);
+  assert.equal(expansion.status, "expanded");
+  assert.deepEqual(
+    expansion.queries.map((query) => [query.query, query.source]),
+    [
+      [fixture.request.params.query, "original"],
+      ["the necklace for my sister", "rules"],
+      ["the photo album for my mom", "rules"],
+    ],
+  );
+  const itemQids = new Set(result.items.map((item) => item.qid));
+  for (const query of expansion.queries) {
+    for (const qid of query.topQids) assert.ok(itemQids.has(qid));
+  }
+
+  const defaults = JSON.parse(readFileSync(path.join(fixtureDir, "memory.answer.success.json"), "utf8"));
+  assert.equal("queryExpansion" in defaults.response.result.answerTrace, false);
+  const health = JSON.parse(readFileSync(path.join(fixtureDir, "system.health.success.json"), "utf8"));
+  assert.deepEqual(health.response.result.capabilities.queryExpansion.modes, ["off", "rules", "llm"]);
+});
+
 test("invalid request fixture is rejected", () => {
   const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.retrieve.invalid_request.json"), "utf8"));
   assert.throws(() => validateJsonRpcRequest(fixture.request), QuipuProtocolError);

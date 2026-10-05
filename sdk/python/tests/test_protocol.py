@@ -189,6 +189,52 @@ class ProtocolFixtureTests(unittest.TestCase):
         default = json.loads((FIXTURE_DIR / "memory.retrieve.success.json").read_text())
         self.assertNotIn("factKeys", default["response"]["result"]["trace"])
 
+    def test_query_expansion_is_part_of_the_retrieve_and_answer_contract(self):
+        defs = json.loads((SCHEMA_DIR / "methods.schema.json").read_text())["$defs"]
+        self.assertEqual(defs["queryExpansionMode"]["enum"], ["off", "rules", "llm"])
+        for method in ("memoryRetrieveParams", "memoryAnswerParams"):
+            options = defs[method]["properties"]["options"]["properties"]
+            self.assertEqual(options["queryExpansion"], {"$ref": "#/$defs/queryExpansionMode"})
+        for trace in ("retrievalTrace", "answerTrace"):
+            self.assertEqual(defs[trace]["properties"]["queryExpansion"], {"$ref": "#/$defs/queryExpansionTrace"})
+            self.assertNotIn("queryExpansion", defs[trace].get("required", []))
+        query = defs["queryExpansionTrace"]["properties"]["queries"]["items"]
+        self.assertEqual(query["properties"]["source"]["enum"], ["original", "rules", "llm"])
+        self.assertIn("queryExpansion", defs["systemHealthResult"]["properties"]["capabilities"]["properties"])
+
+        for method in ("memory.retrieve", "memory.answer"):
+            for mode in ("off", "rules", "llm"):
+                with self.subTest(method=method, mode=mode):
+                    validate_rpc_params(method, {"query": "q", "options": {"queryExpansion": mode}})
+            for bad in ("LLM", "", None, True, ["rules"]):
+                with self.subTest(method=method, bad=bad):
+                    with self.assertRaises(QuipuProtocolError):
+                        validate_rpc_params(method, {"query": "q", "options": {"queryExpansion": bad}})
+
+    def test_query_expansion_fixture_reports_queries_in_both_traces(self):
+        fixture = json.loads((FIXTURE_DIR / "memory.answer.query_expansion.json").read_text())
+        result = fixture["response"]["result"]
+        self.assertEqual(fixture["request"]["params"]["options"]["queryExpansion"], "rules")
+        expansion = result["answerTrace"]["queryExpansion"]
+        self.assertEqual(expansion, result["trace"]["queryExpansion"])
+        self.assertEqual(expansion["status"], "expanded")
+        self.assertEqual(
+            [(query["query"], query["source"]) for query in expansion["queries"]],
+            [
+                (fixture["request"]["params"]["query"], "original"),
+                ("the necklace for my sister", "rules"),
+                ("the photo album for my mom", "rules"),
+            ],
+        )
+        item_qids = {item["qid"] for item in result["items"]}
+        for query in expansion["queries"]:
+            self.assertTrue(set(query["topQids"]) <= item_qids)
+
+        default_trace = json.loads((FIXTURE_DIR / "memory.answer.success.json").read_text())["response"]["result"]["answerTrace"]
+        self.assertNotIn("queryExpansion", default_trace)
+        health = json.loads((FIXTURE_DIR / "system.health.success.json").read_text())["response"]["result"]
+        self.assertEqual(health["capabilities"]["queryExpansion"]["modes"], ["off", "rules", "llm"])
+
     def test_error_fixture_rejects_bad_request(self):
         fixture = json.loads((FIXTURE_DIR / "memory.retrieve.invalid_request.json").read_text())
         with self.assertRaises(QuipuProtocolError):

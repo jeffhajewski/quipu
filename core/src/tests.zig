@@ -11,6 +11,7 @@ test {
     _ = @import("answer_synthesis.zig");
     _ = @import("providers.zig");
     _ = @import("temporal.zig");
+    _ = @import("query_expansion.zig");
     _ = @import("runtime.zig");
     if (build_options.enable_lattice) {
         _ = @import("lattice_storage.zig");

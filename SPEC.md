@@ -2072,6 +2072,15 @@ Pipeline:
 12. Log retrieval trace.
 ```
 
+Implemented today: optional query decomposition before candidate generation
+(`options.queryExpansion`: `off` by default, `rules`, or `llm`). The original
+query and each sub-query run candidate generation separately, and the lists are
+fused by reciprocal rank (k = 60) with each query's top two candidates leading,
+before the raw-evidence policy, reranking and packing. The `llm` mode sends only
+the question text to the expansion provider and validates the reply; a failure
+falls back to the original query with the `query_expansion_failed` warning. See
+`docs/algorithms.md#query-expansion`.
+
 ### 10.9 Candidate generation
 
 Default limits:

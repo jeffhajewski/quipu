@@ -266,6 +266,17 @@ fn callProviderCallback(allocator: std.mem.Allocator, endpoint: ProviderEndpoint
     return callback.respond(callback.context, allocator, turn);
 }
 
+/// Sends one chat turn to an LLM endpoint and returns the reply text: a
+/// callback provider directly, an HTTP provider with the reader's retries.
+pub fn completeTurn(allocator: std.mem.Allocator, io: ?std.Io, endpoint: ProviderEndpoint, turn: ChatTurn) ![]u8 {
+    return switch (endpoint.kind) {
+        .none => error.ProviderUnavailable,
+        .deterministic, .command => error.UnsupportedProviderKind,
+        .callback => callProviderCallback(allocator, endpoint, turn),
+        .http => chatCompletionWithRetries(allocator, io orelse return error.ProviderUnavailable, endpoint, turn),
+    };
+}
+
 pub fn resolveEntities(
     allocator: std.mem.Allocator,
     io: ?std.Io,
