@@ -93,6 +93,52 @@ multi-session aggregation and temporal reasoning.
 Answer cost per arm was $0.41 at 1K and $1.05 at 4K, or $0.58 and $1.21 with
 reasoning. Answer latency p50 was 2.7–3.2 s, or 3.9–4.1 s with reasoning.
 
+## LoCoMo
+
+LoCoMo runs through the same daemon harness (`quipu_evals.sota_locomo`; see
+[evals.md](evals.md)). Protocol:
+
+- Data: `snap-research/locomo@3eb6f2c`. Questions in categories 1–4 (1,540)
+  are scored; category 5, adversarial, is reported separately.
+- Judge: Mem0's `ACCURACY_PROMPT` with GPT-4o-mini.
+- Speaker names are stored as message roles.
+- The audit-corrected answer key (`dial481/locomo-audit`) is scored as a
+  sensitivity check alongside the official key, never in its place.
+
+The daemon used was the default configuration (`d1d5445`) with a GPT-4o-mini
+reader.
+
+| Run | 1,024 | 4,096 | Gold-turn coverage |
+| --- | ---: | ---: | ---: |
+| Speaker name as role (protocol) | 65.5% | 79.5% | 56.1% / 79.0% |
+| Speaker name in message text (diagnostic) | 78.5% | 83.7% | 72.9% / 89.8% |
+
+Per-category accuracy for the protocol run:
+
+| Category | 1,024 | 4,096 |
+| --- | ---: | ---: |
+| Multi-hop | 47.2% | 73.0% |
+| Temporal | 60.7% | 63.9% |
+| Open-domain | 42.7% | 58.3% |
+| Single-hop | 76.1% | 90.1% |
+| Adversarial (category 5, reported separately) | 34.3% | 22.2% |
+
+The diagnostic run is incomplete: 173 questions failed with HTTP 402 because
+the provider account ran out of credit, and those failures count as errors,
+not wrong answers. The audit key changes totals by under one point.
+
+The gap between the two runs was a retrieval bug: a speaker's own lines did
+not match searches for their name. `a0c71d0` indexes `"<role>: <text>"` for
+messages whose role is a person's name. That fix has not been re-measured yet.
+
+Two other findings:
+
+- Unlike the LongMemEval slice, LoCoMo benefits from 4K over 1K. At 1K, 410
+  of 531 wrong answers had no gold turn in context.
+- Temporal failures happen even with the evidence present: at 4K, 72 of 116
+  wrong temporal answers had every gold turn in context. The reader resolves
+  relative dates against the wrong session.
+
 ## What we learned
 
 - **The reader is now the bottleneck, not retrieval.** At 4K, 93% of gold
@@ -118,11 +164,12 @@ reasoning. Answer latency p50 was 2.7–3.2 s, or 3.9–4.1 s with reasoning.
 
 ## Cost
 
-The sprint's provider spend was about $8.60 in total:
+The sprint's provider spend was about $12 in total:
 
 - $0.27 for the E1 reference,
 - $1.50 across the GPT-4o-mini daemon harness runs,
 - about $6.80 for the four Sonnet 5.5 arms,
+- $3.35 for the LoCoMo runs,
 - the rest on agent smoke tests.
 
 Embeddings cost about $0.13 per uncached full slice. A GPT-4o-mini reader with
