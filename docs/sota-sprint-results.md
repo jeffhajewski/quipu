@@ -155,6 +155,32 @@ same-day evidence is no longer dropped. `--valid-at question` reproduces the
 earlier runs. Results above have not been re-measured; re-measuring is blocked
 until the provider account has credit.
 
+## Iteration 2 (October 5): built, not yet measured
+
+These are merged on `sota-sprint`. Each new retrieval behavior is an option,
+off by default:
+
+- **Forgetting without a cap.** Forget closures follow provenance edges for
+  any label, transitively; they no longer enumerate the store. Supersession
+  and core lookups use indexed properties. `quipu verify leaks` flags
+  forgotten text that survives in live nodes. Scale tests on stores of over
+  5,000 nodes pass on both backends. They fail on the previous runtime.
+- **Fact keys** (`options.factKeys`). An LLM extraction worker (`quipu jobs run
+  extract`) writes quote-grounded `Assertion` nodes with optional event dates.
+  When `factKeys` is on, an assertion hit retrieves its source chunk or
+  message. Extraction costs about $0.03 per LongMemEval-S question with
+  GPT-4o-mini, and about 78% of claims pass the quote check.
+- **Query decomposition** (`options.queryExpansion`: `rules` or `llm`). Each
+  sub-query runs through normal candidate generation, fact keys included, and
+  the per-query lists are fused. On five known recall misses, `llm` raised
+  gold-turn coverage from 40% to 55%; `rules` changed nothing.
+- **Speaker indexing.** Lines from named speakers are indexed as
+  `"<name>: <text>"`.
+- **Question-time correction.** See the section above.
+
+The A/B tests on the dev slice and the LoCoMo re-run are waiting for provider
+credit.
+
 ## What we learned
 
 - **The reader is now the bottleneck, not retrieval.** At 4K, 93% of gold
