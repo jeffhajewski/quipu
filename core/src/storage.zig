@@ -203,6 +203,8 @@ pub const VerificationIssue = struct {
     code: []const u8,
     message: []const u8,
     qid: ?[]const u8 = null,
+    /// A second node the issue involves, such as the tombstone a leak copies.
+    relatedQid: ?[]const u8 = null,
 };
 
 pub const Adapter = struct {
