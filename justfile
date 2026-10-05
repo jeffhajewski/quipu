@@ -34,7 +34,7 @@ experiment-e1-test:
     python3 -m unittest discover -s evals/tests -p test_representation_experiment.py
 
 sota-test:
-    cd evals/tests && PYTHONPATH=../src python3 -m unittest test_sota_longmemeval test_caching_proxy test_core_runner test_longmemeval_study test_study_analysis
+    cd evals/tests && PYTHONPATH=../src python3 -m unittest test_sota_longmemeval test_sota_locomo test_caching_proxy test_core_runner test_longmemeval_study test_study_analysis
 
 # Build core into artifacts/sota/bin/<name>; pass --lattice --lattice-include ... --lattice-lib ... for Lattice.
 sota-build name *flags:
@@ -49,6 +49,14 @@ sota-e1-reference:
     {{sota_env}} python3 -m quipu_evals.longmemeval_study prepare --dataset {{sota_artifacts}}/experiments/upstream/longmemeval_s_cleaned.json --selection evals/experiments/sota-dev-selection.json --output {{sota_artifacts}}/sota/e1-splits
     {{sota_env}} {{sota_python}} -m quipu_evals.longmemeval_study evaluate --suite {{sota_artifacts}}/sota/e1-splits/sota-dev.json --cache {{sota_artifacts}}/sota/cache/study --output {{sota_artifacts}}/sota/e1-raw-reference --arms raw --budgets 1024 4096 --workers 8 --upstream {{sota_artifacts}}/experiments/LongMemEval-upstream/src/evaluation/evaluate_qa.py
     {{sota_env}} {{sota_python}} -m quipu_evals.sota_longmemeval summarize-e1 --report {{sota_artifacts}}/sota/e1-raw-reference/report.json
+
+# LoCoMo through the same daemon harness: pinned locomo10.json + locomo-audit errors.json, sha256-checked.
+sota-locomo-download:
+    {{sota_env}} python3 -m quipu_evals.sota_locomo download
+
+# Run the daemon built by sota-build on LoCoMo (both budgets, categories 1-5; 5 reported separately).
+sota-locomo-run name run_name *flags:
+    {{sota_env}} {{sota_python}} -m quipu_evals.sota_locomo run --daemon-binary {{sota_artifacts}}/sota/bin/{{name}}/bin/quipu --run-name {{run_name}} {{flags}}
 
 # Paired comparison, B versus A (each a run report.json or an E1 study report.json).
 sota-compare a b out:
@@ -74,6 +82,7 @@ benchmark-locomo-graph-smoke:
 benchmark-locomo-full dataset:
     PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks {{dataset}} --result-class publishable --external-benchmark locomo --include-baselines --include-ablations --include-lattice --require-lattice --core-retrieval-mode graph --core-answer-method answer --core-entity-provider deterministic --enable-entity-resolution --core-budget-tokens 32768 --reuse-existing --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
 
+# Legacy external-benchmark pipeline (unpinned upstream main). The SOTA harness uses sota-locomo-download.
 benchmark-locomo-download:
     PYTHONPATH=evals/src python3 -m quipu_evals.benchmarks --external-benchmark locomo --download-locomo --result-class publishable --include-baselines --include-ablations --include-lattice --require-lattice --core-retrieval-mode graph --core-answer-method answer --core-entity-provider deterministic --enable-entity-resolution --core-budget-tokens 32768 --reuse-existing --allow-failures --markdown artifacts/benchmarks/locomo-full/report.md
 
