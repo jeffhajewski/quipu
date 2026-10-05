@@ -193,5 +193,74 @@ class RerankerTests(unittest.TestCase):
         self.assertIsNone(reranker_health(None))
 
 
+class ExtractionTests(unittest.TestCase):
+    CONFIG = {"daemonBinary": "/bin/quipu", "readerModel": "reader", "embeddingModel": "embed"}
+    RESULT = {"leasedCount": 2, "succeededCount": 2, "failedCount": 0, "calls": 3, "jsonRetries": 1,
+              "assertionsWritten": 9, "counts": {"candidates": 12, "accepted": 9, "repaired": 2, "quarantined": 3,
+                                                 "eventDates": 4}}
+
+    class Proxy:
+        def __init__(self, records):
+            self.state = self
+            self.records = records
+
+        def mark(self):
+            return 0
+
+        def records_for(self, tag, mark):
+            return [record for record in self.records if record["tag"] == tag]
+
+    class Daemon:
+        def __init__(self, result):
+            self.result = result
+            self.calls = []
+
+        def call(self, method, params, timeout):
+            self.calls.append((method, params, timeout))
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+    def test_daemon_gets_extract_flags_only_with_extract(self):
+        plain = daemon_command(self.CONFIG, answer_url="http://proxy/chat", embedding_url=None, db_path=None,
+                               extract_url="http://proxy/chat")
+        self.assertNotIn("--extract-provider", plain)
+        command = daemon_command({**self.CONFIG, "llmExtract": {"model": "openai/gpt-4o-mini-2024-07-18"}},
+                                 answer_url="http://proxy/chat", embedding_url=None, db_path=None,
+                                 extract_url="http://proxy/q/x/v1/chat/completions")
+        self.assertEqual(command[-7:], ["--extract-provider", "openrouter", "--extract-url",
+                                        "http://proxy/q/x/v1/chat/completions", "--extract-model",
+                                        "openai/gpt-4o-mini-2024-07-18", "serve-stdio"])
+
+    def test_extraction_records_calls_cost_and_counts(self):
+        from quipu_evals.sota_longmemeval import extraction_row, run_extraction, summarize_extraction
+        records = [{"tag": "q1", "endpoint": "chat/completions", "status": 200, "costUsd": 0.01,
+                    "nominalCostUsd": 0.02, "promptTokens": 100, "completionTokens": 50},
+                   {"tag": "q1", "endpoint": "embeddings", "status": 200, "costUsd": 0.001, "nominalCostUsd": 0.001},
+                   {"tag": "q2", "endpoint": "chat/completions", "status": 200, "costUsd": 5.0, "nominalCostUsd": 5.0}]
+        config = {"llmExtract": {"model": "m", "concurrency": 4, "timeout": 60}}
+        daemon = self.Daemon(self.RESULT)
+        extraction = run_extraction(daemon, config, self.Proxy(records), "q1")
+        self.assertEqual(daemon.calls, [("memory.extract.run", {"owner": "sota-harness", "concurrency": 4}, 60)])
+        self.assertNotIn("error", extraction)
+        self.assertEqual((extraction["calls"]["chatCalls"], extraction["calls"]["embeddingCalls"]), (1, 1))
+        row = extraction_row(extraction)
+        self.assertEqual((row["chatCalls"], row["accepted"], row["quarantined"]), (1, 9, 3))
+        self.assertAlmostEqual(row["costUsd"], 0.011)
+
+        from quipu_evals.sota_longmemeval import DaemonError
+        failed = run_extraction(self.Daemon(DaemonError("memory.extract.run timed out")), config, self.Proxy([]), "q1")
+        self.assertIn("timed out", failed["error"])
+        self.assertIsNone(extraction_row(failed))
+
+        summary = summarize_extraction([{"extraction": extraction}, {"extraction": failed}, {"extraction": None}])
+        self.assertEqual((summary["questions"], summary["errors"], summary["failedJobs"]), (2, 1, 0))
+        self.assertEqual(summary["counts"]["accepted"], 9)
+        self.assertAlmostEqual(summary["acceptedRate"], 0.75)
+        self.assertAlmostEqual(summary["quarantinedRate"], 0.25)
+        self.assertEqual(summary["jsonRetries"], 1)
+        self.assertIsNone(summarize_extraction([{"questionId": "q"}]))
+
+
 if __name__ == "__main__":
     unittest.main()

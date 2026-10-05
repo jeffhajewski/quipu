@@ -46,6 +46,7 @@ CATEGORIES = (
     "single-session-preference", "single-session-user", "temporal-reasoning",
 )
 READER_MODEL = "openai/gpt-4o-mini-2024-07-18"
+EXTRACT_MODEL = "openai/gpt-4o-mini-2024-07-18"
 JUDGE_MODEL = "openai/gpt-4o-2024-08-06"
 EMBED_MODEL = "openai/text-embedding-3-small"
 TOKENIZER = "o200k_base"
@@ -330,7 +331,7 @@ def daemon_env(home: Path) -> dict[str, str]:
 
 
 def daemon_command(config: Mapping[str, Any], *, answer_url: str, embedding_url: str | None,
-                   db_path: Path | None) -> list[str]:
+                   db_path: Path | None, extract_url: str | None = None) -> list[str]:
     command = [str(config["daemonBinary"])]
     if db_path is not None:
         command += ["--db", str(db_path)]
@@ -341,6 +342,9 @@ def daemon_command(config: Mapping[str, Any], *, answer_url: str, embedding_url:
                     "--embedding-model", config["embeddingModel"]]
     if config.get("vectorDimensions"):
         command += ["--vector-dimensions", str(config["vectorDimensions"])]
+    if config.get("llmExtract") and extract_url is not None:
+        command += ["--extract-provider", "openrouter", "--extract-url", extract_url,
+                    "--extract-model", config["llmExtract"]["model"]]
     if config.get("rerankerUrl"):
         command += ["--reranker-url", config["rerankerUrl"]]
         if config.get("rerankerModel"):
@@ -452,7 +456,7 @@ def run_question(case: Mapping[str, Any], config: Mapping[str, Any], proxy: Any,
         command = daemon_command(
             config, answer_url=proxy.url(tag, "chat/completions"),
             embedding_url=proxy.url(tag, "embeddings") if config["embeddingViaProxy"] else None,
-            db_path=db_path)
+            db_path=db_path, extract_url=proxy.url(tag, "chat/completions"))
         record["daemonCommand"] = [part if "/q/" not in part else part.replace(proxy.base_url, "<proxy>")
                                    for part in command]
         daemon = Daemon(command, env=daemon_env(home), cwd=home,
@@ -483,6 +487,14 @@ def run_question(case: Mapping[str, Any], config: Mapping[str, Any], proxy: Any,
             record["ingest"] = {"seconds": time.perf_counter() - started, "warnings": warnings,
                                 "messageQids": len(qid_to_turn),
                                 "calls": summarize_calls(proxy.state.records_for(tag, mark))}
+
+            # LLM fact extraction (--extract): run the daemon's extract jobs -
+            if config.get("llmExtract"):
+                record["extraction"] = run_extraction(daemon, config, proxy, tag)
+                if "error" in record["extraction"]:
+                    record["status"] = "error"
+                    record["rows"] = failed_rows("extract", record["extraction"]["error"])
+                    return record
 
             # Answer + judge per budget ---------------------------------------
             for budget in budgets:
@@ -534,6 +546,8 @@ def run_question(case: Mapping[str, Any], config: Mapping[str, Any], proxy: Any,
                     "rawOnly": coverage(case, raw_turns),
                     "warnings": result.get("warnings"),
                     "rerank": rerank_summary(result.get("trace")),
+                    "factKeys": (result.get("trace") or {}).get("factKeys"),
+                    "extraction": extraction_row(record.get("extraction")),
                     "tokenEstimate": result.get("tokenEstimate"),
                     "context": context,
                     "itemRefs": [{"qid": item.get("qid"), "type": item.get("type"), "score": item.get("score"),
@@ -555,6 +569,66 @@ def run_question(case: Mapping[str, Any], config: Mapping[str, Any], proxy: Any,
     if any(row["status"] != "ok" for row in record["rows"]):
         record["status"] = "error"
     return record
+
+
+def run_extraction(daemon: Daemon, config: Mapping[str, Any], proxy: Any, tag: str) -> dict[str, Any]:
+    """Run every pending extract job through ``memory.extract.run``.
+
+    Provider calls go to the caching proxy under the question's tag, so the
+    extraction cost is the proxy records between the marks: chat calls plus
+    the embeddings of new Assertion nodes.
+    """
+    settings = config["llmExtract"]
+    mark = proxy.state.mark()
+    started = time.perf_counter()
+    try:
+        result = daemon.call("memory.extract.run", {"owner": "sota-harness", "concurrency": settings["concurrency"]},
+                             timeout=settings["timeout"])
+    except DaemonError as exc:
+        return {"seconds": time.perf_counter() - started, "error": str(exc)[:1000],
+                "calls": summarize_calls(proxy.state.records_for(tag, mark))}
+    # A failed job (provider error, JSON still malformed after E1's retries)
+    # leaves its session unextracted; the run goes on and reports it.
+    return {"seconds": time.perf_counter() - started,
+            "calls": summarize_calls(proxy.state.records_for(tag, mark)),
+            "result": dict(result)}
+
+
+def extraction_row(extraction: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The per-question extraction numbers repeated on each budget row."""
+    if not extraction or "result" not in extraction:
+        return None
+    counts = extraction["result"].get("counts") or {}
+    return {"seconds": extraction["seconds"], "chatCalls": extraction["calls"]["chatCalls"],
+            "costUsd": extraction["calls"]["costUsd"], "candidates": counts.get("candidates"),
+            "accepted": counts.get("accepted"), "repaired": counts.get("repaired"),
+            "quarantined": counts.get("quarantined"), "eventDates": counts.get("eventDates")}
+
+
+def summarize_extraction(records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    runs = [r["extraction"] for r in records if isinstance(r.get("extraction"), Mapping)]
+    if not runs:
+        return None
+    ok = [run for run in runs if "result" in run]
+    counts: Counter[str] = Counter()
+    for run in ok:
+        counts.update({k: v for k, v in (run["result"].get("counts") or {}).items() if isinstance(v, int)})
+    candidates = counts.get("candidates", 0)
+    return {
+        "questions": len(runs), "errors": sum("error" in run for run in runs),
+        "failedJobs": sum(run["result"].get("failedCount", 0) for run in ok),
+        "secondsMean": mean(run["seconds"] for run in ok), "secondsP50": percentile((run["seconds"] for run in ok), .5),
+        "chatCalls": sum(run["calls"]["chatCalls"] for run in runs),
+        "embeddingCalls": sum(run["calls"]["embeddingCalls"] for run in runs),
+        "jsonRetries": sum(run["result"].get("jsonRetries", 0) for run in ok),
+        "costUsd": sum(run["calls"]["costUsd"] for run in runs),
+        "nominalCostUsd": sum(run["calls"]["nominalCostUsd"] for run in runs),
+        "costUsdPerQuestion": sum(run["calls"]["nominalCostUsd"] for run in runs) / len(runs),
+        "assertionsWritten": sum(run["result"].get("assertionsWritten", 0) for run in ok),
+        "counts": dict(counts),
+        "acceptedRate": counts.get("accepted", 0) / candidates if candidates else None,
+        "quarantinedRate": counts.get("quarantined", 0) / candidates if candidates else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +810,17 @@ def markdown(report: Mapping[str, Any]) -> str:
                   f"Questions {i['questions']}, errors {i['ingestErrors']}, mean sessions {fmt(i['sessionsMean'])}, "
                   f"mean messages {fmt(i['messagesMean'])}; seconds mean {fmt(i['secondsMean'])}, p50 {fmt(i['secondsP50'])}, "
                   f"p95 {fmt(i['secondsP95'])}; embedding calls {i['embeddingCalls']}, cost {fmt(i['costUsd'], 'usd')}."]
+    if report.get("extraction"):
+        e = report["extraction"]
+        lines += ["", "## Extraction", "",
+                  f"Questions {e['questions']}, errors {e['errors']}, failed jobs {e['failedJobs']}; "
+                  f"seconds mean {fmt(e['secondsMean'])}, "
+                  f"p50 {fmt(e['secondsP50'])}; chat calls {e['chatCalls']} (JSON retries {e['jsonRetries']}), "
+                  f"embedding calls {e['embeddingCalls']}; nominal cost {fmt(e['nominalCostUsd'], 'usd')} "
+                  f"({fmt(e['costUsdPerQuestion'], 'usd')} per question), new spend {fmt(e['costUsd'], 'usd')}. "
+                  f"Claims {e['counts'].get('candidates', 0)}: accepted {fmt(e['acceptedRate'], 'pct')} "
+                  f"(repaired {e['counts'].get('repaired', 0)}), quarantined {fmt(e['quarantinedRate'], 'pct')}, "
+                  f"with event dates {e['counts'].get('eventDates', 0)}."]
     if report.get("spend"):
         lines += ["", "## Spend", "", "```json", json.dumps(report["spend"], indent=2, sort_keys=True), "```"]
     if report.get("errors"):
@@ -764,6 +849,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not os.environ.get("OPENROUTER_API_KEY") and not args.offline:
         print("OPENROUTER_API_KEY is required (or pass --offline to serve cache hits only)", file=sys.stderr)
         return 2
+    if args.extract and args.no_extract:
+        print("--extract needs the extract jobs that --no-extract turns off", file=sys.stderr)
+        return 2
     if args.lattice and not args.db_dir:
         print("note: --lattice without --db-dir uses a fresh temporary DB per question", file=sys.stderr)
     run_dir = args.artifacts / args.run_name
@@ -788,6 +876,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         "rememberTimeout": args.remember_timeout,
         "answerTimeout": args.answer_timeout,
     }
+    if args.extract:
+        # Only present with --extract, so default runs keep their config hash.
+        config["llmExtract"] = {"model": args.extract_model, "concurrency": args.extract_concurrency,
+                                "timeout": args.extract_timeout}
     reranker = reranker_health(args.reranker_url)
     if args.reranker_url:
         if reranker is None:
@@ -818,7 +910,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     }
     # The reranker URL only locates the server; its model and max length decide the scores.
     config_hash = digest([identity["binarySha256"], identity["datasetSha256"], identity["graderSha256"],
-                          {k: v for k, v in config.items()
+                          {k: ({**v, "timeout": None} if k == "llmExtract" else v) for k, v in config.items()
                            if k not in ("dbDir", "rememberTimeout", "answerTimeout", "rerankerUrl")},
                           *([{"rerankerMaxLength": reranker.get("maxLength")}] if reranker else [])])
     identity["configHash"] = config_hash
@@ -869,6 +961,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "title": f"Quipu daemon on LongMemEval-S dev slice: {args.run_name}",
         "identity": identity, "elapsedSeconds": time.perf_counter() - started,
         **aggregate(rows, args.budgets), "ingest": summarize_ingest(records),
+        "extraction": summarize_extraction(records),
         "spend": {"thisInvocationProxy": proxy_totals,
                   "judgeFreshUsdAllRows": judge_fresh, "judgeNominalUsdAllRows": judge_nominal,
                   "note": "proxy costUsd/judgeFresh are new spend; nominal includes cache hits' original cost"},
@@ -1108,6 +1201,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--embedding-model", default=EMBED_MODEL)
     run.add_argument("--vector-dimensions", type=int)
     run.add_argument("--no-extract", action="store_true", help="remember with extract=false (default: daemon default true)")
+    run.add_argument("--extract", action="store_true",
+                     help="after ingest, run LLM fact extraction (memory.extract.run) through the proxy")
+    run.add_argument("--extract-model", default=EXTRACT_MODEL, help="extraction model (with --extract)")
+    run.add_argument("--extract-concurrency", type=int, default=8, help="extract jobs whose calls run at once")
+    run.add_argument("--extract-timeout", type=float, default=1800)
     run.add_argument("--needs", nargs="+", help="memory.answer needs (default: omitted)")
     run.add_argument("--mode", choices=["fts", "vector", "hybrid", "graph"], help="memory.answer mode (default: omitted)")
     run.add_argument("--daemon-arg", action="append", help="extra daemon CLI argument (repeatable)")
