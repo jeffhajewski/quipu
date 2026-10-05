@@ -242,6 +242,9 @@ the output directory, which is useful after an interrupted full benchmark.
 
 ## Real LoCoMo Dataset
 
+To measure the daemon on LoCoMo with an LLM judge, use the
+[LoCoMo harness](#locomo-harness) instead. The pipeline below predates it.
+
 Quipu can normalize the upstream SNAP LoCoMo `data/locomo10.json` file directly:
 
 ```bash
@@ -520,3 +523,197 @@ losses at 1,024 tokens and 0 / 52 at 4,096 (exact McNemar p < .001).
 
 These are 70 development questions, not held-out or full-benchmark accuracy.
 Coverage is a message-level proxy, not semantic sufficiency.
+
+## LoCoMo harness
+
+`quipu_evals.sota_locomo` runs LoCoMo through the same daemon harness as
+LongMemEval, to check that gains on the LongMemEval dev slice transfer to a
+second benchmark. It reuses the daemon client, caching proxy, coverage mapping
+and summaries from `sota_longmemeval`. It replaces the old LoCoMo numbers,
+which came from a broken pipeline graded by exact containment.
+
+**Data.** `sota_locomo download` fetches two files into
+`$QUIPU_ARTIFACTS/benchmarks/locomo/`, checks their SHA256, and writes
+`provenance.json`:
+
+- `locomo10.json` from `snap-research/locomo@3eb6f2c`, SHA256
+  `79fa87e9…ea698ff4`. It holds 10 conversations and 1,986 questions.
+- `locomo-audit-errors.json`, the `errors.json` of `dial481/locomo-audit@9493fb4`,
+  SHA256 `f298ef46…1b5fe55e`. It lists 156 audited questions: 99 with a wrong
+  answer and 57 with wrong evidence ids only.
+
+Both are CC BY-NC 4.0 and stay in ignored `artifacts/`. The legacy
+`just benchmark-locomo-download` target fetches unpinned upstream `main` and
+runs the old external-benchmark pipeline; this harness does not use it.
+
+**Categories.** The ids in `locomo10.json` are 1 multi-hop (282 questions),
+2 temporal (321), 3 open-domain (96), 4 single-hop (841) and 5 adversarial
+(446). This follows the official evaluation code and the audit's "Note on
+Category ID Mapping". The paper's prose lists the categories in a different
+order, and the old normalizer in `locomo.py` used that order until this sprint.
+Headline accuracy covers categories 1–4, 1,540 questions, as published
+comparisons do. Category 5 is run and reported separately.
+
+**Pipeline.**
+
+- *Isolation.* Each conversation gets a daemon with a fresh store and a
+  temporary `HOME`, as in the LongMemEval harness. With `--lattice`, each store
+  is a new `--db`.
+- *Ingest.* Each session becomes one `memory.remember` call, in date order,
+  with `sessionId` `s01`, `s02`… after the LoCoMo session number. Every message
+  carries its session's date-time plus its turn position in seconds, so order
+  is preserved. Some samples list date-times for sessions with no turns; those
+  are ignored.
+- *Speakers.* The daemon accepts any `role` string and renders it as the line's
+  speaker (`[qid] Caroline: …`), so the speaker's name is the role. Neither
+  speaker is the `assistant`. The daemon indexes and embeds message content
+  only, so a speaker's own turns are not searchable by their name.
+  `--speaker-mode prefix` is a diagnostic alternative: role `user` and
+  content `Caroline: …`.
+- *Images.* A turn's BLIP caption is appended as `[shares image: <caption>]`,
+  and a caption-only turn becomes just that. This matches what other systems
+  and the original evaluation feed their readers. The crawler `query` field is
+  annotator metadata, never used. `--no-captions` drops captions.
+- *Answer.* Every question goes through `memory.answer`, with `time.validAt`
+  one minute after the last message of the last session, an explicit
+  `budgetTokens`, and `includeDebug`/`includeEvidence`. Retrieval logging is
+  off (`logRetrieval: false`), so answers never write to the store and
+  question order cannot change results.
+- *Parallelism.* `serve-stdio` handles one request at a time. After ingest,
+  the Lattice daemon is closed and the store is copied, so several daemons can
+  answer one conversation in parallel. `--workers N` is the total number of
+  answering daemons: conversations run in parallel, and leftover workers become
+  extra daemons per conversation (`--answer-replicas` overrides).
+- *Judge.* The Mem0 paper's LoCoMo judge, `ACCURACY_PROMPT` from
+  `mem0ai/mem0@aae5989` `evaluation/metrics/llm_judge.py`, kept verbatim and
+  pinned by SHA256 in a unit test. It runs as one user message on
+  `openai/gpt-4o-mini-2024-07-18`, at temperature 0 with a JSON response
+  format, once per answer. Judge calls go through the caching proxy, so the
+  spend cap covers them. Category 5 is judged against the gold
+  "Not mentioned in the conversation". The original evaluation scores that
+  category the same way. Judge errors count as errors, never as wrong answers.
+- *Keys.* Every answer is graded against the official key. For the 99 questions
+  whose answer the audit corrects, a second judgment against the audit's
+  `correct_answer` gives an audit-corrected key, reported beside the official
+  one as a sensitivity check. Neither key is ever substituted for the other.
+- *Evidence coverage.* LoCoMo `evidence` dialog ids (`D1:3`) are normalized,
+  including packed (`"D8:6; D9:17"`) and malformed (`"D:11:26"`) entries. They
+  are mapped to remembered message qids, and returned items, chunk evidence and
+  derived-item evidence are mapped through `messageQids`, exactly as in the
+  LongMemEval harness. Coverage is also computed against the audit's corrected
+  evidence ids.
+
+Question ids follow the audit's scheme, `locomo_<conversation>_qa<index>` with
+a 0-based index into the conversation's `qa` list. Rows carry o200k context
+tokens, reader prompt tokens, answer latency and proxy cost. Reruns reuse
+per-question results whose configuration hash matches.
+
+```bash
+export QUIPU_ARTIFACTS=${QUIPU_ARTIFACTS:-$PWD/artifacts}
+A=$QUIPU_ARTIFACTS
+PY=$A/experiments/venv/bin/python                     # has tiktoken
+export TIKTOKEN_CACHE_DIR=$A/experiments/tokenizer-cache PYTHONPATH=evals/src
+export DYLD_LIBRARY_PATH=/path/to/latticedb/lib       # Lattice builds only
+
+python3 -m quipu_evals.sota_locomo download           # pinned, sha256-checked
+
+# Smoke: first conversation, first 20 questions.
+$PY -m quipu_evals.sota_locomo run --daemon-binary $A/sota/bin/lattice-d1d5445/bin/quipu \
+  --run-name locomo-smoke-d1d5445 --lattice --embedding-provider-via-proxy --vector-dimensions 1536 \
+  --reader-model openai/gpt-4o-mini-2024-07-18 --budgets 1024,4096 \
+  --limit-conversations 1 --limit-questions 20 --workers 4 --max-spend-usd 1
+
+# Full: 10 conversations, 1,986 questions, both budgets; report in $A/sota/locomo/<run-name>/.
+$PY -m quipu_evals.sota_locomo run --daemon-binary $A/sota/bin/lattice-d1d5445/bin/quipu \
+  --run-name locomo-full-d1d5445 --lattice --embedding-provider-via-proxy --vector-dimensions 1536 \
+  --reader-model openai/gpt-4o-mini-2024-07-18 --budgets 1024,4096 --workers 20 --max-spend-usd 3
+# Subsets: --categories 1,2,3,4, --conversations conv-26, --questions locomo_0_qa3 ...
+# Diagnostics: --speaker-mode prefix, --no-captions, --answer-option KEY=JSON, --needs, --mode
+```
+
+The same steps are available as `just sota-locomo-download` and
+`just sota-locomo-run <bin-name> <run-name> [flags]`. Run directories hold
+`manifest.json`, `cases/<sample>/<qid>.json` with full contexts and judgments,
+`conversations/<sample>.json` with ingest stats and the qid map, `proxy.jsonl`,
+`logs/`, `report.json` and `report.md`.
+
+**Caveats.** These numbers are not an apples-to-apples leaderboard claim:
+
+- *Category 5 is excluded* from the headline, as in published comparisons.
+- *The answer key is noisy.* The audit finds 6.4% of category 1–4 answers
+  wrong, which caps a perfect system near 93.6%. Per category, the caps are
+  90.1% multi-hop, 91.9% temporal, 90.6% open-domain and 95.7% single-hop.
+- *The judge is lenient.* It is told to accept any answer that "touches on the
+  same topic". The audit's vague-but-topical wrong answers pass it 62.8% of the
+  time. Vendor-run judges are known to add about 5–6 points over independent
+  re-runs.
+- *Published systems differ* in reader model, answer prompt, judge runs
+  (some take a majority of three) and category handling. Compare runs of this
+  harness with each other, not with leaderboard tables.
+- *Coverage is a proxy.* LoCoMo evidence ids are sparse: multi-hop questions
+  often cite one turn of several, and 57 cite the wrong turn.
+
+### First LoCoMo results, October 5, 2026
+
+**Setup.** The sprint's default daemon (`d1d5445`, Lattice build): hybrid
+BM25 + vector retrieval with `openai/text-embedding-3-small` at 1,536
+dimensions. The reader and the judge are both `openai/gpt-4o-mini-2024-07-18`.
+Budgets are 1,024 and 4,096 tokens. Runs `locomo-full-d1d5445` (speaker name
+as role, the protocol default) and `locomo-prefix-d1d5445` (diagnostic,
+`--speaker-mode prefix`, categories 1–4 only) are in `$A/sota/locomo/`.
+
+Categories 1–4, 1,540 questions, at 1,024 / 4,096 tokens:
+
+| Run | Official key | Audit key | Gold-turn coverage | Completion |
+| --- | ---: | ---: | ---: | ---: |
+| Speaker name as role (default) | 65.5% / 79.5% | 65.8% / 79.5% | 56.1% / 79.0% | 100% |
+| `Name:` prefix in content (diagnostic) | 78.5% / 83.7% | 79.5% / 84.4% | 72.9% / 89.8% | 92.7% |
+
+The prefix run stopped short because the OpenRouter account ran out of
+credits. Provider 402s hit 112 answers at 1,024 tokens and 114 at 4,096,
+spread over 173 questions. They count as errors, not wrong answers. Rerunning
+the same command completes them and reuses the rest.
+
+Per category, official key, at 1,024 / 4,096 tokens:
+
+| Category | n | Speaker as role | Prefix (completed) |
+| --- | ---: | ---: | ---: |
+| Multi-hop (1) | 282 | 47.2% / 73.0% | 70.8% / 82.9% |
+| Temporal (2) | 321 | 60.7% / 63.9% | 69.5% / 67.9% |
+| Open-domain (3) | 96 | 42.7% / 58.3% | 61.5% / 62.5% |
+| Single-hop (4) | 841 | 76.1% / 90.1% | 87.7% / 93.7% |
+| Adversarial (5), separate | 446 | 34.3% / 22.2% | not run |
+
+**What we learned:**
+
+- *Speaker names are not searchable when they are only the role.* The daemon
+  indexes and embeds message content, not `role`. In role mode, Caroline's
+  own turns cannot match "Caroline", while Melanie's turns that address her by
+  name can. On the 1,428 / 1,426 questions both runs completed, putting the
+  name in the content wins 236/38 at 1,024 tokens (+13.9 pp, exact McNemar
+  p < .001) and 116/49 at 4,096 (+4.7 pp, p < .001). Gold-turn coverage rises
+  by 17 and 11 points. Making the speaker searchable is a daemon change, not a
+  harness choice.
+- *More context helps on LoCoMo.* At 4,096 tokens, accuracy beats 1,024 tokens
+  272/56 in role mode. On the LongMemEval dev slice, GPT-4o-mini lost accuracy
+  with more context. At 1,024 tokens, 410 of 531 wrong answers had no gold turn
+  in context, and the reader mostly abstained.
+- *Temporal questions are the reader's weak spot.* At 4,096 tokens, temporal
+  gold-turn coverage is 86%, yet accuracy is 64%. 72 of the 116 wrong temporal
+  answers had every gold turn in context. The reader resolves "next month" or
+  "last week" against the wrong session date, or reports the date of a later
+  mention as the event date.
+- *Adversarial questions expose speaker confusion.* Category 5 asks one
+  speaker about the other's experiences. The reader attributes the other
+  speaker's turn to the named person: about half of the wrong answers repeat
+  the adversarial answer. More context makes this worse (34% to 22%).
+- *The audit key moves little overall:* +0.3 and 0 points in role mode. On the
+  99 corrected questions, judgments flip in both directions.
+
+**Latency and cost.** Answer latency p50 was 1.8 s at 1,024 tokens and 1.5 s at
+4,096, with p95 at 2.9 s and 2.6 s. The 4,096 call reuses the cached query
+embedding. Ingest took 34 s per conversation on average, about 590 messages,
+with a `memory.remember` p50 of 1.1 s per session. The role-mode run cost
+$1.92 for 3,972 answers with judgments, about $0.0002 / $0.0006 per reader
+call. Total spend for the smoke, the full run and both prefix diagnostics was
+$3.35.

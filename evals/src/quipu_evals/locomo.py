@@ -12,11 +12,14 @@ from .scenarios import Event, ForgetOp, Message, Query, Scenario, Suite
 
 
 LOCOMO_URL = "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"
+# JSON `category` ids as the official evaluation code uses them (the paper's
+# prose enumeration differs; see dial481/locomo-audit, "Note on Category ID
+# Mapping"): 1 multi-hop, 2 temporal, 3 open-domain, 4 single-hop, 5 adversarial.
 CATEGORY_NAMES = {
-    1: "single_hop",
+    1: "multi_hop",
     2: "temporal",
-    3: "multi_hop",
-    4: "open_domain",
+    3: "open_domain",
+    4: "single_hop",
     5: "adversarial",
 }
 DEFAULT_TASKS = ["single_hop", "multi_hop", "temporal", "open_domain", "adversarial"]
