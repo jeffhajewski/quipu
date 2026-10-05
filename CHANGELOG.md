@@ -44,6 +44,9 @@
   `relatedQid`.
 - Superseding a memory now changes only `state` and `validTo`, so a
   superseded memory card keeps its card fields.
+- A new memory card links to the newest live cards in scope with its slot,
+  then with its kind (up to 8), instead of the first 8 the enumeration
+  happened to return.
 - `memory.inspect` lists provenance from edges (`evidenced_by`,
   `derived_from`, `compiled_from`) and matches audit events on the exact qid.
 - `zig build test -Dtest-filter=TEXT` runs only matching core tests.
