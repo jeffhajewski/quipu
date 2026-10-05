@@ -9,6 +9,7 @@
 //!
 //! The `strategy` reported in the trace only describes which of these happened.
 const std = @import("std");
+const query_expansion = @import("query_expansion.zig");
 
 pub const abstain_answer = "[abstain]";
 
@@ -55,6 +56,9 @@ pub const AnswerTrace = struct {
     /// The `Time references:` payload sent to the reader, if any. Set by the
     /// runtime.
     timeReferences: ?[]const u8 = null,
+    /// The queries retrieval ran (`options.queryExpansion`). Set by the
+    /// runtime; omitted from JSON when the option is off.
+    queryExpansion: ?query_expansion.Trace = null,
     answerable: bool,
     supportQids: []const []const u8 = &.{},
     supportValid: bool,
@@ -64,6 +68,23 @@ pub const AnswerTrace = struct {
     rawProviderAnswer: ?[]const u8 = null,
     normalizedAnswer: []const u8,
     validation: Validation,
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        inline for (std.meta.fields(@This())) |field| {
+            const value = @field(self, field.name);
+            if (comptime std.mem.eql(u8, field.name, "queryExpansion")) {
+                if (value) |expansion| {
+                    try jw.objectField(field.name);
+                    try jw.write(expansion);
+                }
+            } else {
+                try jw.objectField(field.name);
+                try jw.write(value);
+            }
+        }
+        try jw.endObject();
+    }
 };
 
 pub const SynthesisOptions = struct {
