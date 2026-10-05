@@ -242,11 +242,11 @@ def _validate_retrieve(params: Mapping[str, Any]) -> None:
         _reject_extra(
             options,
             {"includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "format",
-             "rerank", "rerankCandidates", "temporalHints"},
+             "rerank", "rerankCandidates", "temporalHints", "factKeys"},
             "options",
         )
         for key in ("includeEvidence", "includeDebug", "logTrace", "logRetrieval", "abstainIfWeak", "rerank",
-                    "temporalHints"):
+                    "temporalHints", "factKeys"):
             _optional_bool(options, key, "options")
         if "format" in options and options["format"] not in {"prompt", "json"}:
             raise QuipuProtocolError("options.format is invalid")
@@ -290,6 +290,7 @@ def _validate_answer(params: Mapping[str, Any]) -> None:
                 "rerankCandidates",
                 "readerReasoning",
                 "temporalHints",
+                "factKeys",
             },
             "options",
         )
@@ -302,6 +303,7 @@ def _validate_answer(params: Mapping[str, Any]) -> None:
             "rerank",
             "readerReasoning",
             "temporalHints",
+            "factKeys",
         ):
             _optional_bool(options, key, "options")
         if "format" in options and options["format"] not in {"prompt", "json"}:

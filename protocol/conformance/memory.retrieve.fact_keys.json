@@ -1,0 +1,119 @@
+{
+  "name": "memory.retrieve with factKeys",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_fact_keys",
+    "method": "memory.retrieve",
+    "params": {
+      "query": "When did I move into my apartment?",
+      "scope": {
+        "userId": "user-local"
+      },
+      "needs": [
+        "raw"
+      ],
+      "time": {
+        "validAt": "2023-03-20T09:00:00Z"
+      },
+      "options": {
+        "includeDebug": true,
+        "logRetrieval": false,
+        "factKeys": true
+      }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_fact_keys",
+    "result": {
+      "retrievalId": "q_retr_6",
+      "prompt": "Current date: 2023-03-20 (Monday)\n<memory>\n<sessions>\n## session s-flat 2023-03-04 (Sat)\n[q_msg_4] user [event 2023-03-03]: Got the keys to the new flat yesterday! The landlord left a bottle of wine.\n</sessions>\n</memory>",
+      "context": {
+        "core": [],
+        "currentFacts": [],
+        "preferences": [],
+        "procedural": [],
+        "episodes": [
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "text": "Got the keys to the new flat yesterday! The landlord left a bottle of wine.",
+            "score": 0.78,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2023-03-04T09:00:00Z",
+            "validTo": null,
+            "evidence": []
+          }
+        ],
+        "warnings": []
+      },
+      "items": [
+        {
+          "qid": "q_msg_4",
+          "type": "message",
+          "text": "Got the keys to the new flat yesterday! The landlord left a bottle of wine.",
+          "score": 0.78,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2023-03-04T09:00:00Z",
+          "validTo": null,
+          "evidence": []
+        }
+      ],
+      "tokenEstimate": 53,
+      "confidence": 0.72,
+      "warnings": [],
+      "trace": {
+        "query": "When did I move into my apartment?",
+        "requestedNeedsCount": 1,
+        "budgetTokens": 4096,
+        "candidateSources": {
+          "fts": 1,
+          "vector": 0,
+          "hybrid": 0,
+          "graph": 0,
+          "core": 0
+        },
+        "candidateCount": 1,
+        "keptCount": 1,
+        "droppedForNeeds": 0,
+        "droppedForBudget": 0,
+        "tokenEstimate": 53,
+        "validAt": "2023-03-20T09:00:00Z",
+        "scoreBreakdowns": [
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "score": 0.78,
+            "lexical": 0.44,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          }
+        ],
+        "scoringDetails": [
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "finalScore": 0.78,
+            "lexical": 0.44,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          }
+        ],
+        "droppedItemReasons": [],
+        "factKeys": {
+          "assertionHits": 1,
+          "evidenceItems": 1,
+          "keptEvidenceItems": 1,
+          "datedItems": 1
+        }
+      }
+    }
+  }
+}
