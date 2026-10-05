@@ -155,20 +155,21 @@ pub fn jobQid(allocator: std.mem.Allocator, stream: []const u8, sequence: u64, w
     return std.fmt.allocPrint(allocator, "q_job_{x}", .{hash});
 }
 
+/// Leases up to `options.limit` pending jobs of `options.worker_kind`, oldest
+/// first. The status index pages through pending jobs only, however many
+/// finished jobs the store holds.
 pub fn leasePendingJobs(allocator: std.mem.Allocator, store: storage.Adapter, options: LeaseOptions) ![]LeaseResult {
-    // Job nodes are internal and never full-text hits; enumerate instead.
-    const hits = try store.fullTextSearch(allocator, .{ .text = "", .limit = 100_000 });
-    defer freeHits(allocator, hits);
-
     var leased = std.ArrayList(LeaseResult).empty;
     errdefer {
         freeLeaseResultItems(allocator, leased.items);
         leased.deinit(allocator);
     }
 
-    for (hits) |hit| {
+    var pending = store.iterateNodes(allocator, .{ .label = "Job", .where = &.{.{ .name = "status", .value = "pending" }} });
+    defer pending.deinit();
+    while (try pending.next()) |qid| {
         if (leased.items.len >= options.limit) break;
-        const node = (try store.getNode(allocator, hit.qid)) orelse continue;
+        const node = (try store.getNode(allocator, qid)) orelse continue;
         defer store.freeNode(allocator, node);
         if (!std.mem.eql(u8, node.label, "Job")) continue;
         if (!try propertyEquals(allocator, node.properties_json, "status", "pending")) continue;
@@ -398,11 +399,6 @@ fn propertyEquals(allocator: std.mem.Allocator, properties_json: []const u8, key
         .string => |string| std.mem.eql(u8, string, expected),
         else => false,
     };
-}
-
-fn freeHits(allocator: std.mem.Allocator, hits: []storage.SearchHit) void {
-    for (hits) |hit| allocator.free(hit.qid);
-    allocator.free(hits);
 }
 
 fn freeStreamEntries(allocator: std.mem.Allocator, entries: []storage.StreamEntry) void {

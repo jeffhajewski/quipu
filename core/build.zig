@@ -53,8 +53,10 @@ pub fn build(b: *std.Build) void {
         test_module.linkSystemLibrary("lattice", .{ .use_pkg_config = .no });
         test_module.link_libc = true;
     }
+    const test_filters = b.option([]const []const u8, "test-filter", "Run only tests whose names contain this text") orelse &.{};
     const unit_tests = b.addTest(.{
         .root_module = test_module,
+        .filters = test_filters,
     });
 
     const run_unit_tests = b.addRunArtifact(unit_tests);

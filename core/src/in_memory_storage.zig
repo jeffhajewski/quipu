@@ -5,14 +5,20 @@ const NodeRecord = struct {
     qid: []u8,
     label: []u8,
     properties_json: []u8,
+    /// Position in creation order, from 1. Kept when the node is rewritten.
+    seq: u64,
     /// Lexical index for this node. Empty when the node is not searchable.
     index: IndexedText = .{},
+    /// This node's value of each `storage.indexed_properties` entry, so
+    /// `findNodes` compares strings instead of parsing JSON.
+    indexed: storage.IndexedValues = @splat(null),
 
     fn deinit(self: NodeRecord, allocator: std.mem.Allocator) void {
         allocator.free(self.qid);
         allocator.free(self.label);
         allocator.free(self.properties_json);
         self.index.deinit(allocator);
+        storage.freeIndexedValues(allocator, self.indexed);
     }
 };
 
@@ -67,8 +73,17 @@ const StreamRecord = struct {
 
 pub const InMemoryAdapter = struct {
     allocator: std.mem.Allocator,
-    nodes: std.StringHashMap(NodeRecord),
+    /// Qid to position in `records`. Keys are owned.
+    nodes: std.StringHashMap(usize),
+    /// Nodes in creation order; a node's `seq` is its position plus one.
+    /// Nodes are rewritten in place and never removed.
+    records: std.ArrayList(NodeRecord),
     edges: std.ArrayList(EdgeRecord),
+    /// Edge qid to position in `edges`. Keys are owned.
+    edge_index: std.StringHashMapUnmanaged(usize) = .empty,
+    /// Positions in `edges` by endpoint, in creation order. Keys are owned.
+    edges_from: std.StringHashMapUnmanaged(std.ArrayList(usize)) = .empty,
+    edges_to: std.StringHashMapUnmanaged(std.ArrayList(usize)) = .empty,
     streams: std.ArrayList(StreamRecord),
     next_tx_id: u64 = 1,
     next_sequence: u64 = 1,
@@ -76,29 +91,43 @@ pub const InMemoryAdapter = struct {
     pub fn init(allocator: std.mem.Allocator) InMemoryAdapter {
         return .{
             .allocator = allocator,
-            .nodes = std.StringHashMap(NodeRecord).init(allocator),
+            .nodes = std.StringHashMap(usize).init(allocator),
+            .records = std.ArrayList(NodeRecord).empty,
             .edges = std.ArrayList(EdgeRecord).empty,
             .streams = std.ArrayList(StreamRecord).empty,
         };
     }
 
     pub fn deinit(self: *InMemoryAdapter) void {
-        var node_it = self.nodes.iterator();
-        while (node_it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            entry.value_ptr.deinit(self.allocator);
-        }
+        var key_it = self.nodes.keyIterator();
+        while (key_it.next()) |key| self.allocator.free(key.*);
         self.nodes.deinit();
+        for (self.records.items) |record| record.deinit(self.allocator);
+        self.records.deinit(self.allocator);
 
         for (self.edges.items) |edge| {
             edge.deinit(self.allocator);
         }
         self.edges.deinit(self.allocator);
+        var edge_key_it = self.edge_index.keyIterator();
+        while (edge_key_it.next()) |key| self.allocator.free(key.*);
+        self.edge_index.deinit(self.allocator);
+        deinitAdjacency(self.allocator, &self.edges_from);
+        deinitAdjacency(self.allocator, &self.edges_to);
 
         for (self.streams.items) |entry| {
             entry.deinit(self.allocator);
         }
         self.streams.deinit(self.allocator);
+    }
+
+    fn deinitAdjacency(allocator: std.mem.Allocator, map: *std.StringHashMapUnmanaged(std.ArrayList(usize))) void {
+        var it = map.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        map.deinit(allocator);
     }
 
     pub fn adapter(self: *InMemoryAdapter) storage.Adapter {
@@ -120,65 +149,120 @@ pub const InMemoryAdapter = struct {
         };
     }
 
+    fn recordFor(self: *InMemoryAdapter, qid: []const u8) ?*NodeRecord {
+        const position = self.nodes.get(qid) orelse return null;
+        return &self.records.items[position];
+    }
+
     fn putNode(context: *anyopaque, node: storage.Node) !void {
         const self = ctx(context);
-        const key = try self.allocator.dupe(u8, node.qid);
-        errdefer self.allocator.free(key);
         const index = try buildIndex(self.allocator, node.label, node.properties_json);
         errdefer index.deinit(self.allocator);
+        const indexed = try storage.indexedValues(self.allocator, node.properties_json);
+        errdefer storage.freeIndexedValues(self.allocator, indexed);
         const owned_qid = try self.allocator.dupe(u8, node.qid);
         errdefer self.allocator.free(owned_qid);
         const owned_label = try self.allocator.dupe(u8, node.label);
         errdefer self.allocator.free(owned_label);
         const owned_properties = try self.allocator.dupe(u8, node.properties_json);
         errdefer self.allocator.free(owned_properties);
-        const record = NodeRecord{
+        var new_record = NodeRecord{
             .qid = owned_qid,
             .label = owned_label,
             .properties_json = owned_properties,
+            .seq = 0,
             .index = index,
+            .indexed = indexed,
         };
 
-        const entry = try self.nodes.getOrPut(key);
-        if (entry.found_existing) {
-            self.allocator.free(key);
-            entry.value_ptr.deinit(self.allocator);
+        if (self.recordFor(node.qid)) |existing| {
+            new_record.seq = existing.seq;
+            existing.deinit(self.allocator);
+            existing.* = new_record;
+            return;
         }
-        entry.value_ptr.* = record;
+        const key = try self.allocator.dupe(u8, node.qid);
+        errdefer self.allocator.free(key);
+        try self.records.ensureUnusedCapacity(self.allocator, 1);
+        try self.nodes.put(key, self.records.items.len);
+        new_record.seq = self.records.items.len + 1;
+        self.records.appendAssumeCapacity(new_record);
     }
 
     fn getNode(context: *anyopaque, allocator: std.mem.Allocator, qid: []const u8) !?storage.Node {
         const self = ctx(context);
-        const record = self.nodes.get(qid) orelse return null;
+        const found = self.recordFor(qid) orelse return null;
+        const owned_qid = try allocator.dupe(u8, found.qid);
+        errdefer allocator.free(owned_qid);
+        const owned_label = try allocator.dupe(u8, found.label);
+        errdefer allocator.free(owned_label);
         return .{
-            .qid = try allocator.dupe(u8, record.qid),
-            .label = try allocator.dupe(u8, record.label),
-            .properties_json = try allocator.dupe(u8, record.properties_json),
+            .qid = owned_qid,
+            .label = owned_label,
+            .properties_json = try allocator.dupe(u8, found.properties_json),
         };
     }
 
     fn putEdge(context: *anyopaque, edge: storage.Edge) !void {
         const self = ctx(context);
-        const record = EdgeRecord{
+        const new_record = EdgeRecord{
             .qid = try self.allocator.dupe(u8, edge.qid),
             .from_qid = try self.allocator.dupe(u8, edge.from_qid),
             .to_qid = try self.allocator.dupe(u8, edge.to_qid),
             .edge_type = try self.allocator.dupe(u8, edge.edge_type),
             .properties_json = try self.allocator.dupe(u8, edge.properties_json),
         };
-        errdefer record.deinit(self.allocator);
+        errdefer new_record.deinit(self.allocator);
 
-        for (self.edges.items) |*existing| {
-            if (std.mem.eql(u8, existing.qid, edge.qid)) {
-                existing.deinit(self.allocator);
-                existing.* = record;
+        if (self.edge_index.get(edge.qid)) |position| {
+            const existing = &self.edges.items[position];
+            if (!std.mem.eql(u8, existing.from_qid, edge.from_qid) or !std.mem.eql(u8, existing.to_qid, edge.to_qid)) {
+                try self.addAdjacency(&self.edges_from, edge.from_qid, position);
+                try self.addAdjacency(&self.edges_to, edge.to_qid, position);
+                removeAdjacency(&self.edges_from, existing.from_qid, position);
+                removeAdjacency(&self.edges_to, existing.to_qid, position);
+            }
+            existing.deinit(self.allocator);
+            existing.* = new_record;
+            return;
+        }
+
+        const position = self.edges.items.len;
+        const key = try self.allocator.dupe(u8, edge.qid);
+        errdefer self.allocator.free(key);
+        try self.edges.ensureUnusedCapacity(self.allocator, 1);
+        try self.edge_index.put(self.allocator, key, position);
+        errdefer _ = self.edge_index.remove(key);
+        try self.addAdjacency(&self.edges_from, edge.from_qid, position);
+        errdefer removeAdjacency(&self.edges_from, edge.from_qid, position);
+        try self.addAdjacency(&self.edges_to, edge.to_qid, position);
+        self.edges.appendAssumeCapacity(new_record);
+    }
+
+    fn addAdjacency(self: *InMemoryAdapter, map: *std.StringHashMapUnmanaged(std.ArrayList(usize)), qid: []const u8, position: usize) !void {
+        const entry = try map.getOrPut(self.allocator, qid);
+        if (!entry.found_existing) {
+            entry.key_ptr.* = self.allocator.dupe(u8, qid) catch |err| {
+                map.removeByPtr(entry.key_ptr);
+                return err;
+            };
+            entry.value_ptr.* = .empty;
+        }
+        try entry.value_ptr.append(self.allocator, position);
+    }
+
+    fn removeAdjacency(map: *std.StringHashMapUnmanaged(std.ArrayList(usize)), qid: []const u8, position: usize) void {
+        const list = map.getPtr(qid) orelse return;
+        for (list.items, 0..) |item, index| {
+            if (item == position) {
+                _ = list.orderedRemove(index);
                 return;
             }
         }
-
-        try self.edges.append(self.allocator, record);
     }
 
+    /// Served from the endpoint indexes when either endpoint is given, in
+    /// creation order.
     fn findEdges(context: *anyopaque, allocator: std.mem.Allocator, query: storage.EdgeQuery) ![]storage.Edge {
         const self = ctx(context);
         var edges = std.ArrayList(storage.Edge).empty;
@@ -186,7 +270,16 @@ pub const InMemoryAdapter = struct {
             for (edges.items) |edge| freeEdge(allocator, edge);
             edges.deinit(allocator);
         }
-        for (self.edges.items) |edge| {
+        if (query.limit == 0) return edges.toOwnedSlice(allocator);
+        const positions: ?[]const usize = if (query.from_qid) |from_qid|
+            (if (self.edges_from.get(from_qid)) |list| list.items else &.{})
+        else if (query.to_qid) |to_qid|
+            (if (self.edges_to.get(to_qid)) |list| list.items else &.{})
+        else
+            null;
+        const count = if (positions) |list| list.len else self.edges.items.len;
+        for (0..count) |index| {
+            const edge = self.edges.items[if (positions) |list| list[index] else index];
             if (query.from_qid) |from_qid| {
                 if (!std.mem.eql(u8, edge.from_qid, from_qid)) continue;
             }
@@ -196,11 +289,20 @@ pub const InMemoryAdapter = struct {
             if (query.edge_type) |edge_type| {
                 if (!std.mem.eql(u8, edge.edge_type, edge_type)) continue;
             }
-            try edges.append(allocator, .{
-                .qid = try allocator.dupe(u8, edge.qid),
-                .from_qid = try allocator.dupe(u8, edge.from_qid),
-                .to_qid = try allocator.dupe(u8, edge.to_qid),
-                .edge_type = try allocator.dupe(u8, edge.edge_type),
+            try edges.ensureUnusedCapacity(allocator, 1);
+            const owned_qid = try allocator.dupe(u8, edge.qid);
+            errdefer allocator.free(owned_qid);
+            const owned_from = try allocator.dupe(u8, edge.from_qid);
+            errdefer allocator.free(owned_from);
+            const owned_to = try allocator.dupe(u8, edge.to_qid);
+            errdefer allocator.free(owned_to);
+            const owned_type = try allocator.dupe(u8, edge.edge_type);
+            errdefer allocator.free(owned_type);
+            edges.appendAssumeCapacity(.{
+                .qid = owned_qid,
+                .from_qid = owned_from,
+                .to_qid = owned_to,
+                .edge_type = owned_type,
                 .properties_json = try allocator.dupe(u8, edge.properties_json),
             });
             if (edges.items.len >= query.limit) break;
@@ -208,8 +310,71 @@ pub const InMemoryAdapter = struct {
         return edges.toOwnedSlice(allocator);
     }
 
+    /// Scans nodes in creation order. Indexed properties compare the values
+    /// cached at write time; other properties parse each node's JSON.
+    fn findNodes(context: *anyopaque, allocator: std.mem.Allocator, query: storage.NodeQuery) !storage.NodePage {
+        const self = ctx(context);
+        var qids = std.ArrayList([]u8).empty;
+        errdefer {
+            for (qids.items) |qid| allocator.free(qid);
+            qids.deinit(allocator);
+        }
+        for (query.where) |match| {
+            if (match.value.len == 0) return .{ .qids = try qids.toOwnedSlice(allocator) };
+        }
+        if (query.limit == 0) return .{ .qids = try qids.toOwnedSlice(allocator) };
+
+        const total: u64 = self.records.items.len;
+        var next: ?u64 = null;
+        switch (query.order) {
+            .oldest_first => {
+                var seq: u64 = (query.after orelse 0) + 1;
+                while (seq <= total) : (seq += 1) {
+                    const candidate = &self.records.items[seq - 1];
+                    if (!try recordMatches(allocator, candidate, query)) continue;
+                    try qids.ensureUnusedCapacity(allocator, 1);
+                    qids.appendAssumeCapacity(try allocator.dupe(u8, candidate.qid));
+                    if (qids.items.len >= query.limit) {
+                        next = seq;
+                        break;
+                    }
+                }
+            },
+            .newest_first => {
+                var seq: u64 = if (query.after) |after| @min(after -| 1, total) else total;
+                while (seq >= 1) : (seq -= 1) {
+                    const candidate = &self.records.items[seq - 1];
+                    if (!try recordMatches(allocator, candidate, query)) continue;
+                    try qids.ensureUnusedCapacity(allocator, 1);
+                    qids.appendAssumeCapacity(try allocator.dupe(u8, candidate.qid));
+                    if (qids.items.len >= query.limit) {
+                        next = seq;
+                        break;
+                    }
+                }
+            },
+        }
+        return .{ .qids = try qids.toOwnedSlice(allocator), .next = next };
+    }
+
+    fn recordMatches(allocator: std.mem.Allocator, candidate: *const NodeRecord, query: storage.NodeQuery) !bool {
+        if (query.label) |label| {
+            if (!std.mem.eql(u8, candidate.label, label)) return false;
+        }
+        for (query.where) |match| {
+            if (storage.indexedPropertyIndex(match.name)) |index| {
+                const value = candidate.indexed[index] orelse return false;
+                if (!std.mem.eql(u8, value, match.value)) return false;
+            } else if (!try storage.propertyStringEquals(allocator, candidate.properties_json, match.name, match.value)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /// BM25 (k1=1.2, b=0.75) over each searchable node's index text.
-    /// An empty query enumerates every node, including unsearchable ones.
+    /// An empty query enumerates every node, including unsearchable ones, in
+    /// creation order.
     fn fullTextSearch(context: *anyopaque, allocator: std.mem.Allocator, query: storage.FullTextQuery) ![]storage.SearchHit {
         const self = ctx(context);
         var hits = std.ArrayList(storage.SearchHit).empty;
@@ -220,10 +385,9 @@ pub const InMemoryAdapter = struct {
         if (query.limit == 0) return hits.toOwnedSlice(allocator);
 
         if (query.text.len == 0) {
-            var node_it = self.nodes.iterator();
-            while (node_it.next()) |entry| {
+            for (self.records.items) |entry| {
                 try hits.append(allocator, .{
-                    .qid = try allocator.dupe(u8, entry.value_ptr.qid),
+                    .qid = try allocator.dupe(u8, entry.qid),
                     .score = 1.0,
                 });
                 if (hits.items.len >= query.limit) break;
@@ -249,9 +413,7 @@ pub const InMemoryAdapter = struct {
         var corpus_size: usize = 0;
         var total_length: usize = 0;
 
-        var node_it = self.nodes.iterator();
-        while (node_it.next()) |entry| {
-            const record = entry.value_ptr;
+        for (self.records.items) |*record| {
             const terms = record.index.terms;
             if (terms.len == 0) continue;
             corpus_size += 1;
@@ -398,18 +560,28 @@ pub const InMemoryAdapter = struct {
             }
         }
 
-        var node_it = self.nodes.iterator();
-        while (node_it.next()) |entry| {
-            const node = entry.value_ptr.*;
+        for (self.records.items) |node| {
             if (isDerivedLabel(node.label)) {
                 try verifyDerivedNode(self, allocator, &issues, node);
-            }
-            if (propertyBool(allocator, node.properties_json, "deleted")) {
-                try verifyDeletedEvidenceClosure(self, allocator, &issues, node.qid);
+                try verifyEvidenceNotDeleted(self, allocator, &issues, node);
             }
         }
 
         return issues.toOwnedSlice(allocator);
+    }
+
+    /// One pass: a live derived node whose evidence is a tombstone.
+    fn verifyEvidenceNotDeleted(
+        self: *InMemoryAdapter,
+        allocator: std.mem.Allocator,
+        issues: *std.ArrayList(storage.VerificationIssue),
+        node: NodeRecord,
+    ) !void {
+        const evidence_qid = node.indexed[storage.indexedPropertyIndex("evidenceQid").?] orelse return;
+        const evidence = self.recordFor(evidence_qid) orelse return;
+        if (!propertyBool(allocator, evidence.properties_json, "deleted")) return;
+        if (propertyBool(allocator, node.properties_json, "deleted")) return;
+        try appendIssue(allocator, issues, "active_derived_from_deleted_evidence", "active derived node references deleted evidence", node.qid);
     }
 
     fn verifyDerivedNode(
@@ -458,27 +630,6 @@ pub const InMemoryAdapter = struct {
             try appendIssue(allocator, issues, "missing_evidence_node", "active derived node references missing evidence", node.qid);
             return;
         };
-    }
-
-    fn verifyDeletedEvidenceClosure(
-        self: *InMemoryAdapter,
-        allocator: std.mem.Allocator,
-        issues: *std.ArrayList(storage.VerificationIssue),
-        evidence_qid: []const u8,
-    ) !void {
-        var node_it = self.nodes.iterator();
-        while (node_it.next()) |entry| {
-            const node = entry.value_ptr.*;
-            if (!isDerivedLabel(node.label)) continue;
-            if (propertyBool(allocator, node.properties_json, "deleted")) continue;
-            const evidence = try readOptionalString(allocator, node.properties_json, "evidenceQid");
-            defer if (evidence) |value| allocator.free(value);
-            if (evidence) |qid| {
-                if (std.mem.eql(u8, qid, evidence_qid)) {
-                    try appendIssue(allocator, issues, "active_derived_from_deleted_evidence", "active derived node references deleted evidence", node.qid);
-                }
-            }
-        }
     }
 
     fn appendIssue(
@@ -568,6 +719,7 @@ pub const InMemoryAdapter = struct {
         .get_node = getNode,
         .put_edge = putEdge,
         .find_edges = findEdges,
+        .find_nodes = findNodes,
         .full_text_search = fullTextSearch,
         .embed_text = embedText,
         .prefetch_embeddings = prefetchEmbeddings,
@@ -802,6 +954,12 @@ test "in-memory search skips unsearchable nodes but empty query enumerates them"
     const stop_only = try adapter.fullTextSearch(std.testing.allocator, .{ .text = "what is the", .limit = 10 });
     defer freeTestHits(stop_only);
     try std.testing.expectEqual(@as(usize, 0), stop_only.len);
+}
+
+test "in-memory adapter finds nodes by label and property in creation order" {
+    var adapter_state = InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    try storage.expectFindNodesContract(adapter_state.adapter());
 }
 
 test "in-memory adapter reports storage capabilities" {

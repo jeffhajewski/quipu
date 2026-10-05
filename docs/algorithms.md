@@ -10,8 +10,8 @@ Every adapter indexes one text per node: `searchText` ?? `content` ?? `text` ??
 `searchable: false`, internal bookkeeping labels (`Job`, `Idempotency`,
 `Schema`, `Migration`), and the `Session` / `Turn` containers are never search
 hits. Full-text hits are returned sorted by descending score and truncated only
-after sorting. An empty query enumerates every node, including unsearchable
-ones; maintenance paths (forget closure, core blocks, job leasing) use that.
+after sorting. An empty query still enumerates nodes, but no runtime path uses
+it any more: maintenance work goes through node lookups (below).
 
 A message or chunk whose role is a speaker's name rather than a generic role
 (`user`, `assistant`, `system`, `tool`, `developer`, `function`) gets
@@ -57,6 +57,34 @@ the original content exactly, so the full raw text is preserved even though the
 `searchable: false` with a `chunkCount`; shorter messages stay unchunked and are
 searched directly. `Episode` nodes are `searchable: false` while they only copy
 the first message of a turn.
+
+### Node lookups
+
+Maintenance paths never enumerate "every node" through search. They use
+`findNodes`, part of the storage adapter contract, and edge lookups:
+
+- `findNodes` selects nodes by label and by exact values of top-level string
+  properties, in creation order (oldest or newest first), one page at a time
+  with a cursor. Paging continues until the matches run out; no caller stops
+  at a fixed cap.
+- `slotKey`, `state`, `evidenceQid`, `blockKey`, `cardKind` and `status` are
+  indexed. A lookup on them costs about the size of its result. The Lattice
+  adapter mirrors them into native node properties behind equality indexes,
+  and backfills the copies when it opens an older store. The in-memory adapter
+  caches the values per node. Other properties are matched by a scan.
+- Edge lookups by source or target (`findEdges` with `from_qid` or `to_qid`)
+  use per-node edge indexes on both backends. Closures pass an unlimited limit.
+
+| Path | Lookup |
+| --- | --- |
+| Supersession | `slotKey` = slot and `state` = `current` |
+| Related memory cards | `MemoryCard` by `slotKey`, then by `cardKind`, newest first |
+| Core get, retrieval core items | label `Core`, plus `blockKey` when given |
+| Core consolidation | every node, oldest first, until `limit` sources |
+| Job leasing | label `Job` with `status` = `pending`, oldest first |
+| Forget closure, inspect | provenance edges plus `evidenceQid` |
+| Inspect audit trail | the audit stream, read page by page to the end |
+| `quipu verify` | every node, page by page |
 
 ## Retrieval V0
 
@@ -109,7 +137,7 @@ how kept items are rendered.
 Forgetting a message, whether selected by qid, by a query selector, or through
 its `Session` / `Turn`, tombstones and redacts all of its chunks. A query
 selector that matches a chunk resolves to the parent message, so the whole
-message and every chunk are forgotten together.
+message and every chunk are forgotten together. See [Forgetting V0](#forgetting-v0).
 
 ### Query expansion
 
@@ -401,7 +429,11 @@ Runtime treats extractor candidates as untrusted:
 
 1. Validate that slot, label, value, and text are well formed.
 2. Reject label/slot mismatches before any graph write.
-3. Supersede only the current memory with the same scoped slot key.
+3. Supersede only the current memory with the same scoped slot key. The
+   `slotKey` and `state` indexes find every current memory for the slot,
+   however deep in the store it sits; each match in the candidate's scope is
+   rewritten with `state: "superseded"` and `validTo`, keeping all its other
+   properties.
 4. Store the accepted derived node with temporal validity and raw evidence.
 5. Link the derived node to its message evidence with `EVIDENCED_BY`.
 
@@ -492,3 +524,75 @@ larger than the node-scan cap cannot hide them.
 E1 found that assertions must never replace raw evidence: assertion-only
 reading lost 21 to 31 points. Assertions therefore reach the reader only as
 [fact keys](#fact-keys) that resolve to raw text.
+
+## Forgetting V0
+
+`memory.forget` selects roots, then tombstones a closure computed from
+provenance edges, never from an enumeration of the store.
+
+Roots:
+
+- `selector.qids` names roots directly. A `Session` or `Turn` root also selects
+  the messages it holds (`HAS_TURN`, `HAS_MESSAGE`).
+- `selector.query` selects every full-text match, not a top-k. A chunk hit
+  resolves to its parent message. Internal labels and already-forgotten nodes
+  are skipped, and `selector.scope` and `selector.timeWindow` filter the
+  matches.
+
+Closure, for each root:
+
+1. A message's chunks (`HAS_CHUNK`) are forgotten with it, in the request's
+   mode, whether or not `propagate` is set.
+2. With `propagate` (the default), every live node with an `EVIDENCED_BY` or
+   `DERIVED_FROM` edge to the root or one of its chunks is invalidated, whatever
+   its label, and so on transitively. A node whose `evidenceQid` names forgotten
+   evidence is included even if its edge write was lost. Facts, preferences,
+   procedures, memory cards and episodes fall out of this rule, and so would
+   any new derived label. An episode is derived from every message of its turn,
+   so forgetting any of them forgets the episode.
+3. Every live node compiled from a forgotten node (`COMPILED_FROM`, which core
+   consolidation writes) is contaminated and tombstoned. A block rebuilt in
+   place keeps its old edges, so a block whose `evidenceQids` no longer lists
+   the forgotten node is left alone.
+4. An entity that a forgotten node `MENTIONS` is forgotten once no live node
+   outside the request mentions it, since its name came only from forgotten
+   text. An entity another live message still mentions stays.
+
+A node reached from several roots is reported and tombstoned once. Dry runs
+report the same closure without writing.
+
+A tombstone replaces the node's properties with `kind`, `deleted: true`,
+`state`, `mode`, `reason` and `previousLabel`, so the node leaves the full-text
+and vector indexes. Tombstones of raw text (`Message`, `Chunk`, `Observation`,
+`ToolCall`) also keep `leakFingerprints`: 64-bit hashes of windows of 8
+normalized tokens taken every 4 tokens (one hash of the whole text when it has
+4 to 7 tokens; shorter texts get none). The text itself is gone. Anyone holding
+the store can still test whether a guessed phrase was forgotten.
+
+### Verification
+
+`quipu verify` runs these checks over the whole store, through the adapter
+interface, alongside the schema and adapter checks:
+
+- `tombstone_retains_text`: a tombstone still carries content properties.
+- `active_derived_from_deleted_evidence`: a live node, or a live chunk, has a
+  provenance edge or `evidenceQid` pointing at a tombstone. A forget with
+  `propagate: false` leaves these by design.
+- `core_compiled_from_deleted_evidence`: a live core block still cites a
+  tombstone.
+- `entity_only_from_deleted_evidence`: a live entity whose every mention comes
+  from a tombstone.
+- `duplicate_current_slot`: two current single-value memories share a label,
+  scope and slot key.
+
+`quipu verify leaks` (also `--leaks`, and part of `verify all`) adds an
+exact-string scan. Every string property of every live node, which covers what
+the full-text and vector indexes hold and what core blocks say, is hashed in
+the same windows and compared against every tombstone's fingerprints. A copied
+run of 11 or more tokens is always caught. A match counts as a leak
+(`forgotten_text_leak`, with `relatedQid` naming the tombstone) only when no
+live node the copy was derived or compiled from, at any depth, holds the same
+window. A fact quoting a live message is not a leak. A raw node with no sources
+is its own evidence, so text the user wrote again in another message is not
+reported. Forget that message by query instead.
+

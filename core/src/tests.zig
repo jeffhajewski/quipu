@@ -12,6 +12,8 @@ test {
     _ = @import("providers.zig");
     _ = @import("temporal.zig");
     _ = @import("query_expansion.zig");
+    _ = @import("forgetting.zig");
+    _ = @import("forgetting_test.zig");
     _ = @import("runtime.zig");
     if (build_options.enable_lattice) {
         _ = @import("lattice_storage.zig");
