@@ -20,10 +20,12 @@
   only when a width is configured.
 - Forgetting, supersession, core blocks, related cards, job leasing and the
   inspect audit trail no longer enumerate the first 1,000 (or 100,000) nodes or
-  audit events. On stores past that size they used to miss newer memories:
-  forgetting could leave derived facts, cards, episodes or core blocks that
-  still carried the deleted text, and supersession could leave two current
-  values for a slot.
+  audit events. On stores past that size they missed every node outside the
+  scan's first 1,000, an arbitrary subset on both backends: forgetting could
+  leave derived facts, cards, episodes or core blocks that still carried the
+  deleted text, and supersession could leave two current values for a slot.
+- An empty full-text query on the Lattice adapter now enumerates in creation
+  order, as documented, instead of label-scan order.
 - The storage adapter contract adds `findNodes`: paged lookups by label and by
   top-level property, in creation order. `slotKey`, `state`, `evidenceQid`,
   `blockKey`, `cardKind` and `status` are indexed. The Lattice adapter backs

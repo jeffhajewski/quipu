@@ -683,6 +683,9 @@ pub const LatticeAdapter = struct {
         defer self.rollbackQuiet(tx);
         const node_ids = try nodesWithLabel(allocator, tx, label);
         defer allocator.free(node_ids);
+        // A label scan returns ids in no particular order; ids grow with
+        // creation.
+        std.mem.sort(u64, node_ids, {}, std.sort.asc(u64));
 
         var hits = std.ArrayList(storage.SearchHit).empty;
         errdefer {
