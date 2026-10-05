@@ -563,13 +563,25 @@ pub const InMemoryAdapter = struct {
         for (self.records.items) |node| {
             if (isDerivedLabel(node.label)) {
                 try verifyDerivedNode(self, allocator, &issues, node);
-            }
-            if (propertyBool(allocator, node.properties_json, "deleted")) {
-                try verifyDeletedEvidenceClosure(self, allocator, &issues, node.qid);
+                try verifyEvidenceNotDeleted(self, allocator, &issues, node);
             }
         }
 
         return issues.toOwnedSlice(allocator);
+    }
+
+    /// One pass: a live derived node whose evidence is a tombstone.
+    fn verifyEvidenceNotDeleted(
+        self: *InMemoryAdapter,
+        allocator: std.mem.Allocator,
+        issues: *std.ArrayList(storage.VerificationIssue),
+        node: NodeRecord,
+    ) !void {
+        const evidence_qid = node.indexed[storage.indexedPropertyIndex("evidenceQid").?] orelse return;
+        const evidence = self.recordFor(evidence_qid) orelse return;
+        if (!propertyBool(allocator, evidence.properties_json, "deleted")) return;
+        if (propertyBool(allocator, node.properties_json, "deleted")) return;
+        try appendIssue(allocator, issues, "active_derived_from_deleted_evidence", "active derived node references deleted evidence", node.qid);
     }
 
     fn verifyDerivedNode(
@@ -618,25 +630,6 @@ pub const InMemoryAdapter = struct {
             try appendIssue(allocator, issues, "missing_evidence_node", "active derived node references missing evidence", node.qid);
             return;
         };
-    }
-
-    fn verifyDeletedEvidenceClosure(
-        self: *InMemoryAdapter,
-        allocator: std.mem.Allocator,
-        issues: *std.ArrayList(storage.VerificationIssue),
-        evidence_qid: []const u8,
-    ) !void {
-        for (self.records.items) |node| {
-            if (!isDerivedLabel(node.label)) continue;
-            if (propertyBool(allocator, node.properties_json, "deleted")) continue;
-            const evidence = try readOptionalString(allocator, node.properties_json, "evidenceQid");
-            defer if (evidence) |value| allocator.free(value);
-            if (evidence) |qid| {
-                if (std.mem.eql(u8, qid, evidence_qid)) {
-                    try appendIssue(allocator, issues, "active_derived_from_deleted_evidence", "active derived node references deleted evidence", node.qid);
-                }
-            }
-        }
     }
 
     fn appendIssue(
