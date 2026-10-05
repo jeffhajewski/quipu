@@ -64,6 +64,15 @@ to the GPT-4o-mini rows above; the judge is unchanged.
 | Default + GPT-4o-mini | 53 (75.7%) | 50 (71.4%) | — |
 | Default + Sonnet 5.5 | 58 (82.9%) | 61 (87.1%) | vs GPT-4o-mini: 8/3 wins/losses (p=.23); 13/2 (p=.007) |
 | Default + Sonnet 5.5 + reader reasoning | 58 (82.9%) | 63 (90.0%) | vs Sonnet 5.5 without reasoning: 2/2 (p=1.0); 3/1 (p=.63) |
+| Default + Sonnet 5.5 + reasoning + temporal hints | — | 61 (87.1%) | Same as without either option |
+| Default + Sonnet 5.5 at an 8,192-token budget | — | 63 (90.0%) at 8K | Gold-turn coverage 94.0% (93.2% at 4K) |
+
+At 8K, the remaining failures are mostly recall misses on questions about two
+entities, such as "which did I buy first, X or Y?". The fused query retrieves
+evidence for only one side, and multi-hop needs like the user's age come from
+another session. Even at 8K, all gold turns are in context for only 6 of the
+10 multi-session questions. Temporal reasoning stays at 7/10 in every arm.
+Query decomposition and fact keys are the next levers for these questions.
 
 Per-category results at 4K, Sonnet 5.5 vs GPT-4o-mini, out of 10:
 
@@ -109,11 +118,11 @@ reasoning. Answer latency p50 was 2.7–3.2 s, or 3.9–4.1 s with reasoning.
 
 ## Cost
 
-The sprint's provider spend was about $5.40 in total:
+The sprint's provider spend was about $8.60 in total:
 
 - $0.27 for the E1 reference,
 - $1.50 across the GPT-4o-mini daemon harness runs,
-- about $3.60 for the two Sonnet 5.5 arms,
+- about $6.80 for the four Sonnet 5.5 arms,
 - the rest on agent smoke tests.
 
 Embeddings cost about $0.13 per uncached full slice. A GPT-4o-mini reader with
