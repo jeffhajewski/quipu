@@ -291,7 +291,7 @@ pub fn resolveEntities(
             const response = if (endpoint.kind == .callback)
                 try callProviderCallback(allocator, endpoint, turn)
             else
-                try chatCompletion(allocator, io orelse return error.ProviderUnavailable, endpoint, turn);
+                try chatCompletionWithDeadline(allocator, io orelse return error.ProviderUnavailable, endpoint, turn);
             defer allocator.free(response);
             return parseEntityResponse(allocator, response);
         },
@@ -595,6 +595,28 @@ fn chatCompletion(
     return parseChatContent(allocator, endpoint.format, response);
 }
 
+fn chatCompletionAny(allocator: std.mem.Allocator, io: std.Io, endpoint: ProviderEndpoint, turn: ChatTurn) anyerror![]u8 {
+    return chatCompletion(allocator, io, endpoint, turn);
+}
+
+/// `chatCompletion` raced against a timer, like `postJsonWithDeadline`: past
+/// `endpoint.timeout_ms` the request is canceled and `error.ProviderTimeout`
+/// returned. A connection that died while the machine slept never answers,
+/// and without the deadline a background job would wait on it for good.
+fn chatCompletionWithDeadline(allocator: std.mem.Allocator, io: std.Io, endpoint: ProviderEndpoint, turn: ChatTurn) ![]u8 {
+    const limit = endpoint.timeout_ms orelse return chatCompletion(allocator, io, endpoint, turn);
+    var buffer: [2]PostOutcome = undefined;
+    var select = std.Io.Select(PostOutcome).init(io, &buffer);
+    defer drainPostOutcomes(&select, allocator);
+    select.concurrent(.response, chatCompletionAny, .{ allocator, io, endpoint, turn }) catch
+        return chatCompletion(allocator, io, endpoint, turn);
+    select.concurrent(.deadline, std.Io.sleep, .{ io, std.Io.Duration.fromMilliseconds(limit), .awake }) catch {};
+    return switch (try select.await()) {
+        .response => |response| response,
+        .deadline => error.ProviderTimeout,
+    };
+}
+
 fn chatCompletionWithRetries(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -603,7 +625,7 @@ fn chatCompletionWithRetries(
 ) ![]u8 {
     var attempt: usize = 0;
     while (true) : (attempt += 1) {
-        return chatCompletion(allocator, io, endpoint, turn) catch |err| {
+        return chatCompletionWithDeadline(allocator, io, endpoint, turn) catch |err| {
             if (attempt >= 2 or !isRetryableProviderError(err)) return err;
             _ = io.sleep(std.Io.Duration.fromMilliseconds(if (attempt == 0) 150 else 350), .awake) catch {};
             continue;
@@ -1311,6 +1333,21 @@ test "callback reranker results are validated" {
     try std.testing.expectError(error.InvalidProviderResponse, rerank(std.testing.allocator, null, invalid, request));
     try std.testing.expectError(error.InvalidProviderConfig, rerank(std.testing.allocator, null, .{ .kind = .callback, .name = "chat-only", .callback = .{ .respond = captureTurn } }, request));
     try std.testing.expectError(error.ProviderUnavailable, rerank(std.testing.allocator, null, .{}, request));
+}
+
+test "http chat gives up at its deadline" {
+    const io = std.testing.io;
+    // As below: the handshake completes and nothing ever answers.
+    var address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/v1", .{server.socket.address.getPort()});
+    defer std.testing.allocator.free(url);
+
+    const endpoint = ProviderEndpoint{ .kind = .http, .name = "custom", .url = url, .model = "m", .api_key = "k", .timeout_ms = 150 };
+    const started = std.Io.Timestamp.now(io, .awake);
+    try std.testing.expectError(error.ProviderTimeout, completeTurn(std.testing.allocator, io, endpoint, .{ .system_prompt = "s", .user_content = "u", .json_mode = false }));
+    try std.testing.expect(started.untilNow(io, .awake).toMilliseconds() < 5000);
 }
 
 test "http reranker gives up at its deadline" {

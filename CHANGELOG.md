@@ -58,6 +58,10 @@
   other candidates, within half the token budget. `trace.timeAnchors` counts
   the windows and items, and `system.health` reports
   `capabilities.timeAnchors`.
+- A chat call to a model provider is given up after five minutes with
+  `ProviderTimeout`. It used to wait without limit, so a connection that died
+  while the machine slept left `memory.extract.run`, or the background
+  worker's batch, waiting for good.
 - Job leases use wall-clock time (they used 0), and an expired lease returns
   its job to `pending`, or dead-letters it once its attempts run out.
   `quipu jobs lease|complete|fail` record real times too.

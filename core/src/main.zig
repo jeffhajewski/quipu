@@ -20,6 +20,10 @@ const LatticeEmbeddingProviderKind = if (build_options.enable_lattice) lattice_s
 const default_hosted_embedding_dimensions: u16 = 1536;
 /// A rerank call past this deadline is abandoned and retrieval keeps fused order.
 const default_reranker_timeout_ms: u32 = 30_000;
+/// How long one chat call to a model provider may take. A connection that
+/// died (the machine slept, the network changed) never answers; this is as
+/// long as a job's lease, so a call that outlives it was lost anyway.
+const default_chat_timeout_ms: u32 = 5 * 60 * 1000;
 
 const RuntimeConfig = struct {
     command_index: usize = 1,
@@ -836,6 +840,7 @@ fn providerEndpointFromConfig(
         .temperature = config.llm_temperature orelse envF32(environ_map, "QUIPU_LLM_TEMPERATURE") orelse file_config.llm_temperature orelse 0,
         .max_tokens = config.llm_max_tokens orelse envU32(environ_map, "QUIPU_LLM_MAX_TOKENS") orelse file_config.llm_max_tokens,
         .capabilities = defaults.capabilities,
+        .timeout_ms = default_chat_timeout_ms,
     };
 }
 

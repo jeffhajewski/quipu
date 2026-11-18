@@ -619,7 +619,9 @@ Failure handling:
   missing key, timeout), the jobs return to `pending` with their attempts
   unspent and the worker waits 30 seconds, doubling up to 10 minutes, before
   the next batch. It retries when a request arrives after the wait; an idle
-  daemon does not wake itself.
+  daemon does not wake itself. A chat call is given up after five minutes
+  (`ProviderTimeout`), so a connection that died while the machine slept
+  cannot hold a batch for good.
 - **One job fails.** A failed call among answered ones, or a reply that stays
   malformed, uses one of the job's three attempts. After the third the job is
   dead-lettered.
