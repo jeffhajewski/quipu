@@ -16,7 +16,7 @@ export PATH="$HOME/.quipu/bin:$PATH"
 quipu --db "$HOME/.quipu/memory.lattice" health
 ```
 
-The installer builds the Zig core against a system-installed LatticeDB `0.15.0`
+The installer builds the Zig core against a system-installed LatticeDB `0.18.0`
 native library for durable graph, full-text, vector, and stream storage. You
 need `git`, `zig`, `lattice.h`, and `liblattice` installed; set
 `LATTICE_INCLUDE` and `LATTICE_LIB_DIR` when they are not in standard system
@@ -137,7 +137,7 @@ Current external benchmark status:
   trace artifacts under `artifacts/benchmarks/locomo-graph-smoke/`. The full
   LoCoMo graph+ER run was blocked on LatticeDB `0.6.0` `LatticeIo`/close issues
   with large-message writes, stream rereads, and dense edge materialization.
-  The LatticeDB `0.15.0` adapter writes 64KB values, appends streams without
+  The LatticeDB `0.18.0` adapter writes 64KB values, appends streams without
   rereading them, and stores edges natively; the run has not been repeated yet.
 - Local BM25 on the same normalized suite: exact 24.12%, evidence recall
   50.42%. Full context remains the local upper bound at exact 42.80% and
@@ -189,7 +189,7 @@ stores `text-embedding-3-small` vectors at their native 1536 dimensions and
 does not send a `dimensions` parameter. Set `QUIPU_VECTOR_DIMENSIONS` (or
 `--vector-dimensions`) to ask the provider for shorter vectors. The vector width
 is fixed when a store is created. The `LatticeIo` commit failure at `1017`
-dimensions and above seen with LatticeDB `0.6.0` does not occur with `0.15.0`:
+dimensions and above seen with LatticeDB `0.6.0` does not occur with `0.18.0`:
 2,000 1536-dimensional vectors commit and reopen intact on 4KB and 8KB pages.
 
 Provider-backed answer generation and async entity resolution use the unified
@@ -405,10 +405,10 @@ just benchmark-locomo-full /path/to/locomo10.json
 just benchmark-locomo-download
 ```
 
-Build with an explicit system LatticeDB `0.15.0` install:
+Build with an explicit system LatticeDB `0.18.0` install:
 
 ```bash
-git clone --depth 1 --branch v0.15.0 https://github.com/jeffhajewski/latticedb.git
+git clone --depth 1 --branch v0.18.0 https://github.com/jeffhajewski/latticedb.git
 (cd latticedb && zig build -Doptimize=ReleaseSafe)
 cd core
 zig build \

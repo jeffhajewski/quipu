@@ -11,7 +11,7 @@ Implemented adapters:
 
 - `InMemoryAdapter`: test adapter with graph-like node/edge records, simple text
   search, stream records, and invariant verification.
-- `LatticeAdapter`: optional durable adapter over the LatticeDB 0.6 C ABI. Build it
+- `LatticeAdapter`: durable adapter over the LatticeDB 0.18 C ABI. Build it
   with `-Denable-lattice=true` plus `-Dlattice-include` and `-Dlattice-lib`.
 
 The Lattice adapter stores Quipu nodes as Lattice nodes with stable public qids
@@ -24,13 +24,14 @@ nodes, exposes Lattice vector search for `memory.search`, and adds adapter-side
 token aggregation so the current
 natural-language retrieval semantics match the in-memory adapter.
 
-The LatticeDB 0.6 C ABI exposes `lattice_open_options.vector_dimensions`, and
-the CLI accepts `--vector-dimensions`, `--embedding-provider`,
-`--embedding-url`, and `--embedding-model`. Current local smoke tests show
-LatticeDB 0.6 commits fail with `LatticeIo` at `1017` persisted dimensions and
-above, even when the page size is increased. For OpenRouter, Quipu therefore
-defaults the core adapter to 768-dimensional `openai/text-embedding-3-small`
-embeddings until the large-vector persistence issue is fixed.
+The CLI accepts `--vector-dimensions`, `--embedding-provider`,
+`--embedding-url`, and `--embedding-model`. Vectors use cosine distance, and a
+store's dimensions are fixed when it is created. The adapter opens the store
+with LatticeDB's changefeed off, because the changefeed keeps the old value of
+every changed property and would retain forgotten text. A node that is forgotten or
+stops being searchable has its vector removed from the index and keeps its id,
+labels and edges. Opening a store removes any vector such a node still holds,
+which covers stores written before LatticeDB 0.18 could remove one.
 
 Provider embeddings are batched per `memory.remember` call. Before writing
 nodes, the runtime collects the index text of each vector-indexed node the call

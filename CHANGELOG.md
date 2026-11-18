@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- The Lattice storage adapter targets LatticeDB `0.18.0` and no longer links
+  against `0.17.0` or earlier. Stores written with `0.15.0` open as they are.
+  A store created by this build cannot be opened by LatticeDB `0.16.0` or
+  earlier.
+- The adapter turns LatticeDB's changefeed off and drops the events an existing
+  store holds. The changefeed keeps the old and new value of every property
+  change, so forgotten text stayed in it. Quipu's own streams are unaffected.
+- A forgotten or unsearchable node's vector is removed from the vector index
+  with LatticeDB `0.18.0`'s `lattice_node_remove_vector`; the node keeps its
+  id, labels and edges. Opening a store removes any vector such a node still
+  holds.
+- Full-text queries split words the way LatticeDB `0.17.0` and later do, so
+  words with letters outside ASCII are searched whole. A new store also matches
+  them without regard to case or accents; a store created earlier keeps its
+  ASCII-only index.
+- A store opened with different vector dimensions than it was created with
+  fails with `VectorConfigMismatch`.
 - LLM fact extraction: `quipu jobs run extract` (and the operational
   `memory.extract.run` RPC) runs the queued `extract` jobs through a chat model
   configured with `--extract-provider`, `--extract-url` and `--extract-model`
@@ -41,7 +58,7 @@
   any query term, and excludes internal, `Session`, `Turn`, `searchable:false`,
   and deleted nodes. Property names and other property values no longer match.
 - `Chunk` nodes are vector-indexed. Forgotten or unsearchable nodes lose their
-  vector.
+  embedding.
 - With the `openrouter` or `openai` embedding provider, vectors default to the
   model's native 1536 dimensions and the `dimensions` request parameter is sent
   only when a width is configured.

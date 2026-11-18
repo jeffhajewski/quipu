@@ -135,20 +135,34 @@ pub const LatticeAdapter = struct {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
 
-        var opts = c.lattice_open_options_v4{
-            .struct_size = @sizeOf(c.lattice_open_options_v4),
+        var opts = c.lattice_open_options_v5{
+            .struct_size = @sizeOf(c.lattice_open_options_v5),
             .create = true,
             .read_only = false,
             .cache_size_mb = 100,
             .page_size = options.page_size,
             .enable_vector = true,
+            // A store that already has a vector index opens only with the
+            // dimensions and metric it records; anything else is
+            // `error.VectorConfigMismatch`.
             .vector_dimensions = options.vector_dimensions,
             .enable_wal = true,
             .enable_adjacency_cache = false,
             .lock = true,
+            .sync_mode = c.LATTICE_SYNC_MODE_DEFAULT,
+            .full_fsync = c.LATTICE_FULL_FSYNC_DEFAULT,
+            // `vectorSearch` turns distances into scores assuming cosine.
+            .vector_metric = c.LATTICE_VECTOR_METRIC_COSINE,
+            .vector_m = 0,
+            .vector_ef_construction = 0,
+            // The changefeed records every property change with its old and
+            // new value in full, so it would keep forgotten text. Nothing in
+            // Quipu reads it.
+            .changefeed_retention = c.LATTICE_CHANGEFEED_RETENTION_OFF,
+            .changefeed_retention_value = 0,
         };
         var db: ?*c.lattice_database = null;
-        try check(c.lattice_open_v4(path_z.ptr, &opts, &db));
+        try check(c.lattice_open_v5(path_z.ptr, &opts, &db));
 
         var self = LatticeAdapter{
             .allocator = allocator,
@@ -171,6 +185,11 @@ pub const LatticeAdapter = struct {
         owned_embedding_model_transferred = true;
         owned_embedding_api_key_transferred = true;
         errdefer self.deinit();
+        // Turning the changefeed off drops its events a few at a time, at
+        // checkpoints. A store written with the feed on (every store from
+        // before LatticeDB 0.17) may hold forgotten text there, so drop them
+        // all now.
+        try check(c.lattice_changefeed_trim(self.db, null));
         try self.ensureSchema();
         try self.loadIndexes();
         return self;
@@ -293,6 +312,22 @@ pub const LatticeAdapter = struct {
     }
 
     fn loadIndexes(self: *LatticeAdapter) !void {
+        var stale_vectors = std.ArrayList(u64).empty;
+        defer stale_vectors.deinit(self.allocator);
+        try self.readIndexes(&stale_vectors);
+        if (stale_vectors.items.len == 0) return;
+
+        const tx = try self.beginWrite();
+        errdefer self.rollbackQuiet(tx);
+        for (stale_vectors.items) |node_id| try self.dropNodeVector(tx, node_id);
+        try check(c.lattice_commit(tx));
+    }
+
+    /// Rebuilds the in-memory indexes from the store. `stale_vectors` receives
+    /// every node that holds a vector it should not: a build against LatticeDB
+    /// 0.17 could not remove a vector and left a constant placeholder on a
+    /// forgotten or unsearchable node.
+    fn readIndexes(self: *LatticeAdapter, stale_vectors: *std.ArrayList(u64)) !void {
         const tx = try self.beginRead();
         defer self.rollbackQuiet(tx);
 
@@ -311,8 +346,10 @@ pub const LatticeAdapter = struct {
             defer self.allocator.free(label);
             const is_searchable = searchable.contains(node_id);
             // Vectors are written only for searchable nodes with vector-indexed
-            // labels and dropped when either stops holding.
-            try self.indexNode(qid, node_id, label, is_searchable, is_searchable and isVectorIndexedLabel(label));
+            // labels, and removed when either stops holding.
+            const has_vector = is_searchable and isVectorIndexedLabel(label);
+            if (!has_vector and try nodeHoldsVector(tx, node_id)) try stale_vectors.append(self.allocator, node_id);
+            try self.indexNode(qid, node_id, label, is_searchable, has_vector);
             self.trackRuntimeId(qid);
         }
 
@@ -384,7 +421,7 @@ pub const LatticeAdapter = struct {
         if (plan.vector) |vector| {
             try check(c.lattice_node_set_vector(tx, node_id, vector_key, vector.ptr, @intCast(vector.len)));
         } else if (had_vector) {
-            try dropNodeVector(tx, node_id, label_z, is_searchable);
+            try self.dropNodeVector(tx, node_id);
         }
         try check(c.lattice_commit(tx));
 
@@ -765,37 +802,26 @@ pub const LatticeAdapter = struct {
             hits.deinit(allocator);
         }
 
-        // Every vector belongs to a node that should be found, but filter anyway
-        // and widen k if that leaves the page short.
-        const max_k: usize = @max(query.limit, self.qid_to_node.count());
-        var k: usize = query.limit;
-        while (true) {
-            for (hits.items) |hit| allocator.free(hit.qid);
-            hits.clearRetainingCapacity();
+        var result: ?*c.lattice_vector_result = null;
+        try check(c.lattice_vector_search(self.db, query.vector.ptr, @intCast(query.vector.len), @intCast(@min(query.limit, std.math.maxInt(u32))), 0, &result));
+        defer if (result) |ptr| c.lattice_vector_result_free(ptr);
 
-            var result: ?*c.lattice_vector_result = null;
-            try check(c.lattice_vector_search(self.db, query.vector.ptr, @intCast(query.vector.len), @intCast(@min(k, std.math.maxInt(u32))), 0, &result));
-            defer if (result) |ptr| c.lattice_vector_result_free(ptr);
-
-            const count = c.lattice_vector_result_count(result);
-            var index: u32 = 0;
-            while (index < count and hits.items.len < query.limit) : (index += 1) {
-                var node_id: c.lattice_node_id = 0;
-                var distance: f32 = 0;
-                try check(c.lattice_vector_result_get(result, index, &node_id, &distance));
-                const qid = self.node_to_qid.get(node_id) orelse continue;
-                const entry = self.qid_to_node.get(qid) orelse continue;
-                if (!entry.has_vector) continue;
-                try hits.append(allocator, .{ .qid = try allocator.dupe(u8, qid), .score = 1.0 / (1.0 + distance) });
-            }
-            if (hits.items.len >= query.limit or count < k or k >= max_k) break;
-            k = @min(k * 2, max_k);
+        const count = c.lattice_vector_result_count(result);
+        var index: u32 = 0;
+        while (index < count) : (index += 1) {
+            var node_id: c.lattice_node_id = 0;
+            var distance: f32 = 0;
+            try check(c.lattice_vector_result_get(result, index, &node_id, &distance));
+            const qid = self.node_to_qid.get(node_id) orelse continue;
+            try hits.append(allocator, .{ .qid = try allocator.dupe(u8, qid), .score = 1.0 / (1.0 + distance) });
         }
         return hits.toOwnedSlice(allocator);
     }
 
     fn embedText(context: *anyopaque, allocator: std.mem.Allocator, text: []const u8) ![]f32 {
         const self = ctx(context);
+        // A prefetched vector embeds this exact text with the same model.
+        if (self.prefetched.get(text)) |prefetched| return allocator.dupe(f32, prefetched);
         return self.embed(allocator, text);
     }
 
@@ -1147,6 +1173,12 @@ pub const LatticeAdapter = struct {
         _ = c.lattice_rollback(tx);
     }
 
+    /// Takes the node's vector out of the index. The node stays: its id is its
+    /// place in creation order and its edges hang off it.
+    fn dropNodeVector(_: *LatticeAdapter, tx: *c.lattice_txn, node_id: u64) !void {
+        try check(c.lattice_node_remove_vector(tx, node_id, vector_key));
+    }
+
     fn embed(self: *LatticeAdapter, allocator: std.mem.Allocator, text: []const u8) ![]f32 {
         return switch (self.embedding_provider) {
             .hash => hashEmbed(allocator, text, self.vector_dimensions),
@@ -1281,18 +1313,6 @@ pub const LatticeAdapter = struct {
     };
 };
 
-/// LatticeDB 0.15 has no call that clears a node's vector, but a node left with
-/// no labels inside a transaction loses its vector at commit. Strip the labels
-/// and put them back.
-fn dropNodeVector(tx: *c.lattice_txn, node_id: u64, label_z: [:0]const u8, searchable: bool) !void {
-    if (searchable) try check(c.lattice_node_remove_label(tx, node_id, search_label));
-    try check(c.lattice_node_remove_label(tx, node_id, node_label));
-    try check(c.lattice_node_remove_label(tx, node_id, label_z.ptr));
-    try check(c.lattice_node_add_label(tx, node_id, label_z.ptr));
-    try check(c.lattice_node_add_label(tx, node_id, node_label));
-    if (searchable) try check(c.lattice_node_add_label(tx, node_id, search_label));
-}
-
 /// The text full-text search and vectors index for a node, or null when the node
 /// must not be a search hit: internal, Session and Turn labels, nodes marked
 /// `searchable:false` or `deleted:true`, and nodes with no text.
@@ -1329,9 +1349,15 @@ fn searchTextFor(allocator: std.mem.Allocator, label: []const u8, properties_jso
     return try writer.toOwnedSlice();
 }
 
-/// Distinct query terms as Lattice's tokenizer splits them: runs of ASCII
-/// letters, digits and underscores, lowercased, 2 to 64 bytes long. A plural
-/// becomes its singular ("responses" -> "response"), so the two count once.
+/// Distinct query terms, split where Lattice's tokenizer splits words: runs of
+/// ASCII letters, digits and underscores and of letters, digits and marks of
+/// other scripts, 2 to 64 bytes long. Splitting the same way matters because
+/// each term is searched alone, and Lattice requires every word of a query: a
+/// term it would split again matches only documents with all the pieces.
+///
+/// ASCII letters are lowercased here; Lattice folds the case and accents of
+/// the rest. A plural becomes its singular ("responses" -> "response"), so the
+/// two count once. No term holds a character of Lattice's query syntax.
 fn queryTerms(allocator: std.mem.Allocator, text: []const u8) ![][]u8 {
     var terms = std.ArrayList([]u8).empty;
     errdefer {
@@ -1340,15 +1366,19 @@ fn queryTerms(allocator: std.mem.Allocator, text: []const u8) ![][]u8 {
     }
     var start: ?usize = null;
     var index: usize = 0;
-    while (index <= text.len) : (index += 1) {
-        const in_word = index < text.len and isWordChar(text[index]);
-        if (in_word) {
+    while (true) {
+        const char: Char = if (index < text.len) charAt(text, index) else .{ .len = 1, .word = false };
+        if (char.word) {
             if (start == null) start = index;
+            index += char.len;
             continue;
         }
+        const end = index;
+        if (index >= text.len and start == null) break;
+        index += char.len;
         const word_start = start orelse continue;
         start = null;
-        const word = text[word_start..index];
+        const word = text[word_start..end];
         if (word.len < min_term_len or word.len > max_term_len) continue;
         const term = try std.ascii.allocLowerString(allocator, singular(word));
         var duplicate = false;
@@ -1386,6 +1416,39 @@ fn freeTerms(allocator: std.mem.Allocator, terms: []const []u8) void {
 
 fn isWordChar(byte: u8) bool {
     return std.ascii.isAlphanumeric(byte) or byte == '_';
+}
+
+const Char = struct {
+    /// Bytes the character takes; 1 for a byte that is not valid UTF-8.
+    len: usize,
+    word: bool,
+};
+
+fn charAt(text: []const u8, index: usize) Char {
+    const first = text[index];
+    if (first < 0x80) return .{ .len = 1, .word = isWordChar(first) };
+    const len = std.unicode.utf8ByteSequenceLength(first) catch return .{ .len = 1, .word = false };
+    if (index + len > text.len) return .{ .len = 1, .word = false };
+    const codepoint = std.unicode.utf8Decode(text[index .. index + len]) catch return .{ .len = 1, .word = false };
+    return .{ .len = len, .word = isWordCodepoint(codepoint) };
+}
+
+/// Whether a code point above ASCII is part of a word. Mirrors
+/// `isWordCodepoint` in LatticeDB 0.17's `src/fts/tokenizer.zig`: everything
+/// except the spaces, punctuation and symbols in the blocks that hold them.
+fn isWordCodepoint(codepoint: u21) bool {
+    return switch (codepoint) {
+        0xAA, 0xB5, 0xBA => true,
+        0x80...0xA9, 0xAB...0xB4, 0xB6...0xB9, 0xBB...0xBF, 0xD7, 0xF7 => false,
+        0x37E, 0x387, 0x55A...0x55F, 0x589, 0x5BE, 0x5C0, 0x5C3, 0x5C6, 0x5F3, 0x5F4 => false,
+        0x60C, 0x61B, 0x61F, 0x66A...0x66D, 0x6D4, 0x964, 0x965 => false,
+        0x2000...0x206F, 0x20A0...0x20CF, 0x2190...0x2BFF, 0x2E00...0x2E7F => false,
+        0x3000...0x3004, 0x3008...0x3020, 0x3030, 0x303D => false,
+        0xFE10...0xFE1F, 0xFE30...0xFE6F, 0xFEFF => false,
+        0xFF00...0xFF0F, 0xFF1A...0xFF20, 0xFF3B...0xFF40, 0xFF5B...0xFF65 => false,
+        0x1F000...0x1FAFF => false,
+        else => true,
+    };
 }
 
 fn isBlank(text: []const u8) bool {
@@ -1490,6 +1553,15 @@ fn ownedString(allocator: std.mem.Allocator, value: c.lattice_value) ![]u8 {
     if (string.len == 0) return try allocator.dupe(u8, "");
     if (string.ptr == null) return error.InvalidLatticeValue;
     return try allocator.dupe(u8, string.ptr[0..string.len]);
+}
+
+/// Whether the node has a vector in the index, as `tx` sees it.
+fn nodeHoldsVector(tx: *c.lattice_txn, node_id: u64) !bool {
+    var vector: [*c]f32 = null;
+    var dimensions: u32 = 0;
+    try check(c.lattice_node_get_vector(tx, node_id, vector_key, &vector, &dimensions));
+    defer c.lattice_free_vector(vector, dimensions);
+    return vector != null;
 }
 
 fn hashEmbed(allocator: std.mem.Allocator, text: []const u8, dimensions: u16) ![]f32 {
@@ -1623,6 +1695,9 @@ fn check(rc: c.lattice_error) !void {
         c.LATTICE_ERROR_UNSUPPORTED => error.Unsupported,
         c.LATTICE_ERROR_VALUE_TOO_LARGE => error.ValueTooLarge,
         c.LATTICE_ERROR_DATABASE_LOCKED => error.DatabaseLocked,
+        c.LATTICE_ERROR_HAS_RELATIONSHIPS => error.NodeHasRelationships,
+        c.LATTICE_ERROR_CONFIG_MISMATCH => error.VectorConfigMismatch,
+        c.LATTICE_ERROR_NEEDS_NEWER_WRITER => error.VersionMismatch,
         else => error.LatticeFailure,
     };
 }
@@ -1915,6 +1990,95 @@ test "lattice adapter ranks full-text hits by BM25 over any query term" {
     // Stopwords and punctuation alone find nothing.
     try expectSearch(adapter, "the", 10, &.{});
     try expectSearch(adapter, "  ?! ", 10, &.{});
+    // Lattice's query operators are punctuation here, not syntax: to Lattice
+    // itself "-banana" is an error and "zebra OR" is incomplete.
+    try expectSearch(adapter, "-banana", 10, &.{"q_msg_100"});
+    try expectSearch(adapter, "\"durian\"* zebra~ OR", 10, &.{"q_msg_101"});
+}
+
+test "lattice adapter searches words outside ASCII" {
+    var store = try TestStore.init("unicode.lattice");
+    defer store.deinit();
+    var state = try store.open();
+    defer state.deinit();
+    const adapter = state.adapter();
+
+    try testPut(adapter, "q_msg_1", "Message", "{\"content\":\"Dinner with Jürgen Müller at the café\"}");
+    try testPut(adapter, "q_msg_2", "Message", "{\"content\":\"Мы переехали в Москву\"}");
+    try testPut(adapter, "q_msg_3", "Message", "{\"content\":\"the orchard’s ladder\"}");
+
+    // A word is searched whole, in any case, with or without its accents.
+    try expectSearch(adapter, "Müller", 10, &.{"q_msg_1"});
+    try expectSearch(adapter, "MÜLLER", 10, &.{"q_msg_1"});
+    try expectSearch(adapter, "muller", 10, &.{"q_msg_1"});
+    try expectSearch(adapter, "cafe", 10, &.{"q_msg_1"});
+    try expectSearch(adapter, "москву", 10, &.{"q_msg_2"});
+    // Pieces of a word do not match it.
+    try expectSearch(adapter, "ller", 10, &.{});
+    // Punctuation outside ASCII splits words too.
+    try expectSearch(adapter, "orchard’s", 10, &.{"q_msg_3"});
+    try expectSearch(adapter, "ladder—orchard", 10, &.{"q_msg_3"});
+}
+
+test "lattice adapter keeps forgotten text out of the changefeed" {
+    var store = try TestStore.init("changefeed.lattice");
+    defer store.deinit();
+    const path_z = try std.testing.allocator.dupeZ(u8, store.path);
+    defer std.testing.allocator.free(path_z);
+
+    // A store as an earlier adapter left it: the changefeed on, holding the
+    // text of a property that was later cleared.
+    {
+        var opts = c.lattice_open_options_v5{
+            .struct_size = @sizeOf(c.lattice_open_options_v5),
+            .create = true,
+            .read_only = false,
+            .cache_size_mb = 100,
+            .page_size = default_page_size,
+            .enable_vector = true,
+            .vector_dimensions = default_vector_dimensions,
+            .enable_wal = true,
+            .enable_adjacency_cache = false,
+            .lock = true,
+            .sync_mode = c.LATTICE_SYNC_MODE_DEFAULT,
+            .full_fsync = c.LATTICE_FULL_FSYNC_DEFAULT,
+            .vector_metric = c.LATTICE_VECTOR_METRIC_DEFAULT,
+            .vector_m = 0,
+            .vector_ef_construction = 0,
+            .changefeed_retention = c.LATTICE_CHANGEFEED_RETENTION_ALL,
+            .changefeed_retention_value = 0,
+        };
+        var db: ?*c.lattice_database = null;
+        try check(c.lattice_open_v5(path_z.ptr, &opts, &db));
+        defer _ = c.lattice_close(db);
+        var tx: ?*c.lattice_txn = null;
+        try check(c.lattice_begin(db, c.LATTICE_TXN_READ_WRITE, &tx));
+        var node_id: c.lattice_node_id = 0;
+        try check(c.lattice_node_create(tx, "Legacy", &node_id));
+        try setNodeString(tx.?, node_id, "content", "the passport number is BISCUIT-7741");
+        try setNodeString(tx.?, node_id, "content", "");
+        try check(c.lattice_commit(tx));
+        try std.testing.expect((try changefeedEventsHeld(db)) > 0);
+    }
+
+    var state = try store.open();
+    defer state.deinit();
+    const adapter = state.adapter();
+    try std.testing.expectEqual(@as(u64, 0), try changefeedEventsHeld(state.db));
+
+    // Nothing the adapter writes or forgets reaches the feed.
+    try testPut(adapter, "q_msg_1", "Message", "{\"content\":\"we adopted a beagle named Biscuit\"}");
+    try testPut(adapter, "q_msg_1", "Message", "{\"kind\":\"tombstone\",\"deleted\":true}");
+    try std.testing.expectEqual(@as(u64, 0), try changefeedEventsHeld(state.db));
+    try std.testing.expectError(error.Unsupported, adapter.readStream(std.testing.allocator, "__lattice_changes", 0, 10));
+}
+
+/// How many events the changefeed holds.
+fn changefeedEventsHeld(db: ?*c.lattice_database) !u64 {
+    var oldest: u64 = 0;
+    var last: u64 = 0;
+    try check(c.lattice_changefeed_status(db, null, null, &oldest, &last));
+    return if (oldest == 0) 0 else last - oldest + 1;
 }
 
 test "lattice adapter indexes text far past the old 2KB cutoff" {
@@ -2121,7 +2285,9 @@ test "lattice adapter stores edges as native lattice edges" {
     try std.testing.expectEqual(@as(usize, 0), issues.len);
 }
 
-fn rawVectorSearchHas(state: *LatticeAdapter, vector: []const f32, node_id: u64) !bool {
+/// The distance Lattice's own index reports from `vector` to the node's stored
+/// vector, or null if the node is not among the 50 nearest.
+fn rawVectorDistance(state: *LatticeAdapter, vector: []const f32, node_id: u64) !?f32 {
     var result: ?*c.lattice_vector_result = null;
     try check(c.lattice_vector_search(state.db, vector.ptr, @intCast(vector.len), 50, 0, &result));
     defer if (result) |ptr| c.lattice_vector_result_free(ptr);
@@ -2131,9 +2297,26 @@ fn rawVectorSearchHas(state: *LatticeAdapter, vector: []const f32, node_id: u64)
         var found: c.lattice_node_id = 0;
         var distance: f32 = 0;
         try check(c.lattice_vector_result_get(result, index, &found, &distance));
-        if (found == node_id) return true;
+        if (found == node_id) return distance;
     }
-    return false;
+    return null;
+}
+
+const same_vector_distance: f32 = 1e-4;
+
+/// The node's stored vector is `vector`.
+fn expectVectorStored(state: *LatticeAdapter, vector: []const f32, node_id: u64) !void {
+    const distance = (try rawVectorDistance(state, vector, node_id)) orelse return error.TestExpectedVector;
+    try std.testing.expect(distance < same_vector_distance);
+}
+
+/// The node has no vector: it is gone from Lattice's own index, not just
+/// filtered out of the adapter's results.
+fn expectVectorDropped(state: *LatticeAdapter, vector: []const f32, node_id: u64) !void {
+    const tx = try state.beginRead();
+    defer state.rollbackQuiet(tx);
+    try std.testing.expect(!try nodeHoldsVector(tx, node_id));
+    try std.testing.expectEqual(@as(?f32, null), try rawVectorDistance(state, vector, node_id));
 }
 
 test "lattice adapter vectors searchable chunks and drops forgotten vectors" {
@@ -2160,7 +2343,7 @@ test "lattice adapter vectors searchable chunks and drops forgotten vectors" {
     }
 
     const chunk_node = state.qid_to_node.get("q_chunk_2").?.node_id;
-    try std.testing.expect(try rawVectorSearchHas(&state, query, chunk_node));
+    try expectVectorStored(&state, query, chunk_node);
     try testPut(adapter, "q_chunk_2", "Chunk", "{\"kind\":\"tombstone\",\"deleted\":true}");
     {
         const hits = try adapter.vectorSearch(std.testing.allocator, .{ .vector = query, .limit = 10 });
@@ -2168,12 +2351,60 @@ test "lattice adapter vectors searchable chunks and drops forgotten vectors" {
         try std.testing.expectEqual(@as(usize, 1), hits.len);
         try std.testing.expectEqualStrings("q_chunk_3", hits[0].qid);
     }
-    // The vector itself is gone, not just filtered out.
-    try std.testing.expect(!(try rawVectorSearchHas(&state, query, chunk_node)));
-    // The node keeps its labels.
+    try expectVectorDropped(&state, query, chunk_node);
+    // The node keeps its id and labels.
+    try std.testing.expectEqual(chunk_node, state.qid_to_node.get("q_chunk_2").?.node_id);
     const chunks = try state.enumerateLabel(std.testing.allocator, "Chunk", 10);
     defer freeTestHits(chunks);
     try std.testing.expectEqual(@as(usize, 2), chunks.len);
+
+    // A reopened store still has no vector for it.
+    state.deinit();
+    state = try store.open();
+    const reopened = state.adapter();
+    const hits = try reopened.vectorSearch(std.testing.allocator, .{ .vector = query, .limit = 10 });
+    defer freeTestHits(hits);
+    try std.testing.expectEqual(@as(usize, 1), hits.len);
+    try std.testing.expectEqualStrings("q_chunk_3", hits[0].qid);
+    try expectVectorDropped(&state, query, chunk_node);
+}
+
+test "lattice adapter removes the placeholder vector a LatticeDB 0.17 build left" {
+    var store = try TestStore.init("placeholder.lattice");
+    defer store.deinit();
+    var state = try store.open();
+    defer state.deinit();
+    const adapter = state.adapter();
+
+    try testPut(adapter, "q_chunk_1", "Chunk", "{\"kind\":\"chunk\",\"content\":\"we adopted a beagle named Biscuit\"}");
+    try testPut(adapter, "q_chunk_2", "Chunk", "{\"kind\":\"chunk\",\"content\":\"the quarterly budget review\"}");
+    try testPut(adapter, "q_chunk_1", "Chunk", "{\"kind\":\"tombstone\",\"deleted\":true}");
+    const forgotten = state.qid_to_node.get("q_chunk_1").?.node_id;
+    const kept = state.qid_to_node.get("q_chunk_2").?.node_id;
+
+    // What that build wrote in place of a forgotten node's vector.
+    const placeholder = try std.testing.allocator.alloc(f32, state.vector_dimensions);
+    defer std.testing.allocator.free(placeholder);
+    @memset(placeholder, 0);
+    placeholder[0] = 1;
+    {
+        const tx = try state.beginWrite();
+        errdefer state.rollbackQuiet(tx);
+        try check(c.lattice_node_set_vector(tx, forgotten, vector_key, placeholder.ptr, @intCast(placeholder.len)));
+        try check(c.lattice_commit(tx));
+    }
+    try expectVectorStored(&state, placeholder, forgotten);
+
+    state.deinit();
+    state = try store.open();
+    try expectVectorDropped(&state, placeholder, forgotten);
+    const hits = try state.adapter().vectorSearch(std.testing.allocator, .{ .vector = placeholder, .limit = 10 });
+    defer freeTestHits(hits);
+    try std.testing.expectEqual(@as(usize, 1), hits.len);
+    try std.testing.expectEqualStrings("q_chunk_2", hits[0].qid);
+    const tx = try state.beginRead();
+    defer state.rollbackQuiet(tx);
+    try std.testing.expect(try nodeHoldsVector(tx, kept));
 }
 
 test "lattice adapter round-trips 64KB string properties" {
@@ -2583,9 +2814,9 @@ test "lattice adapter prefetches provider embeddings in one batched request" {
     // Forgetting drops a prefetched vector like any other.
     const beagle = FakeEmbeddingServer.embedding("we adopted a beagle");
     const forgotten = state.qid_to_node.get("q_msg_1").?.node_id;
-    try std.testing.expect(try rawVectorSearchHas(&state, &beagle, forgotten));
+    try expectVectorStored(&state, &beagle, forgotten);
     try testPut(adapter, "q_msg_1", "Message", "{\"kind\":\"tombstone\",\"deleted\":true}");
-    try std.testing.expect(!(try rawVectorSearchHas(&state, &beagle, forgotten)));
+    try expectVectorDropped(&state, &beagle, forgotten);
     try expectFakeVectorHits(adapter, "we adopted a beagle", &.{"q_msg_4"});
 }
 
@@ -2759,7 +2990,7 @@ test "memory.remember embeds its messages, chunks and extractions in one request
 
     // Forgetting the long message drops its chunks' vectors.
     const first_chunk_node = state.qid_to_node.get(try testChunkQid(&buffer, long_qid, 0)).?.node_id;
-    try std.testing.expect(try rawVectorSearchHas(&state, &first_chunk_vector, first_chunk_node));
+    try expectVectorStored(&state, &first_chunk_vector, first_chunk_node);
     const forget = try std.fmt.allocPrint(allocator,
         \\{{"jsonrpc":"2.0","id":"f1","method":"memory.forget","params":{{"mode":"hard_delete","selector":{{"qids":["{s}"]}},"dryRun":false,"reason":"test"}}}}
     , .{long_qid});
@@ -2767,6 +2998,6 @@ test "memory.remember embeds its messages, chunks and extractions in one request
     const forget_response = try runtime.dispatch(allocator, forget);
     defer allocator.free(forget_response);
     try std.testing.expect(std.mem.indexOf(u8, forget_response, "\"error\"") == null);
-    try std.testing.expect(!(try rawVectorSearchHas(&state, &first_chunk_vector, first_chunk_node)));
+    try expectVectorDropped(&state, &first_chunk_vector, first_chunk_node);
     try std.testing.expectEqual(@as(usize, 1), fake.requests());
 }
