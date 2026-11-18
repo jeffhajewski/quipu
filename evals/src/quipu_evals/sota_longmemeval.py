@@ -526,6 +526,13 @@ def run_question(case: Mapping[str, Any], config: Mapping[str, Any], proxy: Any,
                         record["status"] = "error"
                         record["rows"] = failed_rows("consolidate", record["consolidation"]["error"])
                         return record
+                # Pattern jobs: every extraction queues one on a store that
+                # embeds, and a serving daemon runs them after it.
+                record["patterns"] = run_pattern_jobs(daemon, config, proxy, tag)
+                if "error" in record["patterns"]:
+                    record["status"] = "error"
+                    record["rows"] = failed_rows("patterns", record["patterns"]["error"])
+                    return record
 
             # Answer + judge per budget ---------------------------------------
             for budget in budgets:
@@ -670,6 +677,32 @@ def run_extraction(daemon: Daemon, config: Mapping[str, Any], proxy: Any, tag: s
 def run_consolidation(daemon: Daemon, config: Mapping[str, Any], proxy: Any, tag: str) -> dict[str, Any]:
     """Run every pending consolidate job through ``memory.consolidate.run``."""
     return run_jobs(daemon, "memory.consolidate.run", config, proxy, tag)
+
+
+def run_pattern_jobs(daemon: Daemon, config: Mapping[str, Any], proxy: Any, tag: str) -> dict[str, Any]:
+    """Run every pending pattern job through ``memory.patterns.run``."""
+    return run_jobs(daemon, "memory.patterns.run", config, proxy, tag)
+
+
+def summarize_patterns(records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    runs = [r["patterns"] for r in records if isinstance(r.get("patterns"), Mapping)]
+    if not runs:
+        return None
+    ok = [run for run in runs if "result" in run]
+    counts: Counter[str] = Counter()
+    for run in ok:
+        counts.update({k: v for k, v in (run["result"].get("counts") or {}).items() if isinstance(v, int)})
+    return {
+        "questions": len(runs), "errors": sum("error" in run for run in runs),
+        "failedJobs": sum(run["result"].get("failedCount", 0) for run in ok),
+        "secondsMean": mean(run["seconds"] for run in ok) if ok else None,
+        "chatCalls": sum(run["calls"]["chatCalls"] for run in runs),
+        "costUsd": sum(run["calls"]["costUsd"] for run in runs),
+        "nominalCostUsd": sum(run["calls"]["nominalCostUsd"] for run in runs),
+        "costUsdPerQuestion": sum(run["calls"]["nominalCostUsd"] for run in runs) / len(runs),
+        "jobs": sum(run["result"].get("leasedCount", 0) for run in ok),
+        "counts": dict(counts),
+    }
 
 
 def summarize_consolidation(records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
@@ -1071,6 +1104,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         **aggregate(rows, args.budgets), "ingest": summarize_ingest(records),
         "extraction": summarize_extraction(records),
         "consolidation": summarize_consolidation(records),
+        "patterns": summarize_patterns(records),
         "spend": {"thisInvocationProxy": proxy_totals,
                   "judgeFreshUsdAllRows": judge_fresh, "judgeNominalUsdAllRows": judge_nominal,
                   "note": "proxy costUsd/judgeFresh are new spend; nominal includes cache hits' original cost"},
