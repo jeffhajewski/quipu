@@ -124,6 +124,16 @@ Current external benchmark status:
   4,096, matching the E1 prototype; with Claude Sonnet 5.5 it scores 87.1% at
   4,096. Development-slice result, not a leaderboard claim; see
   [docs/sota-sprint-results.md](./docs/sota-sprint-results.md).
+- LongMemEval-S knowledge-update category (all 78 questions, official judge,
+  GPT-4o-mini reader): 75.6% at 4,096 tokens and 84.6% at 1,024 by default;
+  85.9% and 88.5% with background extraction, consolidation and
+  `options.facts`. One category, not a benchmark score; same document.
+- LongMemEval-S temporal-reasoning category (all 133 questions, official
+  judge, GPT-4o reader, 4,096 tokens): 69.9% by default; 77.4% with
+  background extraction, consolidation, `options.factKeys`, `options.facts`
+  and `options.timeAnchors`. With a GPT-4o-mini reader the default is 68.4%
+  and the background jobs did not help. One category, not a benchmark score;
+  same document.
 - Full LoCoMo local raw-retrieval run: 1,986 questions, LatticeDB `0.6.0`,
   core Lattice answer-containment exact match 28.55%, evidence recall 58.27%,
   with reports under `artifacts/benchmarks/locomo-core-lattice-raw-fast-full/`.
