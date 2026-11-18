@@ -876,6 +876,376 @@ larger journals: there the sentences sit in one chained group of 139 entries,
 and the clean sub-groups divide by wording ("online at midnight … regret"
 apart from "in a shop … happy"), so neither holds a contrast.
 
+### Tightening the benchmark (November 18)
+
+Three weaknesses in the benchmark itself were found and corrected.
+
+**The wording was templated.** Every occasion of a topic was worded nearly
+the same way ("I lost it badly", each time), because the notes came from
+templates. Identical sentences gather trivially and are easy to read off.
+Two reworded sets were built from the plans of h8–h15:
+
+- **v8–v15** reworded each note on its own. That broke references: "I lost it
+  badly", two sentences after the chess game, became "I failed miserably",
+  which no reader can tie to the game. The analysis found 2 of 8 patterns.
+  The set is flawed and is kept only as a record of the mistake.
+- **w8–w15** reword the notes of an entry together. Each occasion has its own
+  wording, and a note that refers back names what it refers to ("I lost that
+  game quite badly").
+
+| Step | Templated (h8–h15) | Varied (w8–w15) |
+| --- | ---: | ---: |
+| Topics whose node holds every occasion and nothing else (of 16) | 14 | 10 |
+| Patterns the analysis found (of 8) | 5 | 4 |
+| False patterns on no-pattern topics (of 8) | 1 | 0 |
+
+The analysis survives varied wording; gathering loses more. Of the four
+patterns missed on w8–w15, three are topics the templated set also missed
+(seed trays, whose outcome is reported days later; headaches, with too few
+occasions the small model could read; and attraction). The fourth, evenings
+with friends, was swallowed by a chained group of 39 entries.
+
+Answers on w8–w15, pattern and no-pattern questions together (16):
+
+| Reader | Context | 300 tokens | 1,200 tokens |
+| --- | --- | ---: | ---: |
+| GPT-4o-mini | Raw entries | 5 | 2 |
+| GPT-4o-mini | Nodes on top of raw entries | 8 | 7 |
+| GPT-4o | Raw entries | 5 | 3 |
+| GPT-4o | Nodes on top of raw entries | 9 | 12 |
+
+The whole journal (4,631 tokens) gave 1 and 3. All eight lookups were right
+in every cell. Most of the gain is on the no-pattern questions: at 1,200
+tokens GPT-4o with nodes answered 8 of 8 correctly that nothing explains the
+outcome, and 0 of 8 from raw entries, where it names a cause that is not
+there. On pattern questions the nodes delivered the four patterns the
+analysis had found (4 of 8 against 3 of 8).
+
+**No one similarity cut-off suits every journal.** Topics gathered cleanly by
+linking sentences above a cut-off, before any model is involved:
+
+| Journals | 0.55 | 0.60 | 0.65 | 0.70 |
+| --- | ---: | ---: | ---: | ---: |
+| h8–h15, templated (of 16) | 15 | 15 | 13 | 12 |
+| s8–s15, clipped diary style (of 16) | 9 | 15 | 16 | 10 |
+| w8–w15, varied wording (of 16) | 12 | 16 | 13 | 9 |
+| g0–g1, 200 entries (of 8) | 4 | 6 | 8 | 7 |
+| g2–g5, 200 entries, fresh (of 16) | 6 | 11 | 12 | 8 |
+
+Short journals want about 0.60 and the 200-entry journals 0.65: with more
+sentences in the store there are more chance links, and a lower cut-off
+chains unrelated days together. A fixed global cut-off is the wrong rule.
+
+**What to embed, again.** Facts were extracted with the numbers of the
+sentences each came from, and four texts were embedded: the bare sentence,
+the fact statement, the source span, and fact plus span. On w8–w15 at the
+best cut-off they gathered 16, 15, 16 and 14 of 16 topics. Of 2,066 facts,
+1,701 came from one sentence, 358 from two and 7 from three, so in these
+journals a span is nearly always the sentence itself. The comparison needs
+dialogue or longer prose before it says anything about multi-sentence spans.
+
+**Grading was checked by hand.** GPT-4o grades every answer against the
+reference. The 32 pattern and no-pattern answers of the GPT-4o reader at
+1,200 tokens on w8–w15 were read and graded by hand. The hand grade agreed
+on 28. The other four are two questions, in both arms: answers that name the
+right factor but hedge, or add an irrelevant one, which the judge marks
+wrong either way. No disagreement changes a comparison.
+
+**Who writes the benchmark.** The scenarios, the observation templates, the
+plan of which occasion carries which circumstance and outcome, the questions
+and the reference answers are written by hand or by code. GPT-4o-mini turns
+the notes into diary prose, rewords them for the varied sets, and invents the
+background events and storylines. A splitter bug that broke sentences after
+"Mr." and "Dr." was fixed; it had affected 1.3% of the sentences in the
+200-entry journals and none in the short ones.
+
+### A fresh confirmation set, written by hand (November 18)
+
+Every set above had been looked at while the pipeline was being built or its
+settings chosen. A new set, x0–x7, was written after that work stopped: eight
+new topics (loaves that come out flat, calls with a brother that end in a
+row, rolls of film that come back ruined, punctures, one-to-ones that leave
+the writer flat, sketches thrown away, dinners for guests that go wrong,
+sneezing fits). In each, the circumstance that goes with the bad outcome is
+the one general knowledge would not pick: the dish cooked many times goes
+wrong, the loaf proved in the fridge comes out flat. The topics, templates,
+questions and reference answers are hand-written; GPT-4o-mini only rewords
+the notes and writes the diary prose, as for w8–w15. The film topic reports
+its outcome two entries later. Nothing was changed after the set was run.
+
+**A grouping rule that does not chain.** Linking any two sentences above a
+cut-off lets one stray pair join two topics. The alternative tried here
+merges two groups only when their members are alike on average: sentences
+link at 0.60 as before, and two groups merge only if the mean similarity
+between all their members is at least 0.45. On the sets already seen it
+gathered 68 of 72 topics cleanly against 62 or 63 for the best single
+cut-off, with one setting for short and 200-entry journals, and the largest
+group in g2–g5 shrank from 169 entries to 85. Those settings were picked on
+those sets; x0–x7 is the first independent check.
+
+| Step on x0–x7 | Linking above 0.65 | Average-link 0.60 / 0.45 |
+| --- | ---: | ---: |
+| Topics gathered cleanly before any model (of 16) | 15 | 16 |
+| Topics whose node holds every occasion (of 16) | 14 | 16 |
+| Patterns the analysis found (of 8) | 6 | 6 |
+| Regularities reported on no-pattern topics (of 8) | 1 | 3 |
+
+The two patterns missed are the same under both rules: film, whose outcome
+arrives two entries after the roll is shot (the small model could tie only
+six of ten occasions together), and sketches, where the small model read
+the occasions unreliably (it counted 5, 0, 1, 0 on one run and 1, 2, 0, 5 on
+the other).
+
+The regularities reported on no-pattern topics were checked against what was
+planted. Only one of the three is a pipeline error:
+
+- **Punctures (both rules): true of the journal.** The destination of each
+  ride was drawn at random, and by chance all three rides to Aunt Sal's went
+  without trouble while six of the other seven had a puncture (p = 0.033).
+  The node says exactly that. The benchmark's reference answer is wrong, not
+  the node.
+- **Loaves (average-link): true of the journal.** The background filler
+  includes "tried a new bread recipe and it came out dense" six times. The
+  gatherer rightly put those six loaves in the bread node, and with them the
+  rye-blend loaves rose three times in four against one in twelve for the
+  rest (p = 0.027). Under the other rule the same node was counted
+  differently on a different run and stayed below the cut.
+- **Film (average-link): an error.** The claim was a compound one ("the
+  Pentax, at places other than the bus depot") and the small model counted
+  4, 1, 0, 4 where the plan gives 2, 1, 2, 5. A compound condition found by
+  search over ten occasions, counted across entries two apart, should not
+  pass on one test.
+
+Two lessons for the benchmark follow. A free attribute drawn at random lines
+up with the outcome by chance often enough to matter: testing every free
+attribute of all 104 topics built so far finds five such coincidences at
+p ≤ 0.06 (four in pattern topics, where they compete with the planted
+circumstance, and this one in a no-pattern topic). None is in the no-pattern
+topics of the earlier sets, so the false-pattern counts reported above
+stand. And filler must be checked against the topics; the generator should
+reject a journal with either flaw.
+
+Answers on x0–x7, pattern and no-pattern questions together (16):
+
+| Reader | Context | 300 tokens | 1,200 tokens |
+| --- | --- | ---: | ---: |
+| GPT-4o-mini | Raw entries | 3 | 3 |
+| GPT-4o-mini | Nodes (linking above 0.65) on raw entries | 5 | 8 |
+| GPT-4o-mini | Nodes (average-link) on raw entries | 8 | 8 |
+| GPT-4o | Raw entries | 1 | 2 |
+| GPT-4o | Nodes (linking above 0.65) on raw entries | 6 | 13 |
+| GPT-4o | Nodes (average-link) on raw entries | 8 | 11 |
+
+The whole journal (4,751 tokens) gave 3 and 2. Lookups were right in every
+cell but one (7 of 8 for GPT-4o with average-link nodes at 300 tokens). The
+picture from w8–w15 holds on unseen topics: from raw entries GPT-4o gets
+none of the eight no-pattern questions right (it names a cause that is not
+there) and finds 2 of 8 real patterns; with nodes it gets 8 of 8 no-pattern
+questions and 5 of 8 pattern questions.
+The 32 GPT-4o answers at 1,200 tokens were graded by hand as well; the hand
+grade differs from the judge on two, one in each arm, both hedged answers
+the judge marked wrong.
+
+Going back over a node as entries arrive was repeated on this set, with the
+first 60% of each journal arriving first. Analysing a node once, when it
+first had enough occasions, found 4 of 8 patterns. Keeping the early
+generalisations and updating only their counts found 6, with nothing
+reported on the no-pattern topics. Gathering and analysing everything again
+also found 6, and reported the punctures coincidence. A generalisation
+worded before the later occasions existed predicted them 15 times in 18 on
+pattern topics and 6 times in 13 on no-pattern topics. This matches the
+earlier sets: keep the claim, keep counting.
+
+Average-link gathers better and holds every occasion in all 16 topics, but
+it did not find more patterns, and its larger, more complete nodes gave the
+analysis more to over-read. It is the better gathering rule; the analysis
+needs a guard against compound claims before the two are combined.
+
+### Cause-and-effect links, on hand-written chains (November 18)
+
+The first test of links between an event and what it led to (under "Four
+follow-on experiments") showed little benefit. Two things were wrong with
+it. The chains had been invented by GPT-4o, and the questions could be
+answered from the one entry that similarity retrieval already finds. A
+second look at the proposing step also showed that focus decides whether a
+cause is found at all: asked about one sentence at a time, the small model
+found the planted cause of 15 events in 16; handed a whole entry and a week
+of earlier text, it found almost none.
+
+**The journals.** Two 200-entry journals, d0 and d1, each carry eight chains
+of three events written by hand, and four one-off events with no cause given
+anywhere. A chain's events sit in different entries, a few days apart, and
+share few words: a delivery van knocks down the garden wall; the
+insurer's assessor needs the writer at home on Friday morning; the writer
+moves a dental check-up. The entry about the check-up does not say why. The
+background (storylines, small events, chores) is the same as in g0–g5.
+GPT-4o-mini wrote the diary prose from the notes; the planted sentences were
+read afterwards and are faithful.
+
+**Building the links.** For every sentence, GPT-4o-mini is asked one
+question: did something in the previous six entries bring this about?
+GPT-4o then checks each proposal, stating the relation before the verdict.
+
+| | d0 | d1 | Both |
+| --- | ---: | ---: | ---: |
+| Proposals | 1,104 | 1,005 | 2,109 |
+| Links kept by the check | 376 | 360 | 736 |
+| Middle event linked to its root (of 8) | 7 | 7 | 14 of 16 |
+| End event linked to its middle or root (of 8) | 6 | 4 | 10 of 16 |
+| End event traceable to its root through kept links (of 8) | 5 | 4 | 9 of 16 |
+| One-off events given a cause (of 4) | 0 | 0 | 0 of 8 |
+
+The check kept every planted step the proposer found; the misses are all in
+proposing. Most kept links are not planted: the background storylines are
+full of real consequences. They were not audited one by one.
+
+**What reaches the reader.** Whether the entry at the far end of a chain is
+in a 1,200-token context, by entry date:
+
+| Question | Entry looked for | Raw entries | Extra sentences + raw | Links + raw |
+| --- | --- | ---: | ---: | ---: |
+| "Why did I move my dental check-up?" | the root | 1 of 16 | 2 of 16 | 11 of 16 |
+| "What came of the van hitting my wall?" | the end | 0 of 16 | 2 of 16 | 11 of 16 |
+
+"Extra sentences" is a control: the same share of the budget spent on the
+single sentences most similar to the question. The far end of a chain shares
+no words with the question, so similarity does not find it at any
+granularity; following links does.
+
+**Answers** at 1,200 tokens, as answers that reach the far end of the chain /
+answers that reach at least the middle, of 16. "Chains" hands the reader the
+same links composed into one line per chain (A led to B, which led to C).
+
+| Reader | Context | Why did I…? | What chain of events ended with…? | What came of…? |
+| --- | --- | ---: | ---: | ---: |
+| GPT-4o-mini | Raw entries | 0 / 1 | 1 / 4 | 0 / 9 |
+| GPT-4o-mini | Extra sentences + raw | 0 / 5 | 1 / 8 | 0 / 15 |
+| GPT-4o-mini | Links + raw | 3 / 11 | 8 / 10 | 0 / 14 |
+| GPT-4o-mini | Chains + raw | 3 / 10 | 9 / 10 | 3 / 14 |
+| GPT-4o | Raw entries | 0 / 2 | 1 / 5 | 0 / 9 |
+| GPT-4o | Extra sentences + raw | 1 / 8 | 2 / 9 | 1 / 15 |
+| GPT-4o | Links + raw | 3 / 11 | 10 / 11 | 7 / 14 |
+| GPT-4o | Chains + raw | 6 / 11 | 10 / 11 | 6 / 14 |
+
+At 300 tokens the composed chains matter more: on the chain-of-events
+question both readers reached the root 8 times in 16 with chains, against 1
+and 3 with separate links and 0 from raw entries. GPT-4o-mini given the
+whole journal (51,600 tokens) reached the middle on 5 of 16 "why" questions
+and the root on none. Asked why a one-off event happened, both readers said
+the journal does not say in 7 or 8 of 8 cases in every arm; the links did
+not make them invent reasons.
+
+What this shows:
+
+- **The links carry information retrieval cannot reach.** The root of a
+  chain is in context 11 times in 16 with links and once without.
+- **The question decides whether it is used.** Asked "why", a reader gives
+  the nearest cause and stops, even with the whole chain in front of it; a
+  person would too. Links still help there (the nearest cause is itself an
+  entry the question does not resemble: 11 of 16, against 1 or 2 from raw
+  entries and 5 to 8 with the control). Asked for
+  the chain of events, the readers use all of it: 8 to 10 of 16 against 1.
+- **The small reader does not join two links itself.** On "what came of"
+  it never reached the end event from separate links, and did 3 times from
+  composed chains; GPT-4o did 6 or 7 times either way. This is the same
+  finding as for patterns: the joining has to be done before the reader.
+- **Raw retrieval invents chains.** Asked for a chain of events with only
+  similar entries in context, GPT-4o told a confident wrong story in 3 of
+  16 answers, tying the event to an unrelated entry.
+
+Limits of this test. Sixteen chains by one author. A grade changes by one or
+two per cell when the judge's prompt is edited, so only the large gaps
+count. One answer was led astray by a kept link that tied a planted event to
+a background storyline (a leak in the flat, the piano under a tarpaulin).
+The 700 unplanted links were not audited. And the proposer asks about every
+sentence, which costs about 2,900 small-model calls and 1,100 GPT-4o checks
+for a 200-entry journal, $1.50 to $2.30. Asking only about one-off events,
+and giving the proposer extracted claims instead of six whole entries, are
+the two cuts to try.
+
+### Why nodes cost lookups, and the fix (November 18)
+
+On the 200-entry journals, adding nodes took plain lookups ("where did I
+book a cabin?") from 7 of 12 to 4 of 12 at 1,200 tokens. Two separate causes
+were found, and neither needs a switch to work around.
+
+**Nodes were added whether or not the question was about them.** The three
+nodes nearest the question always went in, about 300 tokens, including
+"nothing found" nodes about haircuts and the bus. A lookup has no node that
+is about it, so those tokens were taken from the entries for nothing.
+
+**The prototype ranked whole entries.** In all 12 lookups the sentence that
+holds the answer is the single nearest sentence to the question. The entry
+that holds it ranked between 1st and 80th, because one line in a 600-token
+entry barely moves the entry's embedding.
+
+The fix has two rules, both about using the smallest unit of evidence:
+
+- An entry ranks by its best sentence. An entry too long for what is left of
+  the budget is cut to the hit sentence and its neighbours.
+- A node goes in only when more than half of the ten sentences nearest the
+  question are that node's own evidence. A node is found through what it was
+  built from, not through a fixed allowance or the wording of its summary.
+
+What the node rule selects, with no reader involved, over all 36 lookups and
+72 pattern and no-pattern questions of the g, h, w and x sets:
+
+| Rule | Lookups given a node (of 36) | Topic's node picked, where one exists (of 67) |
+| --- | ---: | ---: |
+| Node's text among the ten nearest items | 1 | 54 |
+| Node owns more than half of the ten nearest sentences | 0 | 62 |
+
+Before, every lookup context carried nodes (28 of 28 at 1,200 tokens on the
+g, w and x sets), and the topic's node was in 51 of the 56 pattern and
+no-pattern contexts; with the ownership rule it is in 48.
+
+Answers on the long journals, g0–g5 (12 lookups):
+
+| Context | GPT-4o-mini, 300 | GPT-4o-mini, 1,200 | GPT-4o, 300 | GPT-4o, 1,200 |
+| --- | ---: | ---: | ---: | ---: |
+| Whole entries | 4 | 7 | 4 | 7 |
+| Three nearest nodes + whole entries (before) | 4 | 4 | 4 | 4 |
+| Entries by best sentence | 12 | 12 | 11 | 11 |
+| Node by its evidence + entries by best sentence | 12 | 12 | 11 | 11 |
+
+On the short sets all 16 lookups were right in every arm. Pattern and
+no-pattern questions together, over g0–g5, w8–w15 and x0–x7 (56):
+
+| Context | GPT-4o-mini, 300 | GPT-4o-mini, 1,200 | GPT-4o, 300 | GPT-4o, 1,200 |
+| --- | ---: | ---: | ---: | ---: |
+| Whole entries | 16 | 9 | 18 | 12 |
+| Three nearest nodes + whole entries (before) | 25 | 28 | 29 | 43 |
+| Entries by best sentence | 11 | 7 | 18 | 16 |
+| Node by its evidence + entries by best sentence | 22 | 26 | 34 | 41 |
+
+The lookups are repaired and the pattern questions hold. The small
+difference at 1,200 tokens (41 against 43, 26 against 28) was traced
+question by question for GPT-4o. With the topic's own node in context the
+reader does the same either way (no-pattern 24 of 26 before, 22 of 24
+after; pattern 17 of 25 and 17 of 24). Two no-pattern answers that were
+right before had no node of their topic in context at all: unrelated
+"nothing found" nodes had nudged the reader into saying that nothing
+explains it, which is credit the old arm should not have had. The other two
+are film and purchases, the topics whose outcome arrives in a later entry:
+gathering had split each into two nodes, so neither half owned most of the
+nearest sentences. That is the known gathering gap, not a selection one.
+
+**The daemon already avoids most of the first cause.** It indexes a long
+message as 1,200-byte chunks, which the prototype's whole-entry arm did not
+model. The six long journals were ingested into the daemon as built
+(LatticeDB backend, `text-embedding-3-small`, no extraction) and
+`memory.retrieve` was called for the 12 lookups: the answer was in the
+returned prompt 11 times at 1,200 tokens and 8 times at 300, against 7 and 4
+for whole entries and 12 and 12 for sentence ranking. The one miss at 1,200
+is a single sentence in a 3,000-character entry whose chunk does not rank.
+Sentence-level keys would recover it and the 300-token cases; that is the
+user-proposed "embed the text a fact came from" applied to raw retrieval.
+
+So in the daemon the rule that matters is the second one: choose a node by
+following the evidence links upward from the retrieved leaves, and include
+it only when it owns most of them. That makes derived nodes free for
+questions they are not about, and no option is needed to turn them off.
+
 ### Limits
 
 - The benchmark and the pipeline have the same author, and every planted
@@ -886,11 +1256,16 @@ apart from "in a shop … happy"), so neither holds a contrast.
   occasion the small model cannot read loses a real pattern; one coincidence
   among four candidates makes a false one.
 - A topic whose outcome is reported in a later entry (a purchase and the
-  regret a few days on) is only partly repaired by follow-up links. Linking
-  any two sentences above a threshold chains unrelated days together in a
-  long journal; grouping needs a rule that does not chain.
-- Derived nodes take context from raw entries, which cost lookups on the
-  larger journals (3 of 8 against 5 of 8 at 1,200 tokens).
+  regret a few days on, a roll of film and its scans) is still mostly
+  missed: seed trays on h8–h15 and w8–w15, film on x0–x7. Linking any two
+  sentences above a threshold chains unrelated days together in a long
+  journal. Average-link grouping does not, and held on a fresh set, but it
+  has not been run end to end on the 200-entry journals.
+- The benchmark's own journals contain regularities nobody planted (5 of
+  104 topics). The generator does not yet reject them.
+- Choosing a node through its evidence fixed the lookups it used to cost,
+  but the rule was chosen on sets already seen, and it misses topics that
+  gathering splits in two (outcomes reported in a later entry).
 - One step needs GPT-4o. Sixteen questions per set is a small sample; the
   pooled difference at 1,200 tokens (22 of 32 against 8 of 32) is not.
 
@@ -949,6 +1324,12 @@ beyond embeddings and the analysis about $0.10; for one 200-entry journal of
 50,000 tokens the analysis costs about $0.25. Updating the counts of existing
 generalisations when new entries arrive cost about $0.01 per journal.
 
+The November 18 work cost about $16 by the same kind of tally: about $4 on
+the varied-wording sets and the chunking comparison, $2.50 on a link run
+over model-written chains that was stopped at its cap, $2.00 on the fresh
+pattern set end to end, and $7.60 on the two hand-written cause-and-effect
+journals ($3.90 building links, $3.70 on answers and grading).
+
 Embeddings cost about $0.13 per uncached full slice. A GPT-4o-mini reader with
 the GPT-4o judge costs about $0.05–0.15 per arm.
 
@@ -978,14 +1359,22 @@ the GPT-4o judge costs about $0.05–0.15 per arm.
   (iteration 6) and repeats turned out to be rare (about 1%), so neither
   explains it. What is missing is anything built above the claims: nodes that
   connect related claims and say how they relate. Iteration 7 prototyped
-  this outside the daemon and it held on unseen journals. Before porting:
-  check it on a benchmark we did not write; replace single-link grouping
-  with a rule that does not chain; decide when a node with no finding gets
+  this outside the daemon and it held on unseen journals, including a set
+  written by hand after the pipeline was frozen. Before porting: check it on
+  a benchmark we did not write; run average-link grouping end to end on the
+  long journals and stop compound claims passing on one test; make the
+  benchmark generator reject journals with unplanted regularities; decide
+  when a node with no finding gets
   new generalisations proposed, given that keeping the early ones and
   updating counts found as many patterns as rebuilding with fewer false
   ones; and decide what a node stores (the generalisations, each occasion's
   two answers, the links to what followed) so that forgetting an entry
   recomputes the findings built on it.
+- Cause-and-effect links reach evidence that similarity retrieval does not
+  (the root of a chain in context 11 times in 16 against once), but building
+  them asks a question of every sentence. Cut the cost (one-off events only,
+  extracted claims as the window), audit the unplanted links, and test on
+  chains longer than three events before porting.
 - Extraction alone shifts raw retrieval slightly, which `docs/algorithms.md`
   says it should not with `factKeys` off. On the dev and held-out runs that
   moved 3 answers in 266 rows (1 better, 2 worse). Find the cause: shared
