@@ -212,8 +212,9 @@ same system prompt and user turn that would go over HTTP.
 `quipu jobs run extract` (and the `memory.extract.run` RPC) sends each pending
 `extract` job's source messages to a chat model and stores grounded claims as
 `Assertion` nodes (see
-[algorithms.md](algorithms.md#llm-fact-extraction)). The extract provider
-resolves like the answer and entity providers:
+[algorithms.md](algorithms.md#llm-fact-extraction)). Only what people wrote is
+sent: messages with the role `assistant`, `system` or `tool` are not. The
+extract provider resolves like the answer and entity providers:
 
 | Flag | Environment | Fallback |
 | --- | --- | --- |

@@ -3230,9 +3230,10 @@ pub const Runtime = struct {
         }
     }
 
-    /// Loads the job's source messages (full text, reassembled from chunks)
-    /// and builds the extraction request. A job whose messages were all
-    /// forgotten has nothing to extract and makes no call.
+    /// Loads the messages people wrote in the job's turn (full text,
+    /// reassembled from chunks) and builds the extraction request. A job
+    /// with no such message left, because the turn held only replies or
+    /// everything was forgotten, has nothing to extract and makes no call.
     fn prepareExtractTask(self: *Runtime, allocator: std.mem.Allocator, task: *ExtractTask) !void {
         const payload_json = try self.payloadJsonForLease(allocator, task.lease);
         defer allocator.free(payload_json);
@@ -3245,6 +3246,12 @@ pub const Runtime = struct {
         for (message_qids.items) |qid_value| {
             const message_qid = stringValue(qid_value) orelse continue;
             const source = (try self.loadExtractSource(allocator, message_qid)) orelse continue;
+            // Facts come from what people say about themselves, not from
+            // the replies they got.
+            if (!isSpeakerRole(source.role)) {
+                source.deinit(allocator);
+                continue;
+            }
             task.sources.append(allocator, source) catch |err| {
                 source.deinit(allocator);
                 return err;
@@ -3921,6 +3928,16 @@ const OwnedItems = struct {
         freeEvidence(self.allocator, item.evidence);
     }
 };
+
+/// Whether a message was written by a person: anything but the assistant's
+/// replies, system text and tool output. Only such messages state facts
+/// about their author.
+fn isSpeakerRole(role: []const u8) bool {
+    for ([_][]const u8{ "assistant", "system", "tool", "function", "developer" }) |other| {
+        if (std.ascii.eqlIgnoreCase(role, other)) return false;
+    }
+    return true;
+}
 
 /// Which nodes may become retrieval items, and how they are rendered.
 const ItemFilter = struct {
@@ -8221,7 +8238,7 @@ const flat_reply =
     \\{"assertions":[
     \\{"text":"The user received the keys to a new apartment.","messageIndex":0,"quote":"Got the keys to the new flat","eventDate":"2023-03-03"},
     \\{"text":"The landlord left the user a bottle of wine.","messageIndex":1,"quote":"The landlord left a bottle of wine"},
-    \\{"text":"Wine was mentioned.","messageIndex":5,"quote":"wine"},
+    \\{"text":"The user was given a case of wine.","messageIndex":5,"quote":"a case of wine"},
     \\{"text":"The user moved in on March 9.","messageIndex":0,"quote":"Got the keys","eventDate":"2023-03-09"}
     \\]}
 ;
@@ -8320,7 +8337,7 @@ fn firstResultQid(allocator: std.mem.Allocator, response: []const u8) !?[]u8 {
     return try allocator.dupe(u8, results[0].object.get("qid").?.string);
 }
 
-test "extract worker sends the E1 prompt and grounds claims into assertions" {
+test "extract worker sends the speaker-facts prompt and grounds claims into assertions" {
     const allocator = std.testing.allocator;
     var harness = try RuntimeTestHarness.init(allocator);
     defer harness.deinit();
@@ -8335,20 +8352,23 @@ test "extract worker sends the E1 prompt and grounds claims into assertions" {
     const run = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x1\",\"method\":\"memory.extract.run\",\"params\":{\"owner\":\"test\"}}");
     defer allocator.free(run);
     try std.testing.expect(std.mem.indexOf(u8, run, "\"leasedCount\":2,\"succeededCount\":2,\"failedCount\":0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, run, "\"model\":\"test-extract-model\",\"promptVersion\":\"quipu.extract.e1-eventdate.v3\",\"calls\":2,\"jsonRetries\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"model\":\"test-extract-model\",\"promptVersion\":\"quipu.extract.speaker-facts.v4\",\"calls\":2,\"jsonRetries\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, run, "\"assertionsWritten\":4") != null);
     try std.testing.expect(std.mem.indexOf(u8, run, "\"candidates\":5,\"accepted\":4,\"repaired\":1,\"duplicates\":0,\"quarantined\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, run, "\"quoteAmbiguous\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"quoteNotFound\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, run, "\"eventDates\":2,\"eventDatesRejected\":1,\"planned\":1") != null);
 
-    // The turn: E1's prompt in JSON mode; the user content is the session date
-    // and the full message text, reassembled from its chunks.
+    // The turn: the extraction prompt in JSON mode; the user content is the
+    // session date and the full text of what the speaker wrote, reassembled
+    // from its chunks. The assistant's reply is not sent.
     try std.testing.expectEqualStrings(fact_extraction.system_prompt, extractor_model.last_system.?);
     try std.testing.expect(extractor_model.last_json_mode);
     const user = extractor_model.userContaining("Kyoto") orelse return error.TestUnexpectedResult;
     try std.testing.expect(std.mem.startsWith(u8, user, "{\"conversationTime\":\"2023-03-10T09:00:00Z\",\"messages\":[{\"role\":\"user\",\"content\":\"We walked"));
     try std.testing.expect(std.mem.endsWith(u8, user, "Next month I am flying to Kyoto for the cherry blossoms.\"}]}"));
     try std.testing.expect(std.mem.indexOf(u8, user, "repo:facts") == null);
+    const flat_user = extractor_model.userContaining("new flat") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, flat_user, "Congratulations") == null);
     const body = try providers.buildChatRequestBody(allocator, .{
         .kind = .http,
         .name = "openrouter",
@@ -8356,7 +8376,7 @@ test "extract worker sends the E1 prompt and grounds claims into assertions" {
         .capabilities = .{ .supports_json_mode = true },
     }, "openai/gpt-4o-mini-2024-07-18", .{ .system_prompt = fact_extraction.system_prompt, .user_content = user, .json_mode = true });
     defer allocator.free(body);
-    try std.testing.expect(std.mem.startsWith(u8, body, "{\"model\":\"openai/gpt-4o-mini-2024-07-18\",\"messages\":[{\"role\":\"system\",\"content\":\"Extract atomic claims from the source episode"));
+    try std.testing.expect(std.mem.startsWith(u8, body, "{\"model\":\"openai/gpt-4o-mini-2024-07-18\",\"messages\":[{\"role\":\"system\",\"content\":\"You keep long-term memory about the people in a conversation."));
     try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":0") != null);
     try std.testing.expect(std.mem.endsWith(u8, body, "\"response_format\":{\"type\":\"json_object\"}}"));
 
@@ -8382,7 +8402,7 @@ test "extract worker sends the E1 prompt and grounds claims into assertions" {
         "\"sessionId\":\"s-flat\"",
         "\"projectId\":\"repo:facts\"",
         "\"extractorModel\":\"test-extract-model\"",
-        "\"promptVersion\":\"quipu.extract.e1-eventdate.v3\"",
+        "\"promptVersion\":\"quipu.extract.speaker-facts.v4\"",
     }) |needle| {
         if (std.mem.indexOf(u8, flat_node.properties_json, needle) == null) {
             std.debug.print("missing {s} in {s}\n", .{ needle, flat_node.properties_json });

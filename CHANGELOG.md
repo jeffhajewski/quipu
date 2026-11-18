@@ -25,9 +25,11 @@
 - LLM fact extraction: `quipu jobs run extract` (and the operational
   `memory.extract.run` RPC) runs the queued `extract` jobs through a chat model
   configured with `--extract-provider`, `--extract-url` and `--extract-model`
-  (falling back to `--llm-*`). It uses E1's prompt with an optional event date,
-  exact-quote grounding with unique-quote index repair, and bounded retries
-  after malformed JSON. Accepted claims become `Assertion` nodes linked
+  (falling back to `--llm-*`). The prompt (`quipu.extract.speaker-facts.v4`)
+  asks for the facts each author states about themselves, with an optional
+  event date; the assistant's replies are not sent. Claims are grounded on a
+  quote from the message with unique-quote index repair, and malformed JSON
+  gets bounded retries. Accepted claims become `Assertion` nodes linked
   `EVIDENCED_BY` to their message and chunk. Quarantined claims are counted on
   the job, never stored. Forgetting a message tombstones its assertions.
 - `options.factKeys` on `memory.retrieve` and `memory.answer` (default `false`):
