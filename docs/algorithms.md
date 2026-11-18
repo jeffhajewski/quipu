@@ -490,9 +490,13 @@ pending jobs:
    malformed replies the job fails and returns to pending until its attempts
    run out.
 4. Ground every claim (invariant 4, E1's `grounded_extraction`). A claim is
-   accepted when its `quote` occurs verbatim in the message its `messageIndex`
-   names. A wrong or missing index is repaired only when the quote occurs in
-   exactly one source message. Everything else is quarantined: counted by
+   accepted when its `quote` occurs in the message its `messageIndex` names.
+   The match is exact first; failing that, the quote is tried without the
+   ellipses, quotation marks and spaces the model wrapped around it, then
+   ignoring ASCII case, then without its closing punctuation. The stored quote
+   is always the message's own span, never the model's spelling of it. A wrong
+   or missing index is repaired only when the quote occurs in exactly one
+   source message. Everything else is quarantined: counted by
    reason (`invalidItem`, `missingQuote`, `quoteNotFound`, `quoteAmbiguous`,
    `emptyText`) and dropped. Quarantined text is never stored, so forgetting
    has nothing extra to chase. Exact repeats of a (message, quote, text) claim

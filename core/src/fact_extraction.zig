@@ -7,10 +7,10 @@
 //! reply and grounds every claim before the runtime writes anything.
 //!
 //! Grounding follows E1 (`longmemeval_study.grounded_extraction`): a claim is
-//! accepted when its quote occurs verbatim in the message its `messageIndex`
-//! names. A wrong or missing index is repaired only when the quote occurs in
-//! exactly one source message; every other claim is quarantined, which means
-//! counted by reason and dropped. Quarantined text is never stored, so there is
+//! accepted when its quote occurs in the message its `messageIndex` names. A
+//! wrong or missing index is repaired only when the quote occurs in exactly
+//! one source message; every other claim is quarantined, which means counted
+//! by reason and dropped. Quarantined text is never stored, so there is
 //! nothing derived from a forgotten message left to chase.
 const std = @import("std");
 const temporal = @import("temporal.zig");
@@ -136,9 +136,11 @@ fn isHex4(text: []const u8) bool {
     return true;
 }
 
-/// One grounded claim. Strings borrow from the parsed reply.
+/// One grounded claim. `text` and `event_date` borrow from the parsed reply
+/// and `quote` from its source message, so both must outlive the claim.
 pub const Claim = struct {
     text: []const u8,
+    /// The quoted span exactly as the message has it.
     quote: []const u8,
     /// Index into the source messages; the quote occurs verbatim in it.
     message_index: usize,
@@ -208,17 +210,23 @@ pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: [
                 continue;
             },
         };
-        const quote = nonBlankString(object.get("quote")) orelse {
+        const raw_quote = nonBlankString(object.get("quote")) orelse {
             counts.missingQuote += 1;
             counts.quarantined += 1;
             continue;
         };
+        const wanted = trimQuote(raw_quote);
+        if (wanted.len == 0) {
+            counts.missingQuote += 1;
+            counts.quarantined += 1;
+            continue;
+        }
         var repaired = false;
         const message_index = if (citedIndex(object.get("messageIndex"), messages.len)) |index|
-            if (std.mem.indexOf(u8, messages[index].content, quote) != null) index else null
+            if (findQuote(messages[index].content, wanted) != null) index else null
         else
             null;
-        const located = message_index orelse switch (uniqueMessageContaining(messages, quote)) {
+        const located = message_index orelse switch (uniqueMessageContaining(messages, wanted)) {
             .none => {
                 counts.quoteNotFound += 1;
                 counts.quarantined += 1;
@@ -234,6 +242,7 @@ pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: [
                 break :blk index;
             },
         };
+        const quote = findQuote(messages[located].content, wanted).?;
         const text = nonBlankString(object.get("text")) orelse {
             counts.emptyText += 1;
             counts.quarantined += 1;
@@ -299,10 +308,39 @@ const Location = union(enum) {
     unique: usize,
 };
 
+/// The quote without what models wrap around it: blanks, quotation marks and
+/// ellipses at either end. What is left is still a span of the original.
+fn trimQuote(quote: []const u8) []const u8 {
+    var text = quote;
+    while (true) {
+        const before = text.len;
+        text = std.mem.trim(u8, text, " \t\r\n\"");
+        inline for (.{ "...", "\u{2026}", "\u{201C}", "\u{201D}" }) |edge| {
+            if (std.mem.startsWith(u8, text, edge)) text = text[edge.len..];
+            if (std.mem.endsWith(u8, text, edge)) text = text[0 .. text.len - edge.len];
+        }
+        if (text.len == before) return text;
+    }
+}
+
+/// Where `quote` occurs in `content`, as the span of `content` itself: an
+/// exact match first, then one that ignores ASCII case, then the same two
+/// without the quote's closing punctuation (models end a quoted clause with a
+/// full stop the message does not have).
+fn findQuote(content: []const u8, quote: []const u8) ?[]const u8 {
+    const bare = std.mem.trimEnd(u8, quote, ".,;:!?");
+    for ([_][]const u8{ quote, bare }) |candidate| {
+        if (candidate.len == 0) continue;
+        if (std.mem.indexOf(u8, content, candidate)) |at| return content[at .. at + candidate.len];
+        if (std.ascii.indexOfIgnoreCase(content, candidate)) |at| return content[at .. at + candidate.len];
+    }
+    return null;
+}
+
 fn uniqueMessageContaining(messages: []const SourceMessage, quote: []const u8) Location {
     var found: ?usize = null;
     for (messages, 0..) |message, index| {
-        if (std.mem.indexOf(u8, message.content, quote) == null) continue;
+        if (findQuote(message.content, quote) == null) continue;
         if (found != null) return .ambiguous;
         found = index;
     }
@@ -420,6 +458,24 @@ test "grounding accepts exact quotes and repairs a unique wrong index" {
     try testing.expectEqual(@as(usize, 2), result.grounding.counts.accepted);
     try testing.expectEqual(@as(usize, 1), result.grounding.counts.repaired);
     try testing.expectEqual(@as(usize, 0), result.grounding.counts.quarantined);
+}
+
+test "grounding finds quotes wrapped in ellipses, recased or closed with a full stop" {
+    var result = try groundReply(
+        \\{"assertions":[
+        \\{"text":"The user adopted a cat.","messageIndex":0,"quote":"...i adopted a cat named Miso..."},
+        \\{"text":"The user named the cat after soup.","messageIndex":2,"quote":"\u201cbecause of the soup!\u201d"},
+        \\{"text":"Nothing left.","messageIndex":0,"quote":"..."}
+        \\]}
+    );
+    defer result.parsed.deinit();
+    defer result.grounding.deinit(testing.allocator);
+    const claims = result.grounding.claims;
+    try testing.expectEqual(@as(usize, 2), claims.len);
+    // The stored quote is the message's own span, so it locates chunks exactly.
+    try testing.expectEqualStrings("I adopted a cat named Miso", claims[0].quote);
+    try testing.expectEqualStrings("because of the soup", claims[1].quote);
+    try testing.expectEqual(@as(usize, 1), result.grounding.counts.missingQuote);
 }
 
 test "grounding quarantines ambiguous, missing and unsupported quotes" {
