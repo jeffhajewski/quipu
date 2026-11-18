@@ -209,8 +209,9 @@ same system prompt and user turn that would go over HTTP.
 
 ## Fact Extraction
 
-`quipu jobs run extract` (and the `memory.extract.run` RPC) sends each pending
-`extract` job's source messages to a chat model and stores grounded claims as
+`quipu jobs run extract` (and the `memory.extract.run` RPC, and a daemon
+started with `--background on`) sends each pending
+`extract` job's messages to a chat model and stores grounded claims as
 `Assertion` nodes (see
 [algorithms.md](algorithms.md#llm-fact-extraction)). Only what people wrote is
 sent: messages with the role `assistant`, `system` or `tool` are not. The
@@ -235,8 +236,18 @@ quipu --db /tmp/quipu.lattice --extract-provider openrouter \
   --extract-model openai/gpt-4o-mini-2024-07-18 jobs run extract --concurrency 8
 ```
 
-`system.health` reports `workers.extractor` (`running` or `unavailable`) and
-`capabilities.extractor: {"configured", "model", "promptVersion"}`. Tests and
+`quipu serve --background on` (or `QUIPU_BACKGROUND=on`) makes the daemon run
+these jobs itself between requests (see
+[algorithms.md](algorithms.md#background-worker)). It is off unless asked for,
+because the extract provider can be auto-detected from an API key in the
+environment and the worker would then send stored messages to it unprompted.
+
+`system.health` reports `workers.extractor` and
+`capabilities.extractor: {"configured", "model", "promptVersion"}`. The worker
+is `running` when the daemon drains jobs in the background, `stopped` when an
+extract provider is configured but jobs run only on request, and `unavailable`
+without one. `workers.entityResolver` is `stopped` when configured: it runs
+only on request. Tests and
 embedding Zig hosts can supply an in-process extractor with
 `ProviderKind.callback`. It receives the exact system prompt and user turn.
 

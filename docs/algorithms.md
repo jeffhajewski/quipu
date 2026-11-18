@@ -443,10 +443,19 @@ This mirrors the future plugin contract: extractor output can propose memories, 
 
 `memory.remember` (with `extract`, the default) publishes
 `quipu.extract.requested` and materializes one `extract` job per call. Nothing
-runs at write time. `quipu jobs run extract [--limit N] [--owner ID]
-[--concurrency N]`, or the operational RPC `memory.extract.run` for callers that
-keep a daemon open (eval runners; not part of the SDK surface), processes
-pending jobs:
+runs at write time. The jobs run in one of two ways:
+
+- **In the background.** A daemon started with `--background on` (or
+  `QUIPU_BACKGROUND=on`) runs them itself between requests; see
+  [Background worker](#background-worker).
+- **On request.** `quipu jobs run extract [--limit N] [--owner ID]
+  [--concurrency N]`, or the operational RPC `memory.extract.run` for callers
+  that keep a daemon open (eval runners; not part of the SDK surface). On a
+  daemon with the background worker on, `memory.extract.run` first waits for
+  the batch in flight and then runs whatever is still pending, so it returns
+  only when every extract job has run.
+
+Either way a job is processed like this:
 
 1. Lease the job and load the messages people wrote, in order: every role
    except `assistant`, `system` and `tool`, skipping forgotten ones. A chunked
@@ -578,6 +587,50 @@ larger than the node-scan cap cannot hide them.
 E1 found that assertions must never replace raw evidence: assertion-only
 reading lost 21 to 31 points. Assertions therefore reach the reader only as
 [fact keys](#fact-keys) that resolve to raw text.
+
+### Background worker
+
+`quipu serve --background on` drains `extract` jobs without being asked. It is
+off by default: the worker sends stored messages to the extract model on its
+own, and that model can be one Quipu picked up from an API key in the
+environment, so starting a daemon is not enough to begin it.
+
+The write path stays short and the long-term work happens after it:
+
+1. `memory.remember` stores the raw messages, indexes them and queues the job.
+   It makes no model call for extraction.
+2. After each request the daemon leases up to eight pending `extract` jobs
+   (owner `quipu-daemon`), loads their source messages, and starts the model
+   calls on other threads. It then goes back to serving requests. One batch is
+   in flight at a time.
+3. When the last call of the batch returns, the daemon wakes, grounds the
+   replies, writes the `Assertion` nodes and settles the jobs, then starts the
+   next batch. This step runs between requests, never during one.
+
+Every storage read and write stays on the request thread, so a request sees
+either none or all of a job's assertions. Until its job has run, a message is
+retrievable as raw text only.
+
+Failure handling:
+
+- **Provider down.** If no call in a batch gets a reply (unreachable host,
+  missing key, timeout), the jobs return to `pending` with their attempts
+  unspent and the worker waits 30 seconds, doubling up to 10 minutes, before
+  the next batch. It retries when a request arrives after the wait; an idle
+  daemon does not wake itself.
+- **One job fails.** A failed call among answered ones, or a reply that stays
+  malformed, uses one of the job's three attempts. After the third the job is
+  dead-lettered.
+- **Daemon stops.** At end of input the batch in flight is cancelled and its
+  jobs go back to `pending`. A daemon that is killed leaves its leases behind;
+  the next one releases leases owned by `quipu-daemon` at startup. Leases held
+  by other owners expire after five minutes and are then reclaimed, which uses
+  an attempt.
+
+Known limits: the batch's claim embeddings are computed in the write step, so
+an HTTP embedding provider delays the next request by one embedding call per
+batch; entity resolution still runs only on request.
+
 
 ## Forgetting V0
 

@@ -48,6 +48,8 @@ const RuntimeConfig = struct {
     extract_provider: ?[]const u8 = null,
     extract_url: ?[]const u8 = null,
     extract_model: ?[]const u8 = null,
+    /// `--background on|off`: whether `serve` drains long-term jobs itself.
+    background: ?[]const u8 = null,
     reranker_url: ?[]const u8 = null,
     reranker_model: ?[]const u8 = null,
     reranker_api_key: ?[]const u8 = null,
@@ -202,7 +204,8 @@ pub fn main(init: std.process.Init) !void {
 
     if (build_options.enable_lattice and config.db_path != null) {
         const lattice_options = try latticeOptionsFromConfig(init.io, init.environ_map, config, file_config);
-        const runtime_options = runtimeOptionsFromConfig(init.io, allocator, init.environ_map, config, file_config);
+        var runtime_options = runtimeOptionsFromConfig(init.io, allocator, init.environ_map, config, file_config);
+        runtime_options.background_workers = backgroundWorkersFromConfig(args, config, init.environ_map);
         var adapter_state = try lattice_storage.LatticeAdapter.open(allocator, config.db_path.?, lattice_options);
         defer adapter_state.deinit();
         try schema.ensure(allocator, adapter_state.adapter());
@@ -217,7 +220,8 @@ pub fn main(init: std.process.Init) !void {
 
     var adapter_state = in_memory_storage.InMemoryAdapter.init(allocator);
     defer adapter_state.deinit();
-    const runtime_options = runtimeOptionsFromConfig(init.io, allocator, init.environ_map, config, file_config);
+    var runtime_options = runtimeOptionsFromConfig(init.io, allocator, init.environ_map, config, file_config);
+    runtime_options.background_workers = backgroundWorkersFromConfig(args, config, init.environ_map);
     var runtime = runtime_mod.Runtime.initWithOptions(adapter_state.adapter(), protocol.Health.default(), runtime_options);
     defer runtime.deinit();
     try runCommand(init.io, allocator, args, config.command_index, &runtime, adapter_state.adapter());
@@ -445,6 +449,15 @@ fn parseRuntimeConfig(args: []const [:0]const u8) RuntimeConfig {
         if (std.mem.eql(u8, arg, "--extract-url")) {
             if (config.command_index + 1 < args.len) {
                 config.extract_url = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--background")) {
+            if (config.command_index + 1 < args.len) {
+                config.background = args[config.command_index + 1];
                 config.command_index += 2;
                 continue;
             }
@@ -1001,6 +1014,26 @@ fn envF32(environ_map: *std.process.Environ.Map, key: []const u8) ?f32 {
     return std.fmt.parseFloat(f32, value) catch null;
 }
 
+/// Whether this invocation drains long-term jobs in the background. Only a
+/// serving daemon does, and only when asked with `--background on` or
+/// `QUIPU_BACKGROUND=on`: the worker sends stored messages to the extract
+/// model on its own, and that model may have been picked up from an API key
+/// in the environment, so starting a daemon must not be enough to begin it.
+fn backgroundWorkersFromConfig(args: []const [:0]const u8, config: RuntimeConfig, environ_map: *std.process.Environ.Map) bool {
+    if (args.len <= config.command_index) return false;
+    const command = args[config.command_index];
+    if (!std.mem.eql(u8, command, "serve") and !std.mem.eql(u8, command, "serve-stdio")) return false;
+    return switchIsOn(config.background orelse environ_map.get("QUIPU_BACKGROUND"));
+}
+
+fn switchIsOn(setting: ?[]const u8) bool {
+    const value = setting orelse return false;
+    return std.ascii.eqlIgnoreCase(value, "on") or
+        std.ascii.eqlIgnoreCase(value, "1") or
+        std.ascii.eqlIgnoreCase(value, "true") or
+        std.ascii.eqlIgnoreCase(value, "yes");
+}
+
 fn wallClockMs(io: std.Io) i64 {
     return std.Io.Timestamp.now(io, .real).toMilliseconds();
 }
@@ -1425,48 +1458,168 @@ fn runCommand(
     }
 
     if (args.len > command_index and (std.mem.eql(u8, args[command_index], "serve-stdio") or std.mem.eql(u8, args[command_index], "serve"))) {
-        var stdin_buffer: [4096]u8 = undefined;
-        var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
-        while (true) {
-            var line_writer: std.Io.Writer.Allocating = .init(allocator);
-            defer line_writer.deinit();
-            _ = stdin_file_reader.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(1024 * 1024)) catch |err| switch (err) {
-                error.StreamTooLong => {
-                    const response = try runtime.dispatch(
-                        allocator,
-                        "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"system.invalid\",\"params\":{}}",
-                    );
-                    defer allocator.free(response);
-                    try stdout.print("{s}\n", .{response});
-                    try stdout.flush();
-                    return;
-                },
-                else => |e| return e,
-            };
-            const saw_delimiter = blk: {
-                const next = stdin_file_reader.interface.peekByte() catch |err| switch (err) {
-                    error.EndOfStream => break :blk false,
-                    else => |e| return e,
-                };
-                if (next == '\n') {
-                    _ = try stdin_file_reader.interface.takeByte();
-                    break :blk true;
-                }
-                break :blk false;
-            };
-            const raw = line_writer.written();
-            if (raw.len == 0 and !saw_delimiter) break;
-            const request = std.mem.trim(u8, raw, " \t\r");
-            if (request.len == 0) continue;
-            const response = try runtime.dispatch(allocator, request);
-            defer allocator.free(response);
-            try stdout.print("{s}\n", .{response});
-            try stdout.flush();
-        }
-        return;
+        if (runtime.backgroundEnabled()) return serveWithBackground(io, allocator, runtime, stdout);
+        return serveInline(io, allocator, runtime, stdout);
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--expand-provider PROVIDER] [--expand-url URL] [--expand-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--extract-provider openrouter|openai|anthropic|google|ollama|custom] [--extract-url URL] [--extract-model MODEL] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams|leaks]... [--leaks] | jobs materialize|lease|complete|fail|run entity-resolve|extract ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--expand-provider PROVIDER] [--expand-url URL] [--expand-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--extract-provider openrouter|openai|anthropic|google|ollama|custom] [--extract-url URL] [--extract-model MODEL] [--background on|off] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams|leaks]... [--leaks] | jobs materialize|lease|complete|fail|run entity-resolve|extract ... | rpc-stdin | serve\n", .{});
+}
+
+/// What the serve loop waits on: the next request, or word that background
+/// work is ready to be written.
+const ServeEvent = union(enum) {
+    /// One request line, trimmed and not empty; the receiver frees it.
+    line: []u8,
+    /// A line over the size limit. The stream cannot be resynchronised.
+    oversized,
+    eof,
+    failed: anyerror,
+    /// The provider calls of the background batch have all returned.
+    work_done,
+};
+
+const ServeQueue = std.Io.Queue(ServeEvent);
+
+const max_request_line_bytes = 1024 * 1024;
+
+/// Reads the next request line, skipping blank ones.
+fn readServeLine(allocator: std.mem.Allocator, reader: *std.Io.Reader) ServeEvent {
+    while (true) {
+        var line_writer: std.Io.Writer.Allocating = .init(allocator);
+        defer line_writer.deinit();
+        _ = reader.streamDelimiterLimit(&line_writer.writer, '\n', .limited(max_request_line_bytes)) catch |err| switch (err) {
+            error.StreamTooLong => return .oversized,
+            else => |e| return .{ .failed = e },
+        };
+        const saw_delimiter = blk: {
+            const next = reader.peekByte() catch |err| switch (err) {
+                error.EndOfStream => break :blk false,
+                else => |e| return .{ .failed = e },
+            };
+            if (next != '\n') break :blk false;
+            _ = reader.takeByte() catch |err| return .{ .failed = err };
+            break :blk true;
+        };
+        const raw = line_writer.written();
+        if (raw.len == 0 and !saw_delimiter) return .eof;
+        const request = std.mem.trim(u8, raw, " \t\r");
+        if (request.len == 0) continue;
+        return .{ .line = allocator.dupe(u8, request) catch |err| return .{ .failed = err } };
+    }
+}
+
+fn respondToRequest(allocator: std.mem.Allocator, runtime: *runtime_mod.Runtime, stdout: *std.Io.Writer, request: []const u8) !void {
+    const response = try runtime.dispatch(allocator, request);
+    defer allocator.free(response);
+    try stdout.print("{s}\n", .{response});
+    try stdout.flush();
+}
+
+const oversized_request = "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"system.invalid\",\"params\":{}}";
+
+/// Serves requests one at a time; long-term jobs run only when a request
+/// asks for them.
+fn serveInline(io: std.Io, allocator: std.mem.Allocator, runtime: *runtime_mod.Runtime, stdout: *std.Io.Writer) !void {
+    var stdin_buffer: [4096]u8 = undefined;
+    var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
+    while (true) {
+        switch (readServeLine(allocator, &stdin_file_reader.interface)) {
+            .line => |line| {
+                defer allocator.free(line);
+                try respondToRequest(allocator, runtime, stdout, line);
+            },
+            .oversized => return respondToRequest(allocator, runtime, stdout, oversized_request),
+            .eof => return,
+            .failed => |err| return err,
+            .work_done => unreachable,
+        }
+    }
+}
+
+/// The stdin half of `serveWithBackground`, on its own thread: hands each
+/// request line to the serve loop and stops at the end of input.
+fn readServeLines(io: std.Io, allocator: std.mem.Allocator, queue: *ServeQueue) void {
+    var stdin_buffer: [4096]u8 = undefined;
+    var stdin_file_reader: std.Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
+    while (true) {
+        const event = readServeLine(allocator, &stdin_file_reader.interface);
+        queue.putOne(io, event) catch {
+            if (event == .line) allocator.free(event.line);
+            return;
+        };
+        if (event != .line) return;
+    }
+}
+
+const ServeWake = struct {
+    io: std.Io,
+    queue: *ServeQueue,
+
+    /// Called from a worker thread. Never waits: a full queue means the
+    /// serve loop has events to handle and will look at the batch anyway.
+    fn wake(context: *anyopaque) void {
+        const self: *ServeWake = @ptrCast(@alignCast(context));
+        _ = self.queue.putUncancelable(self.io, &.{.work_done}, 0) catch {};
+    }
+};
+
+/// Serves requests while long-term jobs run between them. Provider calls
+/// happen on other threads; this thread keeps every storage read and write,
+/// so a request never sees a half-written batch. At the end of input the
+/// batch in flight is cancelled and its jobs stay pending for the next run.
+fn serveWithBackground(io: std.Io, allocator: std.mem.Allocator, runtime: *runtime_mod.Runtime, stdout: *std.Io.Writer) !void {
+    var queue_buffer: [16]ServeEvent = undefined;
+    var queue: ServeQueue = .init(&queue_buffer);
+    var reader = io.concurrent(readServeLines, .{ io, allocator, &queue }) catch
+        return serveInline(io, allocator, runtime, stdout);
+    defer {
+        queue.close(io);
+        reader.cancel(io);
+        var left: [16]ServeEvent = undefined;
+        const count = queue.getUncancelable(io, &left, 0) catch 0;
+        for (left[0..count]) |event| if (event == .line) allocator.free(event.line);
+    }
+    var wake = ServeWake{ .io = io, .queue = &queue };
+    runtime.background_notify = .{ .context = &wake, .wake = ServeWake.wake };
+    defer {
+        runtime.cancelBackgroundWork();
+        runtime.background_notify = null;
+    }
+
+    // Jobs an earlier run left pending start before the first request.
+    advanceBackground(io, allocator, runtime);
+    while (true) {
+        const event = queue.getOne(io) catch return;
+        switch (event) {
+            .line => |line| {
+                defer allocator.free(line);
+                try respondToRequest(allocator, runtime, stdout, line);
+            },
+            .oversized => return respondToRequest(allocator, runtime, stdout, oversized_request),
+            .eof => return,
+            .failed => |err| return err,
+            .work_done => {},
+        }
+        advanceBackground(io, allocator, runtime);
+    }
+}
+
+/// Writes a finished batch and starts the next one. A failure here is the
+/// worker's, not a request's: it is reported on stderr and the daemon keeps
+/// serving.
+fn advanceBackground(io: std.Io, allocator: std.mem.Allocator, runtime: *runtime_mod.Runtime) void {
+    if (runtime.backgroundReady()) {
+        _ = runtime.finishBackgroundWork(allocator) catch |err| reportBackgroundError(io, "finishing", err);
+    }
+    _ = runtime.startBackgroundWork(allocator) catch |err| reportBackgroundError(io, "starting", err);
+}
+
+fn reportBackgroundError(io: std.Io, step: []const u8, err: anyerror) void {
+    var stderr_buffer: [256]u8 = undefined;
+    var stderr_file_writer: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
+    const stderr = &stderr_file_writer.interface;
+    stderr.print("quipu: background work failed while {s} a batch: {s}\n", .{ step, @errorName(err) }) catch {};
+    stderr.flush() catch {};
 }
 
 fn commandUsesDefaultDb(args: []const [:0]const u8, command_index: usize) bool {

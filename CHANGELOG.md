@@ -19,6 +19,12 @@
   ASCII-only index.
 - A store opened with different vector dimensions than it was created with
   fails with `VectorConfigMismatch`.
+- Background extraction: `quipu serve --background on` (or
+  `QUIPU_BACKGROUND=on`) runs queued `extract` jobs between requests. The model
+  calls happen off the request path, so `memory.remember` and retrieval are
+  not delayed by them. It is off by default. `memory.extract.run` on such a
+  daemon waits for the batch in flight before running the rest. When the
+  provider does not answer, jobs keep their attempts and the worker backs off.
 - Extracted claims no longer keep relative times. "Yesterday", "last week",
   "10 days ago" and the like are written as calendar dates, resolved against
   the date of the message by a fixed grammar, not by the model: "went to the
@@ -31,6 +37,9 @@
 - Job leases use wall-clock time (they used 0), and an expired lease returns
   its job to `pending`, or dead-letters it once its attempts run out.
   `quipu jobs lease|complete|fail` record real times too.
+- `system.health` reports `workers.extractor` as `stopped` when an extract
+  provider is configured but jobs run only on request (it said `running`), and
+  `workers.entityResolver` as `stopped` when configured, for the same reason.
 - LLM fact extraction: `quipu jobs run extract` (and the operational
   `memory.extract.run` RPC) runs the queued `extract` jobs through a chat model
   configured with `--extract-provider`, `--extract-url` and `--extract-model`

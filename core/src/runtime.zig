@@ -412,6 +412,11 @@ pub const ExtractJobRunResult = struct {
     counts: fact_extraction.Counts = .{},
 };
 
+/// What a finished background batch did.
+pub const BackgroundResult = union(enum) {
+    extract: ExtractJobRunResult,
+};
+
 pub const RuntimeOptions = struct {
     io: ?std.Io = null,
     answer_provider: providers.ProviderEndpoint = .{},
@@ -423,13 +428,63 @@ pub const RuntimeOptions = struct {
     extract_provider: providers.ProviderEndpoint = .{},
     /// Optional cross-encoder stage of memory.retrieve and memory.answer.
     reranker: providers.ProviderEndpoint = .{},
+    /// Whether the host drains long-term jobs between requests with
+    /// `startBackgroundWork`. Off, jobs run only when a caller asks.
+    background_workers: bool = false,
 };
+
+/// Called from a worker thread when the last provider call of a background
+/// batch returns, so the host can wake and call `finishBackgroundWork`.
+pub const BackgroundNotify = struct {
+    context: *anyopaque,
+    wake: *const fn (context: *anyopaque) void,
+};
+
+/// Jobs of one kind whose provider calls run off the request path.
+const BackgroundBatch = struct {
+    allocator: std.mem.Allocator,
+    leases: []jobs.LeaseResult,
+    tasks: []ExtractTask = &.{},
+    group: std.Io.Group = .init,
+    /// Provider calls that have not returned yet.
+    remaining: std.atomic.Value(usize),
+    notify: ?BackgroundNotify,
+
+    fn destroy(self: *BackgroundBatch) void {
+        const allocator = self.allocator;
+        for (self.tasks) |*task| task.deinit(allocator);
+        allocator.free(self.tasks);
+        jobs.freeLeaseResults(allocator, self.leases);
+        allocator.destroy(self);
+    }
+};
+
+/// Owner recorded on jobs the daemon leases for itself.
+const background_owner = "quipu-daemon";
+
+/// How long the background worker waits after a batch in which no provider
+/// call got a reply; doubles on each such batch up to the maximum.
+const background_backoff_initial_ms: i64 = 30_000;
+const background_backoff_max_ms: i64 = 600_000;
 
 pub const Runtime = struct {
     store: storage.Adapter,
     health: protocol.Health,
     options: RuntimeOptions = .{},
     next_id: u64 = 1,
+    /// The batch of long-term jobs in flight, if any.
+    background: ?*BackgroundBatch = null,
+    background_notify: ?BackgroundNotify = null,
+    /// Whether pending jobs may exist. Cleared when a pass finds none, so an
+    /// idle daemon does not scan its jobs after every request.
+    background_dirty: bool = true,
+    /// Whether leases left by an earlier run of this daemon were released.
+    background_recovered: bool = false,
+    /// The current wait after a batch the provider did not answer; 0 once a
+    /// batch gets a reply.
+    background_backoff_ms: i64 = 0,
+    /// No batch starts before this time.
+    background_retry_at_ms: i64 = 0,
 
     pub fn init(store: storage.Adapter, health: protocol.Health) Runtime {
         return .{ .store = store, .health = health };
@@ -457,13 +512,140 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
-        _ = self;
+        self.cancelBackgroundWork();
     }
 
     /// Wall-clock milliseconds for job leases; 0 without an Io.
     fn nowMs(self: *const Runtime) i64 {
         const io = self.options.io orelse return 0;
         return std.Io.Timestamp.now(io, .real).toMilliseconds();
+    }
+
+    /// Whether `startBackgroundWork` can do anything: the host asked for it,
+    /// there is an Io to run calls on, and a chat model to extract with.
+    pub fn backgroundEnabled(self: *const Runtime) bool {
+        return self.options.background_workers and self.options.io != null and extractProviderUsable(self.options.extract_provider);
+    }
+
+    /// Leases the oldest pending extract jobs and starts their provider calls
+    /// on other threads, then returns: requests are served while the calls
+    /// run. One batch is in flight at a time. Returns whether a batch started.
+    ///
+    /// Storage is only touched here and in `finishBackgroundWork`, both on
+    /// the caller's thread.
+    pub fn startBackgroundWork(self: *Runtime, allocator: std.mem.Allocator) !bool {
+        if (self.background != null or !self.background_dirty or !self.backgroundEnabled()) return false;
+        if (self.nowMs() < self.background_retry_at_ms) return false;
+        const io = self.options.io.?;
+        const worker_kind = streams.workerKindForStream(streams.extract_requested);
+        if (!self.background_recovered) {
+            _ = try jobs.releaseOwnedLeases(allocator, self.store, background_owner);
+            self.background_recovered = true;
+        }
+        _ = try jobs.reclaimExpiredLeases(allocator, self.store, self.nowMs());
+        const leases = try jobs.leasePendingJobs(allocator, self.store, .{
+            .worker_kind = worker_kind,
+            .owner = background_owner,
+            .now_ms = self.nowMs(),
+            .limit = default_extract_concurrency,
+        });
+        if (leases.len == 0) {
+            jobs.freeLeaseResults(allocator, leases);
+            self.background_dirty = false;
+            return false;
+        }
+        errdefer {
+            for (leases) |lease| jobs.releaseLease(allocator, self.store, lease.qid) catch {};
+            jobs.freeLeaseResults(allocator, leases);
+        }
+        const tasks = try allocator.alloc(ExtractTask, leases.len);
+        for (tasks, leases) |*task, lease| task.* = .{ .lease = lease };
+        errdefer {
+            for (tasks) |*task| task.deinit(allocator);
+            allocator.free(tasks);
+        }
+        try self.prepareExtractTasks(allocator, tasks);
+
+        const batch = try allocator.create(BackgroundBatch);
+        batch.* = .{
+            .allocator = allocator,
+            .leases = leases,
+            .tasks = tasks,
+            .remaining = .init(tasks.len),
+            .notify = self.background_notify,
+        };
+        self.background = batch;
+        const endpoint = self.options.extract_provider;
+        for (tasks) |*task| {
+            batch.group.concurrent(io, backgroundCall, .{ batch, task, allocator, io, endpoint }) catch
+                backgroundCall(batch, task, allocator, io, endpoint);
+        }
+        return true;
+    }
+
+    /// Whether a batch is in flight.
+    pub fn backgroundActive(self: *const Runtime) bool {
+        return self.background != null;
+    }
+
+    /// Whether every provider call of the batch in flight has returned, so
+    /// `finishBackgroundWork` will not wait.
+    pub fn backgroundReady(self: *const Runtime) bool {
+        const batch = self.background orelse return false;
+        return batch.remaining.load(.acquire) == 0;
+    }
+
+    /// Waits for the batch's provider calls, then grounds the replies and
+    /// writes the results. Null when no batch is in flight.
+    ///
+    /// A batch in which every call failed before a reply came back says the
+    /// provider is unreachable or misconfigured, not that the jobs are bad:
+    /// they return to pending with their attempts intact and the worker
+    /// waits before the next batch. One failed call among answered ones is
+    /// that job's failure and uses an attempt.
+    pub fn finishBackgroundWork(self: *Runtime, allocator: std.mem.Allocator) !?BackgroundResult {
+        const batch = self.background orelse return null;
+        self.background = null;
+        defer batch.destroy();
+        if (self.options.io) |io| batch.group.await(io) catch {};
+
+        var calls: usize = 0;
+        var called: usize = 0;
+        var unanswered: usize = 0;
+        var last_error: ?[]const u8 = null;
+        for (batch.tasks) |task| {
+            if (task.calls == 0) continue;
+            called += 1;
+            calls += task.calls;
+            if (!task.unanswered) continue;
+            unanswered += 1;
+            last_error = @errorName(task.failure.?);
+        }
+        if (called > 0 and unanswered == called) {
+            for (batch.leases) |lease| try jobs.releaseLease(allocator, self.store, lease.qid);
+            self.background_backoff_ms = if (self.background_backoff_ms == 0)
+                background_backoff_initial_ms
+            else
+                @min(self.background_backoff_ms * 2, background_backoff_max_ms);
+            self.background_retry_at_ms = self.nowMs() + self.background_backoff_ms;
+            return .{ .extract = .{ .leasedCount = batch.leases.len, .failedCount = unanswered, .calls = calls, .lastError = last_error } };
+        }
+        self.background_backoff_ms = 0;
+        self.background_retry_at_ms = 0;
+        // Jobs the failed write did not settle go back to pending.
+        errdefer for (batch.leases) |lease| jobs.releaseLease(allocator, self.store, lease.qid) catch {};
+        var result = ExtractJobRunResult{ .leasedCount = batch.leases.len };
+        try self.applyExtractTasks(allocator, batch.tasks, &result);
+        return .{ .extract = result };
+    }
+
+    /// Stops the batch in flight and gives its jobs back unrun.
+    pub fn cancelBackgroundWork(self: *Runtime) void {
+        const batch = self.background orelse return;
+        self.background = null;
+        if (self.options.io) |io| batch.group.cancel(io);
+        for (batch.leases) |lease| jobs.releaseLease(batch.allocator, self.store, lease.qid) catch {};
+        batch.destroy();
     }
 
     pub fn dispatch(self: *Runtime, allocator: std.mem.Allocator, request_json: []const u8) ![]u8 {
@@ -523,9 +705,9 @@ pub const Runtime = struct {
                 .schemaVersion = self.health.schema_version,
                 .storage = storageHealth(self.store.capabilities()),
                 .workers = .{
-                    .extractor = if (extractProviderUsable(self.options.extract_provider)) "running" else "unavailable",
+                    .extractor = if (self.backgroundEnabled()) "running" else if (extractProviderUsable(self.options.extract_provider)) "stopped" else "unavailable",
                     .consolidator = "unavailable",
-                    .entityResolver = if (self.options.entity_provider.kind == .none) "unavailable" else "running",
+                    .entityResolver = if (self.options.entity_provider.kind == .none) "unavailable" else "stopped",
                     .answerer = if (self.options.answer_provider.kind == .none) "unavailable" else "running",
                 },
                 .capabilities = .{
@@ -822,6 +1004,7 @@ pub const Runtime = struct {
                 .after_sequence = if (extract_event.sequence > 0) extract_event.sequence - 1 else 0,
                 .limit = 1,
             });
+            self.background_dirty = true;
             try queued_jobs.append(allocator, extract_job_qid);
         }
         if (self.options.entity_provider.kind != .none and message_qids.items.len > 0) {
@@ -3157,6 +3340,12 @@ pub const Runtime = struct {
     /// reads and writes stay on the calling thread.
     pub fn runExtractJobs(self: *Runtime, allocator: std.mem.Allocator, owner: []const u8, limit: usize, concurrency: usize) !ExtractJobRunResult {
         if (!extractProviderUsable(self.options.extract_provider)) return error.ProviderUnavailable;
+        // Jobs the daemon already started in the background finish first, so
+        // this call returns only when every extract job has run.
+        var result = ExtractJobRunResult{};
+        if (try self.finishBackgroundWork(allocator)) |finished| switch (finished) {
+            .extract => |extracted| result = extracted,
+        };
         const worker_kind = streams.workerKindForStream(streams.extract_requested);
         const materialized = try jobs.materializeStream(allocator, self.store, streams.extract_requested, worker_kind, .{ .limit = limit });
         _ = try jobs.reclaimExpiredLeases(allocator, self.store, self.nowMs());
@@ -3168,7 +3357,8 @@ pub const Runtime = struct {
         });
         defer jobs.freeLeaseResults(allocator, leases);
 
-        var result = ExtractJobRunResult{ .materializedCount = materialized.createdCount, .leasedCount = leases.len };
+        result.materializedCount += materialized.createdCount;
+        result.leasedCount += leases.len;
         const batch_size = @max(concurrency, 1);
         var start: usize = 0;
         while (start < leases.len) : (start += batch_size) {
@@ -3184,16 +3374,27 @@ pub const Runtime = struct {
             for (tasks) |*task| task.deinit(allocator);
             allocator.free(tasks);
         }
+        try self.prepareExtractTasks(allocator, tasks);
+        self.callExtractTasks(allocator, tasks);
+        try self.applyExtractTasks(allocator, tasks, result);
+    }
+
+    /// Loads each task's source messages. A task that cannot be prepared
+    /// carries its failure and makes no provider call.
+    fn prepareExtractTasks(self: *Runtime, allocator: std.mem.Allocator, tasks: []ExtractTask) !void {
         for (tasks) |*task| {
             self.prepareExtractTask(allocator, task) catch |err| {
                 if (err == error.OutOfMemory) return err;
                 task.failure = err;
             };
         }
-        self.callExtractTasks(allocator, tasks);
+    }
 
-        // Ground every reply, then embed all accepted claims in batched
-        // requests before the writes (putNode would embed them one by one).
+    /// The storage half of a batch, after its provider calls: grounds every
+    /// reply, writes the accepted claims and settles each job.
+    fn applyExtractTasks(self: *Runtime, allocator: std.mem.Allocator, tasks: []ExtractTask, result: *ExtractJobRunResult) !void {
+        // Embed all accepted claims in batched requests before the writes
+        // (putNode would embed them one by one).
         var texts = std.ArrayList([]const u8).empty;
         defer texts.deinit(allocator);
         for (tasks) |*task| {
@@ -3482,6 +3683,8 @@ const ExtractTask = struct {
     grounding: ?fact_extraction.Grounding = null,
     calls: usize = 0,
     failure: ?anyerror = null,
+    /// The failure came from the provider call itself: no reply to judge.
+    unanswered: bool = false,
 
     fn sourceMessages(self: *const ExtractTask, allocator: std.mem.Allocator) ![]fact_extraction.SourceMessage {
         const messages = try allocator.alloc(fact_extraction.SourceMessage, self.sources.items.len);
@@ -3515,6 +3718,7 @@ fn callExtractTask(task: *ExtractTask, allocator: std.mem.Allocator, io: ?std.Io
             .json_mode = true,
         }) catch |err| {
             task.failure = err;
+            task.unanswered = true;
             return;
         };
         defer allocator.free(reply);
@@ -3528,6 +3732,18 @@ fn callExtractTask(task: *ExtractTask, allocator: std.mem.Allocator, io: ?std.Io
         return;
     }
     task.failure = error.MalformedExtraction;
+}
+
+/// One provider call of a background batch, on a worker thread. The last
+/// call to return wakes the host.
+fn backgroundCall(batch: *BackgroundBatch, task: *ExtractTask, allocator: std.mem.Allocator, io: std.Io, endpoint: providers.ProviderEndpoint) void {
+    // Read before the count drops: the batch may be finished and freed as
+    // soon as it reaches zero and this function returns.
+    const notify = batch.notify;
+    callExtractTask(task, allocator, io, endpoint);
+    if (batch.remaining.fetchSub(1, .acq_rel) == 1) {
+        if (notify) |hook| hook.wake(hook.context);
+    }
 }
 
 /// An extract provider must be a chat model; `deterministic` cannot extract.
@@ -8736,3 +8952,191 @@ test "forgetting a message tombstones its assertions" {
     defer allocator.free(kept);
     try std.testing.expect(std.mem.indexOf(u8, kept, "\"type\":\"assertion\"") != null);
 }
+
+/// Extraction model for the background worker tests. Its calls arrive on
+/// worker threads, and each waits until `open` is set.
+const BackgroundTestExtractor = struct {
+    calls: std.atomic.Value(usize) = .init(0),
+    open: std.atomic.Value(bool) = .init(true),
+    wakes: std.atomic.Value(usize) = .init(0),
+    /// Fail every call before a reply, as an unreachable provider does.
+    down: bool = false,
+
+    fn endpoint(self: *BackgroundTestExtractor) providers.ProviderEndpoint {
+        return .{
+            .kind = .callback,
+            .name = "test-extractor",
+            .model = "test-extract-model",
+            .callback = .{ .context = self, .respond = respond },
+        };
+    }
+
+    fn respond(context: ?*anyopaque, allocator: std.mem.Allocator, turn: providers.ChatTurn) anyerror![]u8 {
+        const self: *BackgroundTestExtractor = @ptrCast(@alignCast(context.?));
+        _ = self.calls.fetchAdd(1, .monotonic);
+        while (!self.open.load(.acquire)) std.atomic.spinLoopHint();
+        if (self.down) return error.ProviderHttpError;
+        for (fact_test_replies) |pair| {
+            if (std.mem.indexOf(u8, turn.user_content, pair[0]) != null) return allocator.dupe(u8, pair[1]);
+        }
+        return allocator.dupe(u8, "{\"assertions\":[]}");
+    }
+
+    fn notify(self: *BackgroundTestExtractor) BackgroundNotify {
+        return .{ .context = self, .wake = wake };
+    }
+
+    fn wake(context: *anyopaque) void {
+        const self: *BackgroundTestExtractor = @ptrCast(@alignCast(context));
+        _ = self.wakes.fetchAdd(1, .monotonic);
+    }
+};
+
+fn countJobs(store: storage.Adapter, status: []const u8) !usize {
+    var iterator = store.iterateNodes(std.testing.allocator, .{ .label = "Job", .where = &.{.{ .name = "status", .value = status }} });
+    defer iterator.deinit();
+    var count: usize = 0;
+    while (try iterator.next()) |_| count += 1;
+    return count;
+}
+
+fn expectExtractorState(runtime: *Runtime, state: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const health = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
+    defer allocator.free(health);
+    const expected = try std.fmt.allocPrint(allocator, "\"extractor\":\"{s}\"", .{state});
+    defer allocator.free(expected);
+    try std.testing.expect(std.mem.indexOf(u8, health, expected) != null);
+}
+
+test "background work extracts between requests and memory.extract.run flushes it" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+    var model = BackgroundTestExtractor{};
+    var runtime = Runtime.initWithOptions(store, harness.health(), .{
+        .io = std.testing.io,
+        .extract_provider = model.endpoint(),
+        .background_workers = true,
+    });
+    defer runtime.deinit();
+    runtime.background_notify = model.notify();
+    try expectExtractorState(&runtime, "running");
+    const sessions = try rememberFactSessions(&runtime);
+    defer sessions.deinit();
+
+    // The model has not answered: the batch is in flight, its jobs are
+    // leased, and requests are served from what is already stored.
+    model.open.store(false, .release);
+    try std.testing.expect(try runtime.startBackgroundWork(allocator));
+    try std.testing.expect(runtime.backgroundActive());
+    try std.testing.expect(!runtime.backgroundReady());
+    try std.testing.expect(!try runtime.startBackgroundWork(allocator));
+    try std.testing.expectEqual(@as(usize, 2), try countJobs(store, "leased"));
+    const during = try searchAssertions(&runtime, "apartment", "fts");
+    defer allocator.free(during);
+    try std.testing.expect(std.mem.indexOf(u8, during, "\"type\":\"assertion\"") == null);
+
+    model.open.store(true, .release);
+    const finished = (try runtime.finishBackgroundWork(allocator)).?.extract;
+    try std.testing.expectEqual(@as(usize, 2), finished.leasedCount);
+    try std.testing.expectEqual(@as(usize, 2), finished.succeededCount);
+    try std.testing.expectEqual(@as(usize, 2), finished.calls);
+    try std.testing.expectEqual(@as(usize, 4), finished.assertionsWritten);
+    try std.testing.expectEqual(@as(usize, 1), model.wakes.load(.monotonic));
+    try std.testing.expect(!runtime.backgroundActive());
+    try std.testing.expectEqual(@as(usize, 0), try countJobs(store, "leased"));
+    try std.testing.expectEqual(@as(usize, 0), try countJobs(store, "pending"));
+    const after = try searchAssertions(&runtime, "apartment", "fts");
+    defer allocator.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "\"type\":\"assertion\"") != null);
+
+    // Nothing is pending, so the next pass starts nothing and stops looking
+    // until a memory arrives.
+    try std.testing.expect(!try runtime.startBackgroundWork(allocator));
+    try std.testing.expect(!runtime.background_dirty);
+    const more = try runtime.dispatch(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r3\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:facts\"},\"sessionId\":\"s-cat\",\"messages\":[{\"role\":\"user\",\"content\":\"I adopted a cat named Miso last week.\",\"createdAt\":\"2023-03-12T09:00:00Z\"}]}}",
+    );
+    defer allocator.free(more);
+    try std.testing.expect(runtime.background_dirty);
+
+    // memory.extract.run waits for the batch in flight and reports its jobs.
+    try std.testing.expect(try runtime.startBackgroundWork(allocator));
+    const run = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x1\",\"method\":\"memory.extract.run\",\"params\":{\"owner\":\"test\"}}");
+    defer allocator.free(run);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"leasedCount\":1,\"succeededCount\":1,\"failedCount\":0") != null);
+    try std.testing.expect(!runtime.backgroundActive());
+    try std.testing.expectEqual(@as(usize, 3), model.calls.load(.monotonic));
+
+    // Without the background switch the same provider waits to be asked.
+    var manual = Runtime.initWithOptions(store, harness.health(), .{ .io = std.testing.io, .extract_provider = model.endpoint() });
+    defer manual.deinit();
+    try expectExtractorState(&manual, "stopped");
+    try std.testing.expect(!try manual.startBackgroundWork(allocator));
+    var unconfigured = Runtime.init(store, harness.health());
+    try expectExtractorState(&unconfigured, "unavailable");
+}
+
+test "background work keeps jobs retryable when the provider is down or the daemon stops" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+    var model = BackgroundTestExtractor{ .down = true };
+    const options = RuntimeOptions{
+        .io = std.testing.io,
+        .extract_provider = model.endpoint(),
+        .background_workers = true,
+    };
+    var runtime = Runtime.initWithOptions(store, harness.health(), options);
+    defer runtime.deinit();
+    const sessions = try rememberFactSessions(&runtime);
+    defer sessions.deinit();
+
+    // No call got a reply: the jobs go back unspent and the worker waits.
+    try std.testing.expect(try runtime.startBackgroundWork(allocator));
+    const failed = (try runtime.finishBackgroundWork(allocator)).?.extract;
+    try std.testing.expectEqual(@as(usize, 2), failed.failedCount);
+    try std.testing.expectEqual(@as(usize, 0), failed.succeededCount);
+    try std.testing.expectEqualStrings("ProviderHttpError", failed.lastError.?);
+    try std.testing.expectEqual(@as(usize, 2), try countJobs(store, "pending"));
+    const job = (try store.getNode(allocator, sessions.flat_job)) orelse return error.TestUnexpectedResult;
+    defer store.freeNode(allocator, job);
+    try std.testing.expect(std.mem.indexOf(u8, job.properties_json, "\"attempts\":0") != null);
+    try std.testing.expect(!try runtime.startBackgroundWork(allocator));
+    try std.testing.expectEqual(background_backoff_initial_ms, runtime.background_backoff_ms);
+
+    // The wait is over and the provider answers, but the daemon stops before
+    // the batch is written: nothing is stored and the jobs stay pending.
+    runtime.background_retry_at_ms = 0;
+    model.down = false;
+    try std.testing.expect(try runtime.startBackgroundWork(allocator));
+    while (!runtime.backgroundReady()) std.atomic.spinLoopHint();
+    runtime.cancelBackgroundWork();
+    try std.testing.expect(!runtime.backgroundActive());
+    try std.testing.expectEqual(@as(usize, 2), try countJobs(store, "pending"));
+    const none = try searchAssertions(&runtime, "apartment", "fts");
+    defer allocator.free(none);
+    try std.testing.expect(std.mem.indexOf(u8, none, "\"type\":\"assertion\"") == null);
+
+    // A daemon killed mid-batch leaves its leases behind. The next one
+    // releases them at startup and runs the jobs.
+    const orphaned = try jobs.leasePendingJobs(allocator, store, .{
+        .worker_kind = streams.workerKindForStream(streams.extract_requested),
+        .owner = background_owner,
+        .now_ms = runtime.nowMs(),
+    });
+    jobs.freeLeaseResults(allocator, orphaned);
+    try std.testing.expectEqual(@as(usize, 2), try countJobs(store, "leased"));
+    var restarted = Runtime.initWithOptions(store, harness.health(), options);
+    defer restarted.deinit();
+    try std.testing.expect(try restarted.startBackgroundWork(allocator));
+    const recovered = (try restarted.finishBackgroundWork(allocator)).?.extract;
+    try std.testing.expectEqual(@as(usize, 2), recovered.succeededCount);
+    try std.testing.expectEqual(@as(usize, 4), recovered.assertionsWritten);
+    try std.testing.expectEqual(@as(usize, 0), try countJobs(store, "leased"));
+}
+

@@ -68,8 +68,12 @@ quipu --db /tmp/quipu.lattice jobs materialize --after 100 --limit 500 quipu.aud
 ```
 
 This gives the current single-process prototype the same durable stream-to-job
-boundary that later extractor, consolidation, forgetting, and feedback workers
-will use.
+boundary that later consolidation, forgetting, and feedback workers will use.
+The extractor already uses it: `quipu serve --background on` leases `extract`
+jobs between requests, makes the model calls on other threads, and writes the
+results back on the request thread (see
+[algorithms.md](algorithms.md#background-worker)). Job leases carry wall-clock
+times, and an expired lease returns its job to `pending`.
 
 ## CLI and Schema
 
