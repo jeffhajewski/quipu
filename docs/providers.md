@@ -31,7 +31,7 @@ quipu serve-stdio --answer-provider openrouter --answer-model anthropic/claude-3
 Quipu resolves provider settings in this order:
 
 1. CLI flags: `--llm-provider`, `--llm-model`, `--llm-base-url`, `--llm-api-key`, `--llm-temperature`, `--llm-max-tokens`.
-2. Specific CLI flags: `--answer-provider`, `--answer-model`, `--answer-url`, `--expand-provider`, `--expand-model`, `--expand-url`, `--entity-provider`, `--entity-model`, `--entity-url`, `--extract-provider`, `--extract-model`, `--extract-url`. A specific flag wins over the shared `--llm-*` value.
+2. Specific CLI flags: `--answer-provider`, `--answer-model`, `--answer-url`, `--expand-provider`, `--expand-model`, `--expand-url`, `--entity-provider`, `--entity-model`, `--entity-url`, `--extract-provider`, `--extract-model`, `--extract-url`, `--pattern-provider`, `--pattern-model`, `--pattern-url`. A specific flag wins over the shared `--llm-*` value.
 3. Environment variables: `QUIPU_LLM_PROVIDER`, `QUIPU_LLM_MODEL`, `QUIPU_LLM_BASE_URL`, `QUIPU_LLM_API_KEY`, plus provider-specific keys.
 4. Config file: `./quipu.yaml`, then `~/.quipu/config.yaml`, or an explicit `--config PATH`.
 5. Defaults: an API-key provider auto-detected from the environment, Ollama if localhost is available, otherwise deterministic. In deterministic mode `memory.answer` returns the top current derived fact's value, or else the top raw evidence text.
@@ -254,18 +254,34 @@ embedding provider. It runs in the background worker, with
 `workers.consolidator` reports `running`, `stopped` or `unavailable` the same
 way as the extractor.
 
-Pattern jobs use the same model and need no flag (see
-[algorithms.md](algorithms.md#pattern-nodes)). A `pattern` job is queued for
+Pattern jobs use the extract model unless they are given their own (see
+[algorithms.md](algorithms.md#pattern-nodes)). Proposing a generalisation is
+the step a stronger model is worth: on eight test journals GPT-4o found six
+of eight planted patterns and GPT-4o-mini four.
+
+| Flag | Environment | Default |
+| --- | --- | --- |
+| `--pattern-provider ID` | `QUIPU_PATTERN_PROVIDER` | the extract provider |
+| `--pattern-url URL` | `QUIPU_PATTERN_URL` | the extract URL |
+| `--pattern-model MODEL` | `QUIPU_PATTERN_MODEL` | the extract model |
+
+A model or URL alone keeps the extract provider for the rest, so
+`--pattern-model openai/gpt-4o` runs pattern jobs on a stronger model at the
+same endpoint and leaves extraction on the cheaper one. Whether pattern nodes
+are built is not a setting.
+
+A `pattern` job is queued for
 the scope after each extracted conversation, on a store that embeds text. It
 sends the embedding provider the sentences of messages not yet indexed, and
-the extract model the sentences of each group of recurring occasions: one
+the pattern model the sentences of each group of recurring occasions: one
 call to name a group, one to propose generalisations, and one for every three
 occasions each generalisation is checked against. Only occasions that are new
 are sent again. Like the other jobs it runs in the background worker, with
 `quipu jobs run patterns`, or with `memory.patterns.run`, so nothing is sent
 until extraction itself has been asked for. `system.health` reports
-`capabilities.patterns: {"available", "promptVersion"}`; `available` is false
-on a store without embeddings. `workers.patterns` is `running`, `stopped` or
+`capabilities.patterns: {"available", "promptVersion", "model"}`; `available`
+is false on a store without embeddings, and `model` is the model the jobs
+call. `workers.patterns` is `running`, `stopped` or
 `unavailable` the same way as the extractor, and `unavailable` on such a
 store.
 

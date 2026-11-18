@@ -553,6 +553,9 @@ pub const RuntimeOptions = struct {
     entity_provider: providers.ProviderEndpoint = .{},
     /// Chat model for the `extract` job worker (LLM fact extraction).
     extract_provider: providers.ProviderEndpoint = .{},
+    /// Chat model for the pattern jobs; unset means the extract provider.
+    /// Proposing a generalisation is the step a stronger model is worth.
+    pattern_provider: providers.ProviderEndpoint = .{},
     /// Optional cross-encoder stage of memory.retrieve and memory.answer.
     reranker: providers.ProviderEndpoint = .{},
     /// Whether the host drains long-term jobs between requests with
@@ -922,7 +925,7 @@ pub const Runtime = struct {
                 .workers = .{
                     .extractor = if (self.backgroundEnabled()) "running" else if (extractProviderUsable(self.options.extract_provider)) "stopped" else "unavailable",
                     .consolidator = if (!self.options.consolidate_updates or !extractProviderUsable(self.options.extract_provider)) "unavailable" else if (self.backgroundEnabled()) "running" else "stopped",
-                    .patterns = if (!self.store.capabilities().vector or !extractProviderUsable(self.options.extract_provider)) "unavailable" else if (self.backgroundEnabled()) "running" else "stopped",
+                    .patterns = if (!self.store.capabilities().vector or !extractProviderUsable(self.patternProvider())) "unavailable" else if (self.backgroundEnabled()) "running" else "stopped",
                     .entityResolver = if (self.options.entity_provider.kind == .none) "unavailable" else "stopped",
                     .answerer = if (self.options.answer_provider.kind == .none) "unavailable" else "running",
                 },
@@ -944,6 +947,7 @@ pub const Runtime = struct {
                     .patterns = .{
                         .available = self.store.capabilities().vector,
                         .promptVersion = patterns.prompt_version,
+                        .model = if (extractProviderUsable(self.patternProvider())) self.patternProvider().model else null,
                     },
                     .queryExpansion = .{
                         .modes = [_][]const u8{ "off", "rules", "llm" },
@@ -1788,7 +1792,7 @@ pub const Runtime = struct {
         if (requested_limit < 1) {
             return errorResponse(allocator, id, "invalid_request", "limit must be positive");
         }
-        if (!extractProviderUsable(self.options.extract_provider)) {
+        if (!extractProviderUsable(self.patternProvider())) {
             return errorResponse(allocator, id, "provider_error", "no extract provider configured; set --extract-provider or --llm-provider");
         }
         const result = try self.runPatternJobs(allocator, owner, @intCast(requested_limit));
@@ -1800,8 +1804,8 @@ pub const Runtime = struct {
                 .succeededCount = result.succeededCount,
                 .failedCount = result.failedCount,
                 .lastError = result.lastError,
-                .provider = self.options.extract_provider.name,
-                .model = self.options.extract_provider.model,
+                .provider = self.patternProvider().name,
+                .model = self.patternProvider().model,
                 .promptVersion = patterns.prompt_version,
                 .calls = result.calls,
                 .scopes = result.scopes,
@@ -4617,8 +4621,13 @@ pub const Runtime = struct {
     /// again. Every node is evidenced by the messages of its occasions, so
     /// forgetting one of them removes it and queues a rebuild from what is
     /// left.
+    fn patternProvider(self: *const Runtime) providers.ProviderEndpoint {
+        if (self.options.pattern_provider.kind != .none) return self.options.pattern_provider;
+        return self.options.extract_provider;
+    }
+
     pub fn runPatternJobs(self: *Runtime, allocator: std.mem.Allocator, owner: []const u8, limit: usize) !PatternJobRunResult {
-        if (!extractProviderUsable(self.options.extract_provider)) return error.ProviderUnavailable;
+        if (!extractProviderUsable(self.patternProvider())) return error.ProviderUnavailable;
         var result = PatternJobRunResult{};
         if (try self.finishBackgroundWork(allocator)) |finished| switch (finished) {
             .patterns => |built| result = built,
@@ -4651,7 +4660,7 @@ pub const Runtime = struct {
 
         const tasks = try self.preparePatternTasks(allocator, leases);
         defer freePatternTasks(allocator, tasks);
-        for (tasks) |*task| callPatternTask(task, allocator, self.options.io, self.options.extract_provider);
+        for (tasks) |*task| callPatternTask(task, allocator, self.options.io, self.patternProvider());
         try self.applyPatternTasks(allocator, tasks, result);
     }
 
@@ -4683,7 +4692,7 @@ pub const Runtime = struct {
             .notify = self.background_notify,
         };
         self.background = batch;
-        const endpoint = self.options.extract_provider;
+        const endpoint = self.patternProvider();
         for (tasks) |*task| {
             batch.group.concurrent(io, backgroundPatternCall, .{ batch, task, allocator, io, endpoint }) catch
                 backgroundPatternCall(batch, task, allocator, io, endpoint);
@@ -4954,8 +4963,8 @@ pub const Runtime = struct {
 
             const summary = .{
                 .promptVersion = patterns.prompt_version,
-                .provider = self.options.extract_provider.name,
-                .model = self.options.extract_provider.model,
+                .provider = self.patternProvider().name,
+                .model = self.patternProvider().model,
                 .calls = task.calls,
                 .skipped = task.skipped,
                 .coalescedJobs = task.leases.items.len,
@@ -5090,8 +5099,8 @@ pub const Runtime = struct {
             .userId = task.scope.user_id,
             .agentId = task.scope.agent_id,
             .projectId = task.scope.project_id,
-            .consolidatorProvider = self.options.extract_provider.name,
-            .consolidatorModel = self.options.extract_provider.model,
+            .consolidatorProvider = self.patternProvider().name,
+            .consolidatorModel = self.patternProvider().model,
             .promptVersion = patterns.prompt_version,
             .jobQid = task.leases.items[0].qid,
             .state = "current",
@@ -12264,12 +12273,13 @@ const PatternTestModel = struct {
     gate_calls: std.atomic.Value(usize) = .init(0),
     claims_calls: std.atomic.Value(usize) = .init(0),
     check_calls: std.atomic.Value(usize) = .init(0),
+    model: []const u8 = "test-extract-model",
 
     fn endpoint(self: *PatternTestModel) providers.ProviderEndpoint {
         return .{
             .kind = .callback,
             .name = "test-extractor",
-            .model = "test-extract-model",
+            .model = self.model,
             .callback = .{ .context = self, .respond = respond },
         };
     }
@@ -12393,7 +12403,7 @@ test "pattern jobs build a node from occasions and retrieval gives it to the que
     const health = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
     defer allocator.free(health);
     try std.testing.expect(std.mem.indexOf(u8, health, "\"patterns\":\"stopped\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, health, "\"patterns\":{\"available\":true,\"promptVersion\":\"quipu.patterns.v1\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"patterns\":{\"available\":true,\"promptVersion\":\"quipu.patterns.v1\",\"model\":\"test-extract-model\"}") != null);
 
     const first_loaf = try rememberLoaves(&runtime);
     defer allocator.free(first_loaf);
@@ -12679,4 +12689,33 @@ test "sentence indexes made by another embedding model are made again" {
     const fresh = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
     defer allocator.free(fresh);
     try std.testing.expect(std.mem.indexOf(u8, fresh, "from 8 occasions") != null);
+}
+
+test "pattern jobs call the pattern model when one is configured" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var small = PatternTestModel{};
+    var strong = PatternTestModel{ .model = "test-pattern-model" };
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{
+        .extract_provider = small.endpoint(),
+        .pattern_provider = strong.endpoint(),
+    });
+    defer runtime.deinit();
+
+    const health = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
+    defer allocator.free(health);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"patterns\":{\"available\":true,\"promptVersion\":\"quipu.patterns.v1\",\"model\":\"test-pattern-model\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"extractor\":{\"configured\":true,\"model\":\"test-extract-model\"") != null);
+
+    allocator.free(try rememberLoaves(&runtime));
+    const built = try runPatternPass(&runtime);
+    defer allocator.free(built);
+    try std.testing.expect(std.mem.indexOf(u8, built, "\"model\":\"test-pattern-model\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, built, "\"regularities\":1") != null);
+    try std.testing.expectEqual(@as(usize, 1), strong.gate_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), strong.claims_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 3), strong.check_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), small.gate_calls.load(.monotonic) + small.claims_calls.load(.monotonic) + small.check_calls.load(.monotonic));
 }

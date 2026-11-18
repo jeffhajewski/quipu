@@ -905,8 +905,9 @@ off the request thread when the background worker runs it. Retrieval reads
 every sentence index of the scope when the scope has a node to show, about
 30 ms at that size. Nothing checks that a proposed outcome is an outcome and
 not just another thing done the same day, so a group of chores can yield a
-true and useless regularity. A small extract model calls most groups a
-routine and finds fewer of the patterns a large one does; see
+true and useless regularity. A small model calls most groups a routine and
+finds fewer of the patterns a large one does, which is what `--pattern-model`
+is for; see
 [sota-sprint-results.md](sota-sprint-results.md#pattern-nodes-in-the-daemon-november-18).
 
 ## Forgetting V0

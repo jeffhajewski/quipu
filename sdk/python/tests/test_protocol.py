@@ -248,7 +248,7 @@ class ProtocolFixtureTests(unittest.TestCase):
         for params in ("memoryRetrieveParams", "memoryAnswerParams"):
             self.assertNotIn("patterns", defs[params]["properties"]["options"]["properties"])
         capability = defs["systemHealthResult"]["properties"]["capabilities"]["properties"]["patterns"]
-        self.assertEqual(capability["required"], ["available", "promptVersion"])
+        self.assertEqual(capability["required"], ["available", "promptVersion", "model"])
 
         fixture = json.loads((FIXTURE_DIR / "memory.retrieve.patterns.json").read_text())
         self.assertNotIn("patterns", fixture["request"]["params"]["options"])

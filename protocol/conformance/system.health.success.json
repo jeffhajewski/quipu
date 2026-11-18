@@ -47,7 +47,8 @@
         "timeAnchors": true,
         "patterns": {
           "available": false,
-          "promptVersion": "quipu.patterns.v1"
+          "promptVersion": "quipu.patterns.v1",
+          "model": null
         },
         "queryExpansion": {
           "modes": [

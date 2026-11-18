@@ -469,12 +469,13 @@
             },
             "patterns": {
               "type": "object",
-              "required": ["available", "promptVersion"],
+              "required": ["available", "promptVersion", "model"],
               "additionalProperties": false,
               "description": "Pattern nodes: what the background worker works out from occasions that recur. Built when the store embeds text and an extract provider is configured; memory.retrieve and memory.answer show one to a question it owns.",
               "properties": {
                 "available": { "type": "boolean", "description": "True when the store can embed sentences." },
-                "promptVersion": { "type": "string" }
+                "promptVersion": { "type": "string" },
+                "model": { "type": ["string", "null"], "description": "The chat model pattern jobs call: the pattern model when one is configured, otherwise the extract model. Null when neither is." }
               }
             },
             "queryExpansion": {

@@ -182,7 +182,7 @@ test("pattern nodes are part of every retrieve and answer context, with no optio
   for (const def of ["memoryRetrieveParams", "memoryAnswerParams"]) {
     assert.equal(schema.$defs[def].properties.options.properties.patterns, undefined);
   }
-  assert.deepEqual(schema.$defs.systemHealthResult.properties.capabilities.properties.patterns.required, ["available", "promptVersion"]);
+  assert.deepEqual(schema.$defs.systemHealthResult.properties.capabilities.properties.patterns.required, ["available", "promptVersion", "model"]);
 
   const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.retrieve.patterns.json"), "utf8"));
   assert.equal(fixture.request.params.options.patterns, undefined);

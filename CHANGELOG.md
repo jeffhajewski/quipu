@@ -68,7 +68,9 @@
   node evidenced by every message it counts: either the regularity with its
   counts, or the statement that the occasions were compared and nothing held.
   There is no option. It needs a store that embeds text and an extract
-  provider, and runs in the background worker, with `quipu jobs run patterns`
+  provider, uses the extract model unless `--pattern-model` (or
+  `--pattern-provider`, `--pattern-url`, `QUIPU_PATTERN_*`) names another,
+  and runs in the background worker, with `quipu jobs run patterns`
   or with `memory.patterns.run`. Sentence vectors are kept in `SentenceIndex`
   nodes, one per message, without the text.
 - `memory.retrieve` and `memory.answer` show a pattern node to a question it

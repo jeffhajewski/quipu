@@ -52,6 +52,9 @@ const RuntimeConfig = struct {
     extract_provider: ?[]const u8 = null,
     extract_url: ?[]const u8 = null,
     extract_model: ?[]const u8 = null,
+    pattern_provider: ?[]const u8 = null,
+    pattern_url: ?[]const u8 = null,
+    pattern_model: ?[]const u8 = null,
     /// `--background on|off`: whether `serve` drains long-term jobs itself.
     background: ?[]const u8 = null,
     /// `--consolidate on|off`: whether extraction queues consolidation jobs.
@@ -463,6 +466,33 @@ fn parseRuntimeConfig(args: []const [:0]const u8) RuntimeConfig {
             config.command_index += 1;
             break;
         }
+        if (std.mem.eql(u8, arg, "--pattern-provider")) {
+            if (config.command_index + 1 < args.len) {
+                config.pattern_provider = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--pattern-url")) {
+            if (config.command_index + 1 < args.len) {
+                config.pattern_url = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--pattern-model")) {
+            if (config.command_index + 1 < args.len) {
+                config.pattern_model = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
         if (std.mem.eql(u8, arg, "--consolidate")) {
             if (config.command_index + 1 < args.len) {
                 config.consolidate = args[config.command_index + 1];
@@ -724,8 +754,42 @@ fn runtimeOptionsFromConfig(
             "OPENROUTER_EXTRACT_MODEL",
             "openai/gpt-4o-mini",
         ),
+        .pattern_provider = patternEndpointFromConfig(allocator, io, environ_map, config, file_config),
         .reranker = rerankerEndpointFromConfig(environ_map, config),
     };
+}
+
+/// The provider for pattern jobs. With no `--pattern-*` flag or
+/// `QUIPU_PATTERN_*` variable it stays unset and the runtime uses the extract
+/// provider. A model or URL alone keeps the extract provider for the rest,
+/// so `--pattern-model` picks a stronger model on the same endpoint.
+fn patternEndpointFromConfig(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *std.process.Environ.Map,
+    config: RuntimeConfig,
+    file_config: FileConfig,
+) providers.ProviderEndpoint {
+    const provider = config.pattern_provider orelse environ_map.get("QUIPU_PATTERN_PROVIDER");
+    const url = config.pattern_url orelse environ_map.get("QUIPU_PATTERN_URL");
+    const model = config.pattern_model orelse environ_map.get("QUIPU_PATTERN_MODEL");
+    if (provider == null and url == null and model == null) return .{};
+    const same_provider = provider == null;
+    return providerEndpointFromConfig(
+        allocator,
+        io,
+        environ_map,
+        provider orelse config.extract_provider orelse environ_map.get("QUIPU_EXTRACT_PROVIDER"),
+        url orelse if (same_provider) config.extract_url orelse environ_map.get("QUIPU_EXTRACT_URL") else null,
+        model orelse if (same_provider) config.extract_model orelse environ_map.get("QUIPU_EXTRACT_MODEL") else null,
+        config,
+        file_config,
+        "QUIPU_PATTERN_PROVIDER",
+        "QUIPU_PATTERN_URL",
+        "QUIPU_PATTERN_MODEL",
+        "OPENROUTER_PATTERN_MODEL",
+        "openai/gpt-4o",
+    );
 }
 
 /// The provider for `options.queryExpansion: "llm"`. With no `--expand-*`
@@ -1539,7 +1603,7 @@ fn runCommand(
         return serveInline(io, allocator, runtime, stdout);
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--expand-provider PROVIDER] [--expand-url URL] [--expand-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--extract-provider openrouter|openai|anthropic|google|ollama|custom] [--extract-url URL] [--extract-model MODEL] [--background on|off] [--consolidate on|off] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams|leaks]... [--leaks] | jobs materialize|lease|complete|fail|run entity-resolve|extract|consolidate|patterns ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--expand-provider PROVIDER] [--expand-url URL] [--expand-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--extract-provider openrouter|openai|anthropic|google|ollama|custom] [--extract-url URL] [--extract-model MODEL] [--pattern-provider PROVIDER] [--pattern-url URL] [--pattern-model MODEL] [--background on|off] [--consolidate on|off] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams|leaks]... [--leaks] | jobs materialize|lease|complete|fail|run entity-resolve|extract|consolidate|patterns ... | rpc-stdin | serve\n", .{});
 }
 
 /// What the serve loop waits on: the next request, or word that background
