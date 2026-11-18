@@ -1001,6 +1001,10 @@ fn envF32(environ_map: *std.process.Environ.Map, key: []const u8) ?f32 {
     return std.fmt.parseFloat(f32, value) catch null;
 }
 
+fn wallClockMs(io: std.Io) i64 {
+    return std.Io.Timestamp.now(io, .real).toMilliseconds();
+}
+
 fn envBool(environ_map: *std.process.Environ.Map, key: []const u8) bool {
     const value = environ_map.get(key) orelse return false;
     return std.ascii.eqlIgnoreCase(value, "1") or
@@ -1168,9 +1172,10 @@ fn runCommand(
             return;
         }
         if (std.mem.eql(u8, args[command_index + 1], "lease")) {
-            const parsed = parseLeaseArgs(args[command_index + 2 ..]) catch {
+            var parsed = parseLeaseArgs(args[command_index + 2 ..]) catch {
                 return printCliError(stdout, allocator, "invalid jobs lease arguments");
             };
+            parsed.now_ms = wallClockMs(io);
             const leases = try jobs.leasePendingJobs(allocator, store, parsed);
             defer jobs.freeLeaseResults(allocator, leases);
             const response = try stringifyAlloc(allocator, .{
@@ -1186,7 +1191,7 @@ fn runCommand(
             const qid = parseJobQid(args[command_index + 2 ..]) catch {
                 return printCliError(stdout, allocator, "invalid jobs complete arguments");
             };
-            try jobs.completeJob(allocator, store, qid, 0);
+            try jobs.completeJob(allocator, store, qid, wallClockMs(io));
             const response = try stringifyAlloc(allocator, .{ .status = "ok", .jobQid = qid });
             defer allocator.free(response);
             try stdout.print("{s}\n", .{response});
@@ -1196,7 +1201,7 @@ fn runCommand(
             const parsed = parseFailArgs(args[command_index + 2 ..]) catch {
                 return printCliError(stdout, allocator, "invalid jobs fail arguments");
             };
-            const status = try jobs.failJob(allocator, store, parsed.qid, parsed.error_json, 0);
+            const status = try jobs.failJob(allocator, store, parsed.qid, parsed.error_json, wallClockMs(io));
             const response = try stringifyAlloc(allocator, .{ .status = status, .jobQid = parsed.qid });
             defer allocator.free(response);
             try stdout.print("{s}\n", .{response});

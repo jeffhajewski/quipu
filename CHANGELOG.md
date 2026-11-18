@@ -19,6 +19,9 @@
   ASCII-only index.
 - A store opened with different vector dimensions than it was created with
   fails with `VectorConfigMismatch`.
+- Job leases use wall-clock time (they used 0), and an expired lease returns
+  its job to `pending`, or dead-letters it once its attempts run out.
+  `quipu jobs lease|complete|fail` record real times too.
 - LLM fact extraction: `quipu jobs run extract` (and the operational
   `memory.extract.run` RPC) runs the queued `extract` jobs through a chat model
   configured with `--extract-provider`, `--extract-url` and `--extract-model`

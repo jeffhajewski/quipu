@@ -460,6 +460,12 @@ pub const Runtime = struct {
         _ = self;
     }
 
+    /// Wall-clock milliseconds for job leases; 0 without an Io.
+    fn nowMs(self: *const Runtime) i64 {
+        const io = self.options.io orelse return 0;
+        return std.Io.Timestamp.now(io, .real).toMilliseconds();
+    }
+
     pub fn dispatch(self: *Runtime, allocator: std.mem.Allocator, request_json: []const u8) ![]u8 {
         var parsed = std.json.parseFromSlice(Value, allocator, request_json, .{}) catch {
             return errorResponse(allocator, null, "invalid_request", "request body must be valid JSON");
@@ -3033,9 +3039,11 @@ pub const Runtime = struct {
             streams.workerKindForStream(streams.entity_resolve_requested),
             .{ .limit = limit },
         );
+        _ = try jobs.reclaimExpiredLeases(allocator, self.store, self.nowMs());
         const leases = try jobs.leasePendingJobs(allocator, self.store, .{
             .worker_kind = streams.workerKindForStream(streams.entity_resolve_requested),
             .owner = owner,
+            .now_ms = self.nowMs(),
             .limit = limit,
         });
         defer jobs.freeLeaseResults(allocator, leases);
@@ -3048,11 +3056,11 @@ pub const Runtime = struct {
                 last_error = @errorName(err);
                 const error_json = try std.fmt.allocPrint(allocator, "{{\"error\":\"{s}\"}}", .{@errorName(err)});
                 defer allocator.free(error_json);
-                _ = jobs.failJob(allocator, self.store, lease.qid, error_json, 0) catch {};
+                _ = jobs.failJob(allocator, self.store, lease.qid, error_json, self.nowMs()) catch {};
                 failed += 1;
                 continue;
             };
-            try jobs.completeJob(allocator, self.store, lease.qid, 0);
+            try jobs.completeJob(allocator, self.store, lease.qid, self.nowMs());
             succeeded += 1;
         }
 
@@ -3151,9 +3159,11 @@ pub const Runtime = struct {
         if (!extractProviderUsable(self.options.extract_provider)) return error.ProviderUnavailable;
         const worker_kind = streams.workerKindForStream(streams.extract_requested);
         const materialized = try jobs.materializeStream(allocator, self.store, streams.extract_requested, worker_kind, .{ .limit = limit });
+        _ = try jobs.reclaimExpiredLeases(allocator, self.store, self.nowMs());
         const leases = try jobs.leasePendingJobs(allocator, self.store, .{
             .worker_kind = worker_kind,
             .owner = owner,
+            .now_ms = self.nowMs(),
             .limit = limit,
         });
         defer jobs.freeLeaseResults(allocator, leases);
@@ -3209,7 +3219,7 @@ pub const Runtime = struct {
                 result.lastError = @errorName(err);
                 const error_json = try stringifyAlloc(allocator, .{ .@"error" = @errorName(err), .calls = task.calls });
                 defer allocator.free(error_json);
-                _ = jobs.failJob(allocator, self.store, task.lease.qid, error_json, 0) catch {};
+                _ = jobs.failJob(allocator, self.store, task.lease.qid, error_json, self.nowMs()) catch {};
                 continue;
             }
             const written = try self.writeExtractTask(allocator, task);
@@ -3329,7 +3339,7 @@ pub const Runtime = struct {
         };
         const result_json = try stringifyAlloc(allocator, summary);
         defer allocator.free(result_json);
-        try jobs.completeJobWithResult(allocator, self.store, task.lease.qid, 0, result_json);
+        try jobs.completeJobWithResult(allocator, self.store, task.lease.qid, self.nowMs(), result_json);
         const event_payload = try stringifyAlloc(allocator, .{
             .method = "memory.extract.completed",
             .jobQid = task.lease.qid,

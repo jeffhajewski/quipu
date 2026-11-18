@@ -254,6 +254,86 @@ pub fn failJob(allocator: std.mem.Allocator, store: storage.Adapter, qid: []cons
     return status;
 }
 
+/// Returns a leased job to pending without counting an attempt: the worker
+/// gave the job back before running it, as at shutdown. A job that is no
+/// longer leased is left alone.
+pub fn releaseLease(allocator: std.mem.Allocator, store: storage.Adapter, qid: []const u8) !void {
+    const node = (try store.getNode(allocator, qid)) orelse return;
+    defer store.freeNode(allocator, node);
+    if (!try propertyEquals(allocator, node.properties_json, "status", "leased")) return;
+    const view = try readJobView(allocator, node.properties_json);
+    defer freeJobView(allocator, view);
+    try writeJobState(allocator, store, node.qid, view, .{
+        .status = "pending",
+        .attempts = view.attempts,
+        .lease_owner = null,
+        .lease_until_ms = null,
+        .started_at_ms = null,
+        .completed_at_ms = null,
+        .error_json = null,
+    });
+}
+
+/// Gives back every job `owner` holds a lease on, attempts unchanged. A worker
+/// calls this at startup: leases under its own name were left by an earlier
+/// run of itself that never finished them. Returns how many were released.
+pub fn releaseOwnedLeases(allocator: std.mem.Allocator, store: storage.Adapter, owner: []const u8) !usize {
+    var owned = std.ArrayList([]u8).empty;
+    defer {
+        for (owned.items) |qid| allocator.free(qid);
+        owned.deinit(allocator);
+    }
+    {
+        var leased = store.iterateNodes(allocator, .{ .label = "Job", .where = &.{.{ .name = "status", .value = "leased" }} });
+        defer leased.deinit();
+        while (try leased.next()) |qid| {
+            const node = (try store.getNode(allocator, qid)) orelse continue;
+            defer store.freeNode(allocator, node);
+            if (!try propertyEquals(allocator, node.properties_json, "leaseOwner", owner)) continue;
+            const copy = try allocator.dupe(u8, qid);
+            owned.append(allocator, copy) catch |err| {
+                allocator.free(copy);
+                return err;
+            };
+        }
+    }
+    for (owned.items) |qid| try releaseLease(allocator, store, qid);
+    return owned.items.len;
+}
+
+/// Fails every leased job whose lease ended at or before `now_ms`, so a job
+/// whose worker died goes back to pending, or to the deadletter stream once
+/// its attempts run out. Returns how many leases expired.
+pub fn reclaimExpiredLeases(allocator: std.mem.Allocator, store: storage.Adapter, now_ms: i64) !usize {
+    var expired = std.ArrayList([]u8).empty;
+    defer {
+        for (expired.items) |qid| allocator.free(qid);
+        expired.deinit(allocator);
+    }
+    {
+        var leased = store.iterateNodes(allocator, .{ .label = "Job", .where = &.{.{ .name = "status", .value = "leased" }} });
+        defer leased.deinit();
+        while (try leased.next()) |qid| {
+            const node = (try store.getNode(allocator, qid)) orelse continue;
+            defer store.freeNode(allocator, node);
+            const lease_until = readPropertyInt(allocator, node.properties_json, "leaseUntilMs") catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => continue,
+            };
+            if (lease_until > now_ms) continue;
+            const owned = try allocator.dupe(u8, qid);
+            expired.append(allocator, owned) catch |err| {
+                allocator.free(owned);
+                return err;
+            };
+        }
+    }
+    for (expired.items) |qid| {
+        _ = try failJob(allocator, store, qid, "{\"error\":\"lease_expired\"}", now_ms);
+    }
+    return expired.items.len;
+}
+
 pub fn freeLeaseResults(allocator: std.mem.Allocator, results: []const LeaseResult) void {
     freeLeaseResultItems(allocator, results);
     allocator.free(results);
@@ -472,4 +552,46 @@ test "leases completes and deadletters jobs" {
     defer freeStreamEntries(std.testing.allocator, deadletters);
     try std.testing.expectEqual(@as(usize, 1), deadletters.len);
     try std.testing.expect(std.mem.indexOf(u8, deadletters[0].payload_json, "\"attempts\":1") != null);
+}
+
+test "an expired lease returns its job to pending and a released one keeps its attempts" {
+    const in_memory = @import("in_memory_storage.zig");
+    var adapter_state = in_memory.InMemoryAdapter.init(std.testing.allocator);
+    defer adapter_state.deinit();
+    const store = adapter_state.adapter();
+
+    _ = try store.appendStream(streams.extract_requested, "{\"turnQid\":\"q_turn_1\"}");
+    _ = try store.appendStream(streams.extract_requested, "{\"turnQid\":\"q_turn_2\"}");
+    _ = try materializeStream(std.testing.allocator, store, streams.extract_requested, "extract", .{ .max_attempts = 2 });
+
+    const first = try leasePendingJobs(std.testing.allocator, store, .{ .worker_kind = "extract", .owner = "worker-1", .now_ms = 100, .ttl_ms = 500, .limit = 2 });
+    defer freeLeaseResults(std.testing.allocator, first);
+    try std.testing.expectEqual(@as(usize, 2), first.len);
+
+    // A worker that gives a job back has not used an attempt.
+    try releaseLease(std.testing.allocator, store, first[1].qid);
+    try expectJob(store, first[1].qid, "\"status\":\"pending\"", "\"attempts\":0");
+
+    // A live lease is left alone; one past its end is failed back to pending.
+    try std.testing.expectEqual(@as(usize, 0), try reclaimExpiredLeases(std.testing.allocator, store, 599));
+    try expectJob(store, first[0].qid, "\"status\":\"leased\"", "\"attempts\":0");
+    try std.testing.expectEqual(@as(usize, 1), try reclaimExpiredLeases(std.testing.allocator, store, 600));
+    try expectJob(store, first[0].qid, "\"status\":\"pending\"", "\"attempts\":1");
+    try expectJob(store, first[0].qid, "lease_expired", "\"leaseUntilMs\":null");
+
+    // The second expiry uses up the job's attempts.
+    const second = try leasePendingJobs(std.testing.allocator, store, .{ .worker_kind = "extract", .owner = "worker-2", .now_ms = 1000, .ttl_ms = 500, .limit = 1 });
+    defer freeLeaseResults(std.testing.allocator, second);
+    try std.testing.expectEqualStrings(first[0].qid, second[0].qid);
+    try std.testing.expectEqual(@as(usize, 1), try reclaimExpiredLeases(std.testing.allocator, store, 5000));
+    try expectJob(store, first[0].qid, "\"status\":\"deadlettered\"", "\"attempts\":2");
+    try std.testing.expectEqual(@as(usize, 0), try reclaimExpiredLeases(std.testing.allocator, store, 9000));
+}
+
+fn expectJob(store: storage.Adapter, qid: []const u8, first: []const u8, second: []const u8) !void {
+    const node = (try store.getNode(std.testing.allocator, qid)) orelse return error.TestUnexpectedResult;
+    defer store.freeNode(std.testing.allocator, node);
+    errdefer std.debug.print("job {s}: {s}\n", .{ qid, node.properties_json });
+    try std.testing.expect(std.mem.indexOf(u8, node.properties_json, first) != null);
+    try std.testing.expect(std.mem.indexOf(u8, node.properties_json, second) != null);
 }
