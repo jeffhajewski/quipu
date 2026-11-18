@@ -37,6 +37,7 @@
         "currentFacts": [],
         "preferences": [],
         "procedural": [],
+        "patterns": [],
         "episodes": [
           {
             "qid": "q_msg_4",

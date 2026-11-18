@@ -8,6 +8,7 @@ const forgetting = @import("forgetting.zig");
 const in_memory_storage = if (build_options.enable_lattice) struct {} else @import("in_memory_storage.zig");
 const jobs = @import("jobs.zig");
 const lattice_storage = if (build_options.enable_lattice) @import("lattice_storage.zig") else struct {};
+const patterns = @import("patterns.zig");
 const protocol = @import("protocol.zig");
 const providers = @import("providers.zig");
 const query_expansion = @import("query_expansion.zig");
@@ -62,6 +63,19 @@ const max_consolidate_claims: usize = 32;
 const max_earlier_per_claim: usize = 3;
 const max_consolidate_earlier: usize = 30;
 const consolidate_search_limit: usize = 48;
+/// Pattern jobs: how many are leased at once (jobs for one scope are settled
+/// by one pass), how long a pass may hold them, and the most sentences one
+/// pass compares; the newest are kept.
+const pattern_lease_limit: usize = 256;
+const pattern_lease_ttl_ms: i64 = 30 * 60 * 1000;
+const max_pattern_sentences: usize = 20_000;
+/// Messages one pass may split and embed. Embedding is a provider call made
+/// between requests, so a store with a backlog is indexed over several
+/// passes, and nothing is grouped until it all is.
+const pattern_index_limit: usize = 64;
+/// Share of the token budget a pattern node may use, out of the raw
+/// evidence's share.
+const pattern_budget_percent: usize = 40;
 /// `options.facts`: share of the token budget the facts section may use,
 /// and search hits scanned for claims that match the query.
 const facts_budget_percent: usize = 30;
@@ -245,6 +259,8 @@ const ContextPacket = struct {
     currentFacts: []const MessageResult = &.{},
     preferences: []const MessageResult = &.{},
     procedural: []const MessageResult = &.{},
+    /// At most one: the pattern node that owns the question.
+    patterns: []const MessageResult = &.{},
     episodes: []const MessageResult = &.{},
     warnings: []const []const u8 = &.{},
 };
@@ -273,12 +289,14 @@ const RetrievalTrace = struct {
     facts: ?FactsTrace = null,
     /// Present only when `options.timeAnchors` is true.
     timeAnchors: ?TimeAnchorsTrace = null,
+    /// Present only when the scope has pattern nodes with a finding.
+    patterns: ?PatternsTrace = null,
 
     pub fn jsonStringify(self: @This(), jw: anytype) !void {
         try jw.beginObject();
         inline for (std.meta.fields(@This())) |field| {
             const value = @field(self, field.name);
-            if (comptime (std.mem.eql(u8, field.name, "rerank") or std.mem.eql(u8, field.name, "factKeys") or std.mem.eql(u8, field.name, "queryExpansion") or std.mem.eql(u8, field.name, "facts") or std.mem.eql(u8, field.name, "timeAnchors"))) {
+            if (comptime (std.mem.eql(u8, field.name, "rerank") or std.mem.eql(u8, field.name, "factKeys") or std.mem.eql(u8, field.name, "queryExpansion") or std.mem.eql(u8, field.name, "facts") or std.mem.eql(u8, field.name, "timeAnchors") or std.mem.eql(u8, field.name, "patterns"))) {
                 if (value) |present| {
                     try jw.objectField(field.name);
                     try jw.write(present);
@@ -477,10 +495,53 @@ pub const ConsolidateJobRunResult = struct {
     counts: fact_updates.Counts = .{},
 };
 
+/// What pattern passes did, summed over scopes.
+pub const PatternCounts = struct {
+    /// Messages whose sentences were embedded.
+    messagesIndexed: usize = 0,
+    sentences: usize = 0,
+    occasions: usize = 0,
+    groups: usize = 0,
+    /// Groups with enough occasions for a node.
+    eligible: usize = 0,
+    gated: usize = 0,
+    proposed: usize = 0,
+    /// Occasion answers the counting calls gave.
+    answered: usize = 0,
+    /// Replies that could not be read after a retry.
+    malformed: usize = 0,
+    written: usize = 0,
+    unchanged: usize = 0,
+    superseded: usize = 0,
+    /// Nodes written with a generalisation that held.
+    regularities: usize = 0,
+
+    fn add(self: *PatternCounts, other: PatternCounts) void {
+        inline for (std.meta.fields(PatternCounts)) |field| {
+            @field(self, field.name) += @field(other, field.name);
+        }
+    }
+};
+
+/// Outcome of one `memory.patterns.run` / `quipu jobs run patterns` pass.
+pub const PatternJobRunResult = struct {
+    leasedCount: usize = 0,
+    succeededCount: usize = 0,
+    failedCount: usize = 0,
+    lastError: ?[]const u8 = null,
+    calls: usize = 0,
+    /// Scopes rebuilt; the jobs of one scope are settled by one pass.
+    scopes: usize = 0,
+    counts: PatternCounts = .{},
+    /// A pass left part of a backlog for the next one.
+    continued: bool = false,
+};
+
 /// What a finished background batch did.
 pub const BackgroundResult = union(enum) {
     extract: ExtractJobRunResult,
     consolidate: ConsolidateJobRunResult,
+    patterns: PatternJobRunResult,
 };
 
 pub const RuntimeOptions = struct {
@@ -516,6 +577,7 @@ const BackgroundBatch = struct {
     leases: []jobs.LeaseResult,
     tasks: []ExtractTask = &.{},
     consolidate_tasks: []ConsolidateTask = &.{},
+    pattern_tasks: []PatternTask = &.{},
     group: std.Io.Group = .init,
     /// Provider calls that have not returned yet.
     remaining: std.atomic.Value(usize),
@@ -527,6 +589,7 @@ const BackgroundBatch = struct {
         allocator.free(self.tasks);
         for (self.consolidate_tasks) |*task| task.deinit(allocator);
         allocator.free(self.consolidate_tasks);
+        freePatternTasks(allocator, self.pattern_tasks);
         jobs.freeLeaseResults(allocator, self.leases);
         allocator.destroy(self);
     }
@@ -627,6 +690,8 @@ pub const Runtime = struct {
             // Consolidation follows extraction: its jobs run once no extract
             // job is waiting.
             if (self.options.consolidate_updates and try self.startBackgroundConsolidation(allocator, io)) return true;
+            // Pattern nodes are rebuilt last, from everything read so far.
+            if (try self.startBackgroundPatterns(allocator, io)) return true;
             self.background_dirty = false;
             return false;
         }
@@ -725,6 +790,7 @@ pub const Runtime = struct {
         defer batch.destroy();
         if (self.options.io) |io| batch.group.await(io) catch {};
         const consolidating = batch.consolidate_tasks.len > 0;
+        const patterning = batch.pattern_tasks.len > 0;
 
         var calls: usize = 0;
         var called: usize = 0;
@@ -746,6 +812,16 @@ pub const Runtime = struct {
             unanswered += 1;
             last_error = @errorName(task.failure.?);
         }
+        for (batch.pattern_tasks) |task| {
+            // A pattern task also asks the embedding provider, before any
+            // chat call; no answer there is no answer.
+            if (task.calls == 0 and !task.unanswered) continue;
+            called += 1;
+            calls += task.calls;
+            if (!task.unanswered) continue;
+            unanswered += 1;
+            last_error = @errorName(task.failure.?);
+        }
         if (called > 0 and unanswered == called) {
             for (batch.leases) |lease| try jobs.releaseLease(allocator, self.store, lease.qid);
             self.background_backoff_ms = if (self.background_backoff_ms == 0)
@@ -754,6 +830,7 @@ pub const Runtime = struct {
                 @min(self.background_backoff_ms * 2, background_backoff_max_ms);
             self.background_retry_at_ms = self.nowMs() + self.background_backoff_ms;
             if (consolidating) return .{ .consolidate = .{ .leasedCount = batch.leases.len, .failedCount = unanswered, .calls = calls, .lastError = last_error } };
+            if (patterning) return .{ .patterns = .{ .leasedCount = batch.leases.len, .failedCount = unanswered, .calls = calls, .lastError = last_error } };
             return .{ .extract = .{ .leasedCount = batch.leases.len, .failedCount = unanswered, .calls = calls, .lastError = last_error } };
         }
         self.background_backoff_ms = 0;
@@ -764,6 +841,11 @@ pub const Runtime = struct {
             var result = ConsolidateJobRunResult{ .leasedCount = batch.leases.len };
             try self.applyConsolidateTasks(allocator, batch.consolidate_tasks, &result);
             return .{ .consolidate = result };
+        }
+        if (patterning) {
+            var result = PatternJobRunResult{ .leasedCount = batch.leases.len };
+            try self.applyPatternTasks(allocator, batch.pattern_tasks, &result);
+            return .{ .patterns = result };
         }
         var result = ExtractJobRunResult{ .leasedCount = batch.leases.len };
         try self.applyExtractTasks(allocator, batch.tasks, &result);
@@ -815,6 +897,7 @@ pub const Runtime = struct {
         if (std.mem.eql(u8, method, "memory.entityResolve.run")) return self.memoryEntityResolveRun(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.extract.run")) return self.memoryExtractRun(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.consolidate.run")) return self.memoryConsolidateRun(allocator, id, &params);
+        if (std.mem.eql(u8, method, "memory.patterns.run")) return self.memoryPatternsRun(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.get")) return self.memoryCoreGet(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.update")) return self.memoryCoreUpdate(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.consolidate")) return self.memoryCoreConsolidate(allocator, id, &params);
@@ -839,6 +922,7 @@ pub const Runtime = struct {
                 .workers = .{
                     .extractor = if (self.backgroundEnabled()) "running" else if (extractProviderUsable(self.options.extract_provider)) "stopped" else "unavailable",
                     .consolidator = if (!self.options.consolidate_updates or !extractProviderUsable(self.options.extract_provider)) "unavailable" else if (self.backgroundEnabled()) "running" else "stopped",
+                    .patterns = if (!self.store.capabilities().vector or !extractProviderUsable(self.options.extract_provider)) "unavailable" else if (self.backgroundEnabled()) "running" else "stopped",
                     .entityResolver = if (self.options.entity_provider.kind == .none) "unavailable" else "stopped",
                     .answerer = if (self.options.answer_provider.kind == .none) "unavailable" else "running",
                 },
@@ -855,6 +939,12 @@ pub const Runtime = struct {
                     .factKeys = true,
                     .facts = true,
                     .timeAnchors = true,
+                    // Pattern nodes compare sentence vectors, so they need
+                    // a store that embeds.
+                    .patterns = .{
+                        .available = self.store.capabilities().vector,
+                        .promptVersion = patterns.prompt_version,
+                    },
                     .queryExpansion = .{
                         .modes = [_][]const u8{ "off", "rules", "llm" },
                         .llmConfigured = expansion_llm,
@@ -1294,6 +1384,10 @@ pub const Runtime = struct {
             return errorResponse(allocator, id, "invalid_request", "options.queryExpansion must be off, rules, or llm");
         };
 
+        // The question is embedded once, for the search and for choosing a
+        // pattern node.
+        if (retrieve_mode == .vector or retrieve_mode == .hybrid) self.store.prefetchEmbeddings(&.{query}) catch {};
+        defer self.store.clearPrefetchedEmbeddings();
         var expansion = try self.expandQuery(allocator, query, expansion_mode);
         defer expansion.deinit();
         var results = try self.collectExpandedItems(allocator, &expansion, retrieve_mode, retrieval_candidate_limit, .{
@@ -1329,8 +1423,16 @@ pub const Runtime = struct {
             .include_debug = include_trace,
         }, needs_value, @intCast(budget));
         defer facts.items.deinit();
-        const dropped_for_budget = results.applyTokenBudget(@as(usize, @intCast(budget)) - facts.trace.tokens);
+        var owned_pattern = try self.collectPatternItems(allocator, query, .{
+            .scope = scope,
+            .valid_at = valid_at,
+            .include_evidence = include_evidence,
+            .include_debug = include_trace,
+        }, needs_value, @intCast(budget));
+        defer owned_pattern.items.deinit();
+        const dropped_for_budget = results.applyTokenBudget(@as(usize, @intCast(budget)) - facts.trace.tokens - owned_pattern.trace.tokens);
         try results.adopt(&facts.items);
+        try results.adopt(&owned_pattern.items);
 
         var warnings = std.ArrayList([]const u8).empty;
         defer warnings.deinit(allocator);
@@ -1386,6 +1488,7 @@ pub const Runtime = struct {
             .factKeys = results.factKeysTrace(),
             .queryExpansion = expansion_trace,
             .facts = if (with_facts) facts.trace else null,
+            .patterns = if (owned_pattern.trace.candidates > 0) owned_pattern.trace else null,
             .timeAnchors = time_anchors_trace,
         };
 
@@ -1474,6 +1577,10 @@ pub const Runtime = struct {
             return errorResponse(allocator, id, "invalid_request", "options.queryExpansion must be off, rules, or llm");
         };
 
+        // The question is embedded once, for the search and for choosing a
+        // pattern node.
+        if (retrieve_mode == .vector or retrieve_mode == .hybrid) self.store.prefetchEmbeddings(&.{query}) catch {};
+        defer self.store.clearPrefetchedEmbeddings();
         var expansion = try self.expandQuery(allocator, query, expansion_mode);
         defer expansion.deinit();
         var results = try self.collectExpandedItems(allocator, &expansion, retrieve_mode, retrieval_candidate_limit, .{
@@ -1509,8 +1616,16 @@ pub const Runtime = struct {
             .include_debug = include_trace,
         }, needs_value, @intCast(budget));
         defer facts.items.deinit();
-        const dropped_for_budget = results.applyTokenBudget(@as(usize, @intCast(budget)) - facts.trace.tokens);
+        var owned_pattern = try self.collectPatternItems(allocator, query, .{
+            .scope = scope,
+            .valid_at = valid_at,
+            .include_evidence = include_evidence,
+            .include_debug = include_trace,
+        }, needs_value, @intCast(budget));
+        defer owned_pattern.items.deinit();
+        const dropped_for_budget = results.applyTokenBudget(@as(usize, @intCast(budget)) - facts.trace.tokens - owned_pattern.trace.tokens);
         try results.adopt(&facts.items);
+        try results.adopt(&owned_pattern.items);
 
         var warnings = std.ArrayList([]const u8).empty;
         defer warnings.deinit(allocator);
@@ -1565,6 +1680,7 @@ pub const Runtime = struct {
             .factKeys = results.factKeysTrace(),
             .queryExpansion = expansion_trace,
             .facts = if (with_facts) facts.trace else null,
+            .patterns = if (owned_pattern.trace.candidates > 0) owned_pattern.trace else null,
             .timeAnchors = time_anchors_trace,
         };
 
@@ -1666,6 +1782,35 @@ pub const Runtime = struct {
         return stringifyAlloc(allocator, response);
     }
 
+    fn memoryPatternsRun(self: *Runtime, allocator: std.mem.Allocator, id: ?[]const u8, params: *const ObjectMap) ![]u8 {
+        const owner = stringField(params, "owner") orelse "pattern-runner";
+        const requested_limit = integerField(params, "limit") orelse 100000;
+        if (requested_limit < 1) {
+            return errorResponse(allocator, id, "invalid_request", "limit must be positive");
+        }
+        if (!extractProviderUsable(self.options.extract_provider)) {
+            return errorResponse(allocator, id, "provider_error", "no extract provider configured; set --extract-provider or --llm-provider");
+        }
+        const result = try self.runPatternJobs(allocator, owner, @intCast(requested_limit));
+        const response = .{
+            .jsonrpc = "2.0",
+            .id = id,
+            .result = .{
+                .leasedCount = result.leasedCount,
+                .succeededCount = result.succeededCount,
+                .failedCount = result.failedCount,
+                .lastError = result.lastError,
+                .provider = self.options.extract_provider.name,
+                .model = self.options.extract_provider.model,
+                .promptVersion = patterns.prompt_version,
+                .calls = result.calls,
+                .scopes = result.scopes,
+                .counts = result.counts,
+            },
+        };
+        return stringifyAlloc(allocator, response);
+    }
+
     fn memoryInspect(self: *Runtime, allocator: std.mem.Allocator, id: ?[]const u8, params: *const ObjectMap) ![]u8 {
         const qid = stringField(params, "qid") orelse {
             return errorResponse(allocator, id, "invalid_request", "qid is required");
@@ -1736,6 +1881,12 @@ pub const Runtime = struct {
         var handled = forgetting.QidList.init(allocator);
         defer handled.deinit();
         for (selected_qids.items.items) |qid| _ = try handled.appendUnique(qid);
+        // Scopes that lose a pattern node to this request; each is rebuilt
+        // from the messages that remain.
+        var pattern_arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer pattern_arena_state.deinit();
+        const pattern_arena = pattern_arena_state.allocator();
+        var pattern_scopes: std.StringArrayHashMapUnmanaged(Scope) = .empty;
 
         const root_action: []const u8 = if (dry_run)
             if (std.mem.eql(u8, mode, "redact")) "would_redact" else "would_delete"
@@ -1788,10 +1939,17 @@ pub const Runtime = struct {
             }
             if (!dry_run) {
                 for (dependents.items.items) |dependent| {
+                    if (std.mem.eql(u8, dependent.type, "pattern")) {
+                        if (try self.store.getNode(pattern_arena, dependent.qid)) |pattern_node| {
+                            const pattern_scope = try scopeOfNode(pattern_arena, pattern_node);
+                            try pattern_scopes.put(pattern_arena, try scopeKey(pattern_arena, pattern_scope), pattern_scope);
+                        }
+                    }
                     try self.tombstoneQid(allocator, dependent.qid, reason, "hard_delete");
                 }
             }
         }
+        for (pattern_scopes.values()) |pattern_scope| try self.queuePatternJob(allocator, pattern_scope);
         summaries_contaminated = contaminated_core_qids.items.items.len;
         if (!dry_run and propagate) {
             for (contaminated_core_qids.items.items) |core_qid| {
@@ -3180,7 +3338,7 @@ pub const Runtime = struct {
 
         const hits = try self.collectSearchHits(allocator, query, mode, fact_search_limit, false);
         defer freeHits(allocator, hits);
-        const limit = budget * facts_budget_percent / 100;
+        const limit = (budget *| facts_budget_percent) / 100;
         var used = estimatePromptTokens(facts_legend) + 8;
         for (hits) |hit| {
             if (!std.mem.startsWith(u8, hit.qid, assertion_qid_prefix)) continue;
@@ -3796,7 +3954,7 @@ pub const Runtime = struct {
         var result = ExtractJobRunResult{};
         if (try self.finishBackgroundWork(allocator)) |finished| switch (finished) {
             .extract => |extracted| result = extracted,
-            .consolidate => {},
+            .consolidate, .patterns => {},
         };
         const worker_kind = streams.workerKindForStream(streams.extract_requested);
         const materialized = try jobs.materializeStream(allocator, self.store, streams.extract_requested, worker_kind, .{ .limit = limit });
@@ -3954,6 +4112,7 @@ pub const Runtime = struct {
         source.role = try allocator.dupe(u8, stringField(&props, "role") orelse "user");
         source.created_at = try dupeOptional(allocator, optionalStringField(&props, "createdAt"));
         source.session_id = try dupeOptional(allocator, optionalStringField(&props, "sessionId"));
+        source.session_qid = try dupeOptional(allocator, optionalStringField(&props, "sessionQid"));
         source.message_index = integerField(&props, "messageIndex");
         source.content = try content.toOwnedSlice(allocator);
         source.chunk_ends = try chunk_ends.toOwnedSlice(allocator);
@@ -4012,6 +4171,9 @@ pub const Runtime = struct {
         if (self.options.consolidate_updates and task.user_assertions.items.len > 0) {
             try self.queueConsolidateJob(allocator, task);
         }
+        // Pattern nodes are built from what was written, not from the claims
+        // drawn from it, so new messages are reason enough.
+        if (task.sources.items.len > 0) try self.queuePatternJob(allocator, task.scope);
         return written;
     }
 
@@ -4137,7 +4299,7 @@ pub const Runtime = struct {
         var result = ConsolidateJobRunResult{};
         if (try self.finishBackgroundWork(allocator)) |finished| switch (finished) {
             .consolidate => |consolidated| result = consolidated,
-            .extract => {},
+            .extract, .patterns => {},
         };
         _ = try jobs.reclaimExpiredLeases(allocator, self.store, self.nowMs());
         const leases = try jobs.leasePendingJobs(allocator, self.store, .{
@@ -4425,6 +4587,689 @@ pub const Runtime = struct {
         return true;
     }
 
+    /// Queues a rebuild of the pattern nodes of `scope`: after extraction
+    /// has read new messages, and after a forget removed some. Jobs for one
+    /// scope are settled together, and a rebuild that finds nothing new
+    /// makes no provider call. Nothing is queued on a store without
+    /// embeddings, which cannot compare sentences.
+    fn queuePatternJob(self: *Runtime, allocator: std.mem.Allocator, scope: Scope) !void {
+        if (!self.store.capabilities().vector) return;
+        const payload = try stringifyAlloc(allocator, .{
+            .method = "memory.pattern.requested",
+            .scope = scope.json(),
+        });
+        defer allocator.free(payload);
+        const event = try self.publishEvent(streams.pattern_requested, payload);
+        _ = try jobs.materializeStream(allocator, self.store, streams.pattern_requested, streams.workerKindForStream(streams.pattern_requested), .{
+            .after_sequence = if (event.sequence > 0) event.sequence - 1 else 0,
+            .limit = 1,
+        });
+        self.background_dirty = true;
+    }
+
+    /// Runs pending `pattern` jobs. Each rebuilds the pattern nodes of one
+    /// scope from the sentences its people wrote (see `patterns.zig`):
+    /// sentences not seen before are embedded and stored as a
+    /// `SentenceIndex` node per message, alike sentences from different
+    /// occasions are grouped, and every group with enough occasions gets a
+    /// `Pattern` node. A node keeps the generalisations first proposed for
+    /// it; later passes only ask about the occasions that are new and count
+    /// again. Every node is evidenced by the messages of its occasions, so
+    /// forgetting one of them removes it and queues a rebuild from what is
+    /// left.
+    pub fn runPatternJobs(self: *Runtime, allocator: std.mem.Allocator, owner: []const u8, limit: usize) !PatternJobRunResult {
+        if (!extractProviderUsable(self.options.extract_provider)) return error.ProviderUnavailable;
+        var result = PatternJobRunResult{};
+        if (try self.finishBackgroundWork(allocator)) |finished| switch (finished) {
+            .patterns => |built| result = built,
+            .extract, .consolidate => {},
+        };
+        _ = try jobs.reclaimExpiredLeases(allocator, self.store, self.nowMs());
+        // A pass that only indexed part of a backlog queues the next one;
+        // the caller asked for the work to be done, so run those too.
+        result.continued = true;
+        while (result.continued) try self.runPatternPass(allocator, owner, limit, &result);
+        return result;
+    }
+
+    /// Leases the pending pattern jobs and settles them. `result.continued`
+    /// says whether the pass queued another.
+    fn runPatternPass(self: *Runtime, allocator: std.mem.Allocator, owner: []const u8, limit: usize, result: *PatternJobRunResult) !void {
+        result.continued = false;
+        const leases = try jobs.leasePendingJobs(allocator, self.store, .{
+            .worker_kind = streams.workerKindForStream(streams.pattern_requested),
+            .owner = owner,
+            .now_ms = self.nowMs(),
+            .ttl_ms = pattern_lease_ttl_ms,
+            .limit = limit,
+        });
+        defer jobs.freeLeaseResults(allocator, leases);
+        result.leasedCount += leases.len;
+        if (leases.len == 0) return;
+        // Jobs a failed write did not settle go back to pending.
+        errdefer for (leases) |lease| jobs.releaseLease(allocator, self.store, lease.qid) catch {};
+
+        const tasks = try self.preparePatternTasks(allocator, leases);
+        defer freePatternTasks(allocator, tasks);
+        for (tasks) |*task| callPatternTask(task, allocator, self.options.io, self.options.extract_provider);
+        try self.applyPatternTasks(allocator, tasks, result);
+    }
+
+    fn startBackgroundPatterns(self: *Runtime, allocator: std.mem.Allocator, io: std.Io) !bool {
+        const leases = try jobs.leasePendingJobs(allocator, self.store, .{
+            .worker_kind = streams.workerKindForStream(streams.pattern_requested),
+            .owner = background_owner,
+            .now_ms = self.nowMs(),
+            .ttl_ms = pattern_lease_ttl_ms,
+            .limit = pattern_lease_limit,
+        });
+        if (leases.len == 0) {
+            jobs.freeLeaseResults(allocator, leases);
+            return false;
+        }
+        errdefer {
+            for (leases) |lease| jobs.releaseLease(allocator, self.store, lease.qid) catch {};
+            jobs.freeLeaseResults(allocator, leases);
+        }
+        const tasks = try self.preparePatternTasks(allocator, leases);
+        errdefer freePatternTasks(allocator, tasks);
+
+        const batch = try allocator.create(BackgroundBatch);
+        batch.* = .{
+            .allocator = allocator,
+            .leases = leases,
+            .pattern_tasks = tasks,
+            .remaining = .init(tasks.len),
+            .notify = self.background_notify,
+        };
+        self.background = batch;
+        const endpoint = self.options.extract_provider;
+        for (tasks) |*task| {
+            batch.group.concurrent(io, backgroundPatternCall, .{ batch, task, allocator, io, endpoint }) catch
+                backgroundPatternCall(batch, task, allocator, io, endpoint);
+        }
+        return true;
+    }
+
+    /// One task per scope the leased jobs ask for, each loaded with the
+    /// scope's messages, their sentence vectors and its stored pattern
+    /// nodes. A task that cannot be prepared carries its failure and makes
+    /// no provider call.
+    fn preparePatternTasks(self: *Runtime, allocator: std.mem.Allocator, leases: []const jobs.LeaseResult) ![]PatternTask {
+        var tasks = std.ArrayList(PatternTask).empty;
+        errdefer {
+            for (tasks.items) |*task| task.deinit();
+            tasks.deinit(allocator);
+        }
+        var scratch_state = std.heap.ArenaAllocator.init(allocator);
+        defer scratch_state.deinit();
+        const scratch = scratch_state.allocator();
+        for (leases) |lease| {
+            var failure: ?anyerror = null;
+            const scope = self.patternJobScope(scratch, lease) catch |err| blk: {
+                if (err == error.OutOfMemory) return err;
+                failure = err;
+                break :blk Scope{};
+            };
+            const key = try scopeKey(scratch, scope);
+            var existing: ?*PatternTask = null;
+            if (failure == null) {
+                for (tasks.items) |*task| {
+                    if (task.failure == null and std.mem.eql(u8, task.scope_key, key)) existing = task;
+                }
+            }
+            const task = existing orelse blk: {
+                try tasks.append(allocator, PatternTask.init(allocator));
+                const created = &tasks.items[tasks.items.len - 1];
+                const arena = created.arena_state.allocator();
+                created.scope_key = try arena.dupe(u8, key);
+                created.scope = try dupeScope(arena, scope);
+                created.failure = failure;
+                break :blk created;
+            };
+            try task.leases.append(task.arena_state.allocator(), lease);
+        }
+        const owned = try tasks.toOwnedSlice(allocator);
+        errdefer freePatternTasks(allocator, owned);
+        for (owned) |*task| {
+            if (task.failure != null) continue;
+            self.preparePatternTask(task) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                task.failure = err;
+            };
+        }
+        return owned;
+    }
+
+    fn patternJobScope(self: *Runtime, arena: std.mem.Allocator, lease: jobs.LeaseResult) !Scope {
+        const payload_json = try self.payloadJsonForLease(arena, lease);
+        const payload = objectValue(try std.json.parseFromSliceLeaky(Value, arena, payload_json, .{ .allocate = .alloc_always })) orelse return error.InvalidRequest;
+        return parseScope(&payload);
+    }
+
+    fn preparePatternTask(self: *Runtime, task: *PatternTask) !void {
+        if (!self.store.capabilities().vector) {
+            task.skipped = "no_embeddings";
+            return;
+        }
+        const arena = task.arena_state.allocator();
+        var messages = std.ArrayList(PatternMessage).empty;
+        {
+            var iterator = self.store.iterateNodes(arena, .{ .label = "Message", .where = try scopeWhere(arena, task.scope, &.{}) });
+            defer iterator.deinit();
+            while (try iterator.next()) |qid| {
+                const source = (try self.loadExtractSource(arena, qid)) orelse continue;
+                // Patterns are about what people say of their own lives.
+                if (!isSpeakerRole(source.role)) continue;
+                const day = fact_updates.dayOf(source.created_at);
+                try messages.append(arena, .{
+                    .qid = source.message_qid,
+                    .entry_key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ source.session_qid orelse source.message_qid, day orelse "" }),
+                    .day = day,
+                    .created_at = source.created_at,
+                    .content = source.content,
+                });
+            }
+        }
+        std.mem.sort(PatternMessage, messages.items, {}, PatternMessage.before);
+        task.messages = messages.items;
+
+        var pending = std.ArrayList(usize).empty;
+        for (task.messages, 0..) |*message, index| {
+            if (!try self.loadSentenceIndex(arena, message)) try pending.append(arena, index);
+        }
+        if (pending.items.len > 0) {
+            const now = pending.items[0..@min(pending.items.len, pattern_index_limit)];
+            if (!try self.indexPatternMessages(task, now)) {
+                task.skipped = "no_embeddings";
+                return;
+            }
+            if (now.len < pending.items.len) {
+                task.unindexed = pending.items.len - now.len;
+                task.skipped = "indexing";
+                return;
+            }
+        }
+
+        var nodes = std.ArrayList(PatternNodeState).empty;
+        var iterator = self.store.iterateNodes(arena, .{
+            .label = "Pattern",
+            .where = try scopeWhere(arena, task.scope, &.{.{ .name = "state", .value = "current" }}),
+        });
+        defer iterator.deinit();
+        while (try iterator.next()) |qid| {
+            const node = (try self.store.getNode(arena, qid)) orelse continue;
+            const state = (try parsePatternNode(arena, node)) orelse continue;
+            if (std.mem.eql(u8, state.scope_key, task.scope_key)) try nodes.append(arena, state);
+        }
+        task.nodes = nodes.items;
+    }
+
+    const PatternQuote = struct { quote: []const u8 = "", timestamp: ?[]const u8 = null };
+
+    /// What one message of an occasion said that the pattern node rests on:
+    /// its linked sentences, in order. Empty when the message or its
+    /// sentence index is gone or no longer fits.
+    fn patternEvidenceQuote(self: *Runtime, arena: std.mem.Allocator, message_qid: []const u8, member: PatternMember, slot: u32) !PatternQuote {
+        const source = (try self.loadExtractSource(arena, message_qid)) orelse return .{};
+        var quoted = PatternQuote{ .timestamp = source.created_at };
+        const index_qid = try sentenceIndexQid(arena, message_qid);
+        const node = (try self.store.getNode(arena, index_qid)) orelse return quoted;
+        const index = (try parseSentenceIndex(arena, node)) orelse return quoted;
+        if (index.content_bytes != source.content.len) return quoted;
+        var quote = std.ArrayList(u8).empty;
+        for (index.spans, 0..) |span, sentence| {
+            if (span.start > span.end or span.end > source.content.len) return quoted;
+            for (member.units) |unit| {
+                if (unit[0] != slot or unit[1] != sentence) continue;
+                if (quote.items.len > 0) try quote.append(arena, ' ');
+                try quote.appendSlice(arena, source.content[span.start..span.end]);
+                break;
+            }
+        }
+        quoted.quote = quote.items;
+        return quoted;
+    }
+
+    /// Fills `message` from its stored sentence index; false when it has
+    /// none that fits its text.
+    fn loadSentenceIndex(self: *Runtime, arena: std.mem.Allocator, message: *PatternMessage) !bool {
+        const index_qid = try sentenceIndexQid(arena, message.qid);
+        const node = (try self.store.getNode(arena, index_qid)) orelse return false;
+        const index = (try parseSentenceIndex(arena, node)) orelse return false;
+        // Vectors of another embedding model cannot be compared with this
+        // one's, whatever their size: the message is indexed again.
+        if (!sameEmbeddingModel(index.model, self.store.capabilities().embedding_model)) return false;
+        if (index.content_bytes != message.content.len) return false;
+        for (index.spans) |span| {
+            if (span.start > span.end or span.end > message.content.len) return false;
+        }
+        message.spans = index.spans;
+        message.vectors = index.vectors;
+        return true;
+    }
+
+    /// Splits the listed messages into sentences, embeds them in batched
+    /// requests and stores one `SentenceIndex` node per message: the byte
+    /// range and vector of each sentence, never its text. The node is
+    /// evidenced by the message, so forgetting the message removes it.
+    /// Returns false when the store cannot embed.
+    fn indexPatternMessages(self: *Runtime, task: *PatternTask, indexes: []const usize) !bool {
+        const arena = task.arena_state.allocator();
+        const scratch = task.arena_state.child_allocator;
+        var texts = std.ArrayList([]const u8).empty;
+        for (indexes) |index| {
+            const message = &task.messages[index];
+            message.spans = try patterns.splitSentences(arena, message.content);
+            for (message.spans) |span| try texts.append(arena, message.content[span.start..span.end]);
+        }
+        self.store.prefetchEmbeddings(texts.items) catch {};
+        defer self.store.clearPrefetchedEmbeddings();
+        for (indexes) |index| {
+            const message = &task.messages[index];
+            var vectors: []i8 = &.{};
+            var dims: usize = 0;
+            for (message.spans, 0..) |span, position| {
+                const vector = self.store.embedText(scratch, message.content[span.start..span.end]) catch |err| switch (err) {
+                    error.Unsupported => return false,
+                    error.OutOfMemory => return err,
+                    else => {
+                        task.unanswered = true;
+                        return err;
+                    },
+                };
+                defer scratch.free(vector);
+                if (position == 0) {
+                    dims = patterns.storedDims(vector.len);
+                    vectors = try arena.alloc(i8, dims * message.spans.len);
+                }
+                if (dims == 0 or patterns.storedDims(vector.len) != dims) return error.EmbeddingDimensionMismatch;
+                patterns.quantize(vector, vectors[position * dims ..][0..dims]);
+            }
+            message.vectors = vectors;
+            try self.writeSentenceIndex(arena, message.*);
+            task.counts.messagesIndexed += 1;
+        }
+        return true;
+    }
+
+    fn writeSentenceIndex(self: *Runtime, arena: std.mem.Allocator, message: PatternMessage) !void {
+        const node = (try self.store.getNode(arena, message.qid)) orelse return;
+        const props = objectValue(try std.json.parseFromSliceLeaky(Value, arena, node.properties_json, .{})) orelse return;
+        if (boolField(&props, "deleted") orelse false) return;
+        const spans = try arena.alloc([2]usize, message.spans.len);
+        for (message.spans, spans) |span, *slot| slot.* = .{ span.start, span.end };
+        const json = try stringifyAlloc(arena, .{
+            .kind = "sentence_index",
+            .evidenceQid = message.qid,
+            .sessionQid = optionalStringField(&props, "sessionQid"),
+            .createdAt = message.created_at,
+            .contentBytes = message.content.len,
+            .model = self.store.capabilities().embedding_model,
+            .dims = message.dims(),
+            .spans = spans,
+            .vectors = try patterns.encodeVectors(arena, message.vectors),
+            .tenantId = optionalStringField(&props, "tenantId"),
+            .userId = optionalStringField(&props, "userId"),
+            .agentId = optionalStringField(&props, "agentId"),
+            .projectId = optionalStringField(&props, "projectId"),
+            .state = "current",
+            .searchable = false,
+            .deleted = false,
+        });
+        const index_qid = try sentenceIndexQid(arena, message.qid);
+        try self.store.putNode(.{ .qid = index_qid, .label = "SentenceIndex", .properties_json = json });
+        try self.putDeterministicEdge(arena, index_qid, message.qid, "EVIDENCED_BY");
+    }
+
+    /// The storage half of a pattern batch: writes every node whose state
+    /// changed, retires the nodes whose group is gone, and settles the jobs.
+    /// A node is written with whatever its calls got, so a job that failed
+    /// part way has less to do when it is tried again.
+    fn applyPatternTasks(self: *Runtime, allocator: std.mem.Allocator, tasks: []PatternTask, result: *PatternJobRunResult) !void {
+        for (tasks) |*task| {
+            const arena = task.arena_state.allocator();
+            result.calls += task.calls;
+            var failure: ?anyerror = task.failure;
+            if (task.failure == null and task.skipped == null) {
+                for (task.works) |*work| {
+                    if (work.gated) task.counts.gated += 1;
+                    if (work.proposed) task.counts.proposed += 1;
+                    task.counts.answered += work.answered;
+                    task.counts.malformed += work.malformed;
+                    if (work.failure) |err| failure = err;
+                    if (work.dirty and work.kind != null and try self.writePatternNode(task, work)) {
+                        task.counts.written += 1;
+                        if (work.conclusion) |conclusion| {
+                            if (conclusion.status == .regularity) task.counts.regularities += 1;
+                        }
+                    } else {
+                        task.counts.unchanged += 1;
+                    }
+                }
+                for (task.superseded) |qid| {
+                    if (try self.supersedePattern(arena, qid)) task.counts.superseded += 1;
+                }
+            }
+
+            const summary = .{
+                .promptVersion = patterns.prompt_version,
+                .provider = self.options.extract_provider.name,
+                .model = self.options.extract_provider.model,
+                .calls = task.calls,
+                .skipped = task.skipped,
+                .coalescedJobs = task.leases.items.len,
+                .counts = task.counts,
+            };
+            const result_json = try stringifyAlloc(arena, summary);
+            for (task.leases.items, 0..) |lease, position| {
+                // One job carries a failure back to pending; the others
+                // asked for the same rebuild and are done with it.
+                if (failure != null and position == 0) {
+                    const error_json = try stringifyAlloc(arena, .{ .@"error" = @errorName(failure.?), .calls = task.calls });
+                    _ = jobs.failJob(allocator, self.store, lease.qid, error_json, self.nowMs()) catch {};
+                    continue;
+                }
+                try jobs.completeJobWithResult(allocator, self.store, lease.qid, self.nowMs(), result_json);
+            }
+            if (failure) |err| {
+                result.failedCount += 1;
+                result.succeededCount += task.leases.items.len - 1;
+                result.lastError = @errorName(err);
+            } else {
+                result.succeededCount += task.leases.items.len;
+            }
+            // The rest of a backlog is indexed by the next pass.
+            if (failure == null and task.unindexed > 0) {
+                try self.queuePatternJob(allocator, task.scope);
+                result.continued = true;
+            }
+            const event_payload = try stringifyAlloc(arena, .{
+                .method = "memory.pattern.completed",
+                .jobQid = task.leases.items[0].qid,
+                .scope = task.scope.json(),
+                .failed = failure != null,
+                .result = summary,
+            });
+            _ = try self.publishEvent(streams.pattern_completed, event_payload);
+            result.scopes += 1;
+            result.counts.add(task.counts);
+        }
+    }
+
+    /// Stores one pattern node and its evidence edges. Returns false, and
+    /// writes nothing, when a message it rests on was forgotten while the
+    /// provider calls ran: the forget queued a rebuild.
+    fn writePatternNode(self: *Runtime, task: *PatternTask, work: *const PatternWork) !bool {
+        const arena = task.arena_state.allocator();
+        for (work.occasions) |occasion| {
+            for (occasion.messages) |message| {
+                if (!try self.nodeIsLive(arena, task.messages[message].qid)) return false;
+            }
+        }
+        // The node may have been forgotten while the calls were out. Its
+        // tombstone stays; the forget queued the rebuild.
+        if (work.node) |node| {
+            if (!try self.nodeIsLive(arena, node.qid)) return false;
+        }
+        const kind = work.kind.?;
+        const qid = if (work.node) |node| node.qid else try self.nextQid(arena, "pat");
+
+        const WireMember = struct {
+            key: []const u8,
+            day: ?[]const u8,
+            sig: []const u8,
+            messages: []const []const u8,
+            units: []const [2]u32,
+        };
+        const members = try arena.alloc(WireMember, work.occasions.len);
+        for (work.occasions, members) |occasion, *member| {
+            const message_qids = try arena.alloc([]const u8, occasion.messages.len);
+            for (occasion.messages, message_qids) |message, *slot| slot.* = task.messages[message].qid;
+            member.* = .{ .key = occasion.key, .day = occasion.day, .sig = occasion.sig, .messages = message_qids, .units = occasion.units };
+        }
+        const WireClaim = struct {
+            claim: []const u8,
+            when: []const u8,
+            then: []const u8,
+            table: patterns.Table,
+            testable: bool,
+            p: f64,
+            gap: f64,
+            holds: bool,
+            answers: []const []const u8,
+        };
+        const claims = try arena.alloc(WireClaim, work.claims.len);
+        for (work.claims, claims) |claim, *wire| {
+            const codes = try arena.alloc([]const u8, claim.answers.len);
+            for (claim.answers, codes) |answer, *code| code.* = if (answer) |known| known.code() else "";
+            const counted = patternClaimResult(claim.answers);
+            wire.* = .{
+                .claim = claim.claim.claim,
+                .when = claim.claim.when,
+                .then = claim.claim.then,
+                .table = counted.table,
+                .testable = counted.testable,
+                .p = counted.p,
+                .gap = counted.gap,
+                .holds = counted.holds(),
+                .answers = codes,
+            };
+        }
+        const informative = kind == .recurring and work.conclusion != null and work.conclusion.?.status.informative();
+        const finding: []const u8 = if (work.conclusion) |conclusion| conclusion.finding else "";
+        const analysis: []const u8 = if (kind != .recurring)
+            @tagName(kind)
+        else if (work.conclusion) |conclusion|
+            @tagName(conclusion.status)
+        else
+            "pending";
+        const first = task.messages[work.occasions[0].messages[0]];
+        const last_occasion = work.occasions[work.occasions.len - 1];
+        const last = task.messages[last_occasion.messages[last_occasion.messages.len - 1]];
+        const props = try stringifyAlloc(arena, .{
+            .kind = "pattern",
+            .qtype = "pattern",
+            .text = if (informative) try std.fmt.allocPrint(arena, "{s}: {s}", .{ work.about, finding }) else work.about,
+            .about = work.about,
+            .summary = work.summary,
+            .finding = finding,
+            .analysis = analysis,
+            .informative = informative,
+            .occasions = work.occasions.len,
+            .gateKind = @tagName(kind),
+            .gatedAt = work.gated_at,
+            .claimsAt = work.claims_at,
+            .claims = claims,
+            .members = members,
+            .firstSaid = first.created_at,
+            .lastSaid = last.created_at,
+            .evidenceQid = first.qid,
+            .scopeKey = task.scope_key,
+            .tenantId = task.scope.tenant_id,
+            .userId = task.scope.user_id,
+            .agentId = task.scope.agent_id,
+            .projectId = task.scope.project_id,
+            .consolidatorProvider = self.options.extract_provider.name,
+            .consolidatorModel = self.options.extract_provider.model,
+            .promptVersion = patterns.prompt_version,
+            .jobQid = task.leases.items[0].qid,
+            .state = "current",
+            .searchable = false,
+            .deleted = false,
+        });
+        try self.store.putNode(.{ .qid = qid, .label = "Pattern", .properties_json = props });
+        for (members) |member| {
+            for (member.messages) |message_qid| try self.putDeterministicEdge(arena, qid, message_qid, "EVIDENCED_BY");
+        }
+        return true;
+    }
+
+    /// Retires a pattern node whose group no longer stands on its own: it
+    /// merged into another node's group, or came to cover most occasions.
+    fn supersedePattern(self: *Runtime, arena: std.mem.Allocator, qid: []const u8) !bool {
+        const node = (try self.store.getNode(arena, qid)) orelse return false;
+        var value = try std.json.parseFromSliceLeaky(Value, arena, node.properties_json, .{ .allocate = .alloc_always });
+        switch (value) {
+            .object => |*object| {
+                if (boolField(object, "deleted") orelse false) return false;
+                try object.put(arena, "state", .{ .string = "superseded" });
+            },
+            else => return false,
+        }
+        try self.store.putNode(.{ .qid = qid, .label = "Pattern", .properties_json = try stringifyAlloc(arena, value) });
+        return true;
+    }
+
+    /// The pattern node that owns `query`, if one does, as a retrieval
+    /// item. The sentences people wrote are ranked against the question;
+    /// when more than half of the `patterns.nearest` closest ones are the
+    /// evidence of one node, the question is about that node's topic and the
+    /// node goes to the reader with the raw evidence. A question about one
+    /// thing a person said gathers sentences from everywhere and gets no
+    /// node, so derived memory never takes room from a plain lookup. At most
+    /// one node, and only if it fits `pattern_budget_percent` of the budget.
+    fn collectPatternItems(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        query: []const u8,
+        filter: ItemFilter,
+        needs_value: ?Value,
+        budget: usize,
+    ) !PatternItems {
+        var found = PatternItems{ .items = .{ .allocator = allocator } };
+        errdefer found.items.deinit();
+        if (needsCount(needs_value) > 0 and !needsIncludes(needs_value, "current_facts")) return found;
+        if (!self.store.capabilities().vector) return found;
+
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const where = try scopeWhere(arena, filter.scope, &.{.{ .name = "state", .value = "current" }});
+
+        var candidates = std.ArrayList(PatternNodeState).empty;
+        {
+            var iterator = self.store.iterateNodes(arena, .{ .label = "Pattern", .where = where });
+            defer iterator.deinit();
+            while (try iterator.next()) |qid| {
+                const node = (try self.store.getNode(arena, qid)) orelse continue;
+                if (!try filter.scope.matchesNode(arena, node)) continue;
+                const state = (try parsePatternNode(arena, node)) orelse continue;
+                if (!state.informative or state.members.len == 0) continue;
+                // A conclusion drawn from later occasions is not known yet
+                // at the time the question asks about.
+                if (filter.valid_at) |valid_at| {
+                    if (state.last_said) |last_said| {
+                        if (std.mem.order(u8, dateKey(last_said), dateKey(valid_at)) == .gt) continue;
+                    }
+                }
+                try candidates.append(arena, state);
+            }
+        }
+        found.trace.candidates = candidates.items.len;
+        if (candidates.items.len == 0) return found;
+
+        const query_vector = self.store.embedText(allocator, query) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return found;
+        };
+        defer allocator.free(query_vector);
+        var query_stored: [patterns.dims]i8 = undefined;
+        const dims = patterns.storedDims(query_vector.len);
+        patterns.quantize(query_vector, query_stored[0..dims]);
+        const query_norm = patterns.norm(query_stored[0..dims]);
+
+        const embedding_model = self.store.capabilities().embedding_model;
+        var top = patterns.Nearest{};
+        var message_qids = std.ArrayList([]const u8).empty;
+        {
+            var node_state = std.heap.ArenaAllocator.init(allocator);
+            defer node_state.deinit();
+            var iterator = self.store.iterateNodes(arena, .{ .label = "SentenceIndex", .where = where });
+            defer iterator.deinit();
+            while (try iterator.next()) |qid| {
+                _ = node_state.reset(.retain_capacity);
+                const node_arena = node_state.allocator();
+                const node = (try self.store.getNode(node_arena, qid)) orelse continue;
+                if (!try filter.scope.matchesNode(node_arena, node)) continue;
+                const index = (try parseSentenceIndex(node_arena, node)) orelse continue;
+                if (index.dims != dims or index.spans.len == 0) continue;
+                if (!sameEmbeddingModel(index.model, embedding_model)) continue;
+                const message: u32 = @intCast(message_qids.items.len);
+                try message_qids.append(arena, try arena.dupe(u8, index.message_qid));
+                for (0..index.spans.len) |sentence| {
+                    const vector = index.vectors[sentence * dims ..][0..dims];
+                    top.offer(.{
+                        .score = patterns.cosine(query_stored[0..dims], query_norm, vector, patterns.norm(vector)),
+                        .message = message,
+                        .sentence = @intCast(sentence),
+                    });
+                    found.trace.sentences += 1;
+                }
+            }
+        }
+
+        const counts = try arena.alloc(usize, candidates.items.len);
+        for (candidates.items, counts) |candidate, *count| {
+            count.* = 0;
+            for (top.items()) |hit| {
+                if (candidate.ownsSentence(message_qids.items[hit.message], hit.sentence)) count.* += 1;
+            }
+            found.trace.ownedMost = @max(found.trace.ownedMost, count.*);
+        }
+        const chosen_index = patterns.owner(counts) orelse return found;
+        const chosen = candidates.items[chosen_index];
+        const tokens = (chosen.text.len * 5 + 20) / 21 + 20;
+        if (tokens > (budget *| pattern_budget_percent) / 100) return found;
+
+        const item_qid = try allocator.dupe(u8, chosen.qid);
+        errdefer allocator.free(item_qid);
+        const text = try allocator.dupe(u8, chosen.text);
+        errdefer allocator.free(text);
+        const state = try allocator.dupe(u8, "current");
+        errdefer allocator.free(state);
+        const valid_from = try dupeOptional(allocator, chosen.first_said);
+        errdefer if (valid_from) |value| allocator.free(value);
+        var evidence = std.ArrayList(EvidenceResult).empty;
+        errdefer {
+            for (evidence.items) |entry| {
+                allocator.free(entry.qid);
+                allocator.free(entry.quote);
+                if (entry.timestamp) |timestamp| allocator.free(timestamp);
+            }
+            evidence.deinit(allocator);
+        }
+        if (filter.include_evidence) {
+            for (chosen.members) |member| {
+                for (member.messages, 0..) |message_qid, slot| {
+                    const quoted = try self.patternEvidenceQuote(arena, message_qid, member, @intCast(slot));
+                    const evidence_qid = try allocator.dupe(u8, message_qid);
+                    errdefer allocator.free(evidence_qid);
+                    const quote = try allocator.dupe(u8, quoted.quote);
+                    errdefer allocator.free(quote);
+                    const timestamp = try dupeOptional(allocator, quoted.timestamp);
+                    errdefer if (timestamp) |value| allocator.free(value);
+                    try evidence.append(allocator, .{ .qid = evidence_qid, .quote = quote, .timestamp = timestamp });
+                }
+            }
+        }
+        const evidence_slice = try evidence.toOwnedSlice(allocator);
+        errdefer freeEvidence(allocator, evidence_slice);
+        try found.items.items.append(allocator, .{
+            .qid = item_qid,
+            .type = "pattern",
+            .text = text,
+            .score = @as(f32, @floatFromInt(counts[chosen_index])) / @as(f32, @floatFromInt(patterns.nearest)),
+            .state = state,
+            .validFrom = valid_from,
+            .evidence = evidence_slice,
+            .includeDebug = filter.include_debug,
+        });
+        found.trace.kept = 1;
+        found.trace.tokens = tokens;
+        return found;
+    }
+
     fn nodeIsLive(self: *Runtime, allocator: std.mem.Allocator, qid: []const u8) !bool {
         const node = (try self.store.getNode(allocator, qid)) orelse return false;
         defer self.store.freeNode(allocator, node);
@@ -4440,6 +5285,7 @@ const ExtractSource = struct {
     content: []u8 = &.{},
     created_at: ?[]u8 = null,
     session_id: ?[]u8 = null,
+    session_qid: ?[]u8 = null,
     message_index: ?i64 = null,
     /// End offset of each chunk in `content`; empty for unchunked messages.
     chunk_ends: []usize = &.{},
@@ -4450,6 +5296,7 @@ const ExtractSource = struct {
         allocator.free(self.content);
         if (self.created_at) |value| allocator.free(value);
         if (self.session_id) |value| allocator.free(value);
+        if (self.session_qid) |value| allocator.free(value);
         allocator.free(self.chunk_ends);
     }
 };
@@ -4579,6 +5426,727 @@ const ConsolidateTask = struct {
         if (self.payload) |payload| payload.deinit();
     }
 };
+
+/// One message a person wrote, in a pattern job's scope, with its sentence
+/// index. Everything is owned by the task's arena.
+const PatternMessage = struct {
+    qid: []const u8,
+    /// The occasion the message belongs to: its conversation on one day.
+    entry_key: []const u8,
+    day: ?[]const u8,
+    created_at: ?[]const u8,
+    content: []const u8,
+    spans: []const patterns.Span = &.{},
+    /// One quantised vector per span, end to end.
+    vectors: []const i8 = &.{},
+
+    fn dims(self: PatternMessage) usize {
+        return if (self.spans.len == 0) 0 else self.vectors.len / self.spans.len;
+    }
+
+    /// Oldest first; undated messages lead, in the order they were stored.
+    fn before(_: void, left: PatternMessage, right: PatternMessage) bool {
+        const order = std.mem.order(u8, left.created_at orelse "", right.created_at orelse "");
+        if (order != .eq) return order == .lt;
+        if (left.qid.len != right.qid.len) return left.qid.len < right.qid.len;
+        return std.mem.order(u8, left.qid, right.qid) == .lt;
+    }
+};
+
+/// A stored `SentenceIndex` node.
+const SentenceIndex = struct {
+    message_qid: []const u8,
+    /// The embedding model the vectors came from, where the store names one.
+    model: ?[]const u8,
+    content_bytes: usize,
+    dims: usize,
+    spans: []patterns.Span,
+    vectors: []const i8,
+};
+
+fn sameEmbeddingModel(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return std.mem.eql(u8, left.?, right.?);
+}
+
+/// Reads a live sentence index; null for anything else or a node that does
+/// not add up.
+fn parseSentenceIndex(arena: std.mem.Allocator, node: storage.Node) !?SentenceIndex {
+    if (!std.mem.eql(u8, node.label, "SentenceIndex")) return null;
+    const value = std.json.parseFromSliceLeaky(Value, arena, node.properties_json, .{}) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return null;
+    };
+    const props = objectValue(value) orelse return null;
+    if (boolField(&props, "deleted") orelse false) return null;
+    const message_qid = stringField(&props, "evidenceQid") orelse return null;
+    const dims = integerField(&props, "dims") orelse return null;
+    const content_bytes = integerField(&props, "contentBytes") orelse return null;
+    const wire_spans = arrayValue(props.get("spans")) orelse return null;
+    if (dims < 0 or dims > patterns.dims or content_bytes < 0) return null;
+    const spans = try arena.alloc(patterns.Span, wire_spans.items.len);
+    for (wire_spans.items, spans) |wire, *span| {
+        const pair = arrayValue(wire) orelse return null;
+        if (pair.items.len != 2 or pair.items[0] != .integer or pair.items[1] != .integer) return null;
+        if (pair.items[0].integer < 0 or pair.items[1].integer < pair.items[0].integer) return null;
+        span.* = .{ .start = @intCast(pair.items[0].integer), .end = @intCast(pair.items[1].integer) };
+    }
+    const vectors = patterns.decodeVectors(arena, stringField(&props, "vectors") orelse "") catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return null;
+    };
+    if (vectors.len != spans.len * @as(usize, @intCast(dims))) return null;
+    return .{
+        .message_qid = message_qid,
+        .model = optionalStringField(&props, "model"),
+        .content_bytes = @intCast(content_bytes),
+        .dims = @intCast(dims),
+        .spans = spans,
+        .vectors = vectors,
+    };
+}
+
+fn sentenceIndexQid(allocator: std.mem.Allocator, message_qid: []const u8) ![]u8 {
+    const suffix = if (std.mem.startsWith(u8, message_qid, "q_msg_")) message_qid["q_msg_".len..] else message_qid;
+    return std.fmt.allocPrint(allocator, "q_sidx_{s}", .{suffix});
+}
+
+/// One occasion of a stored pattern node.
+const PatternMember = struct {
+    key: []const u8,
+    /// Changes when the text of the occasion or its linked sentences do.
+    sig: []const u8,
+    messages: []const []const u8 = &.{},
+    /// Linked sentences: position in `messages`, sentence within it.
+    units: []const [2]u32 = &.{},
+};
+
+const PatternClaimState = struct {
+    claim: patterns.Claim,
+    /// One per member, in member order; null where no answer is stored.
+    answers: []const ?patterns.Answer,
+};
+
+/// A stored `Pattern` node as a job or a retrieval reads it.
+const PatternNodeState = struct {
+    qid: []const u8,
+    scope_key: []const u8 = "",
+    text: []const u8 = "",
+    about: []const u8 = "",
+    summary: []const u8 = "",
+    /// Whether the node has a finding a reader should see.
+    informative: bool = false,
+    kind: ?patterns.Kind = null,
+    gated_at: usize = 0,
+    claims_at: ?usize = null,
+    claims: []const PatternClaimState = &.{},
+    members: []const PatternMember = &.{},
+    first_said: ?[]const u8 = null,
+    last_said: ?[]const u8 = null,
+    /// Matched to a group of the current pass.
+    taken: bool = false,
+
+    fn ownsSentence(self: PatternNodeState, message_qid: []const u8, sentence: u32) bool {
+        for (self.members) |member| {
+            for (member.units) |unit| {
+                if (unit[1] != sentence or unit[0] >= member.messages.len) continue;
+                if (std.mem.eql(u8, member.messages[unit[0]], message_qid)) return true;
+            }
+        }
+        return false;
+    }
+};
+
+/// Reads a live, current pattern node; null for anything else.
+fn parsePatternNode(arena: std.mem.Allocator, node: storage.Node) !?PatternNodeState {
+    if (!std.mem.eql(u8, node.label, "Pattern")) return null;
+    const value = std.json.parseFromSliceLeaky(Value, arena, node.properties_json, .{}) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return null;
+    };
+    const props = objectValue(value) orelse return null;
+    if (boolField(&props, "deleted") orelse false) return null;
+    if (!std.mem.eql(u8, stringField(&props, "state") orelse "", "current")) return null;
+
+    var state = PatternNodeState{ .qid = node.qid };
+    state.scope_key = stringField(&props, "scopeKey") orelse "";
+    state.text = stringField(&props, "text") orelse "";
+    state.about = stringField(&props, "about") orelse "";
+    state.summary = stringField(&props, "summary") orelse "";
+    state.informative = boolField(&props, "informative") orelse false;
+    state.kind = if (stringField(&props, "gateKind")) |kind| patterns.Kind.parse(kind) else null;
+    state.gated_at = @intCast(@max(integerField(&props, "gatedAt") orelse 0, 0));
+    state.claims_at = if (integerField(&props, "claimsAt")) |count| @intCast(@max(count, 0)) else null;
+    state.first_said = optionalStringField(&props, "firstSaid");
+    state.last_said = optionalStringField(&props, "lastSaid");
+
+    var members = std.ArrayList(PatternMember).empty;
+    if (arrayValue(props.get("members"))) |wire_members| {
+        for (wire_members.items) |wire| {
+            const fields = objectValue(wire) orelse return null;
+            var member = PatternMember{
+                .key = stringField(&fields, "key") orelse return null,
+                .sig = stringField(&fields, "sig") orelse "",
+            };
+            var messages = std.ArrayList([]const u8).empty;
+            if (arrayValue(fields.get("messages"))) |wire_messages| {
+                for (wire_messages.items) |message| try messages.append(arena, stringValue(message) orelse return null);
+            }
+            var units = std.ArrayList([2]u32).empty;
+            if (arrayValue(fields.get("units"))) |wire_units| {
+                for (wire_units.items) |unit| {
+                    const pair = arrayValue(unit) orelse return null;
+                    if (pair.items.len != 2 or pair.items[0] != .integer or pair.items[1] != .integer) return null;
+                    if (pair.items[0].integer < 0 or pair.items[1].integer < 0) return null;
+                    if (pair.items[0].integer > std.math.maxInt(u32) or pair.items[1].integer > std.math.maxInt(u32)) return null;
+                    try units.append(arena, .{ @intCast(pair.items[0].integer), @intCast(pair.items[1].integer) });
+                }
+            }
+            member.messages = messages.items;
+            member.units = units.items;
+            try members.append(arena, member);
+        }
+    }
+    state.members = members.items;
+
+    var claims = std.ArrayList(PatternClaimState).empty;
+    if (arrayValue(props.get("claims"))) |wire_claims| {
+        for (wire_claims.items) |wire| {
+            const fields = objectValue(wire) orelse return null;
+            const answers = try arena.alloc(?patterns.Answer, state.members.len);
+            @memset(answers, null);
+            if (arrayValue(fields.get("answers"))) |codes| {
+                for (codes.items, 0..) |code, position| {
+                    if (position >= answers.len) break;
+                    answers[position] = patterns.Answer.fromCode(stringValue(code) orelse "");
+                }
+            }
+            try claims.append(arena, .{
+                .claim = .{
+                    .claim = stringField(&fields, "claim") orelse return null,
+                    .when = stringField(&fields, "when") orelse return null,
+                    .then = stringField(&fields, "then") orelse return null,
+                },
+                .answers = answers,
+            });
+        }
+    }
+    state.claims = claims.items;
+    return state;
+}
+
+/// One occasion of a group in the pass under way.
+const PatternOccasion = struct {
+    key: []const u8,
+    day: ?[]const u8,
+    sig: []const u8,
+    member: patterns.Member,
+    /// The occasion's messages, as positions in the task's messages.
+    messages: []const u32,
+    /// Linked sentences: position in `messages`, sentence within it.
+    units: []const [2]u32,
+};
+
+const PatternClaimWork = struct {
+    claim: patterns.Claim,
+    /// One per occasion; null until a counting call answers.
+    answers: []?patterns.Answer,
+};
+
+fn patternClaimResult(answers: []const ?patterns.Answer) patterns.Result {
+    var table = patterns.Table{ 0, 0, 0, 0 };
+    for (answers) |answer| switch (answer orelse .unknown) {
+        .unknown => {},
+        .yes_yes => table[0] += 1,
+        .yes_no => table[1] += 1,
+        .no_yes => table[2] += 1,
+        .no_no => table[3] += 1,
+    };
+    return patterns.evaluate(table);
+}
+
+/// One group with enough occasions for a node: what is stored about it and
+/// what this pass adds. Its provider calls run on a thread of their own and
+/// allocate from `arena_state`.
+const PatternWork = struct {
+    arena_state: std.heap.ArenaAllocator,
+    node: ?*PatternNodeState,
+    occasions: []const PatternOccasion = &.{},
+    /// The group's linked sentences, for the model that names its kind.
+    sentences: []const []const u8 = &.{},
+    about: []const u8 = "",
+    summary: []const u8 = "",
+    kind: ?patterns.Kind = null,
+    gated_at: usize = 0,
+    claims_at: ?usize = null,
+    claims: []PatternClaimWork = &.{},
+    conclusion: ?patterns.Conclusion = null,
+    /// The stored node no longer says what this work holds.
+    dirty: bool = false,
+    gated: bool = false,
+    proposed: bool = false,
+    calls: usize = 0,
+    /// Calls the provider replied to, and occasion answers they gave.
+    replies: usize = 0,
+    answered: usize = 0,
+    malformed: usize = 0,
+    failure: ?anyerror = null,
+};
+
+/// One pass over the pattern nodes of one scope, through prepare, call and
+/// write. `leases` are the jobs that asked for it.
+const PatternTask = struct {
+    arena_state: std.heap.ArenaAllocator,
+    leases: std.ArrayList(jobs.LeaseResult) = .empty,
+    scope_key: []const u8 = "",
+    scope: Scope = .{},
+    messages: []PatternMessage = &.{},
+    nodes: []PatternNodeState = &.{},
+    works: []PatternWork = &.{},
+    /// Qids of stored nodes whose group is gone.
+    superseded: []const []const u8 = &.{},
+    counts: PatternCounts = .{},
+    calls: usize = 0,
+    failure: ?anyerror = null,
+    /// No provider call of the task got a reply.
+    unanswered: bool = false,
+    /// Why the pass did nothing, when it could not run at all.
+    skipped: ?[]const u8 = null,
+    /// Messages still waiting for a sentence index after this pass.
+    unindexed: usize = 0,
+
+    fn init(allocator: std.mem.Allocator) PatternTask {
+        return .{ .arena_state = std.heap.ArenaAllocator.init(allocator) };
+    }
+
+    fn deinit(self: *PatternTask) void {
+        for (self.works) |*work| work.arena_state.deinit();
+        self.arena_state.deinit();
+    }
+};
+
+fn freePatternTasks(allocator: std.mem.Allocator, tasks: []PatternTask) void {
+    for (tasks) |*task| task.deinit();
+    allocator.free(tasks);
+}
+
+/// `memory.retrieve`: the pattern item of one retrieval, if any.
+const PatternItems = struct {
+    items: OwnedItems,
+    trace: PatternsTrace = .{},
+};
+
+const PatternsTrace = struct {
+    /// Pattern nodes with a finding, in scope.
+    candidates: usize = 0,
+    /// Sentences ranked against the question.
+    sentences: usize = 0,
+    /// Most of the nearest sentences any one node holds.
+    ownedMost: usize = 0,
+    kept: usize = 0,
+    tokens: usize = 0,
+};
+
+/// The scope a node was stored under; strings are owned by `arena`.
+fn scopeOfNode(arena: std.mem.Allocator, node: storage.Node) !Scope {
+    const value = std.json.parseFromSliceLeaky(Value, arena, node.properties_json, .{ .allocate = .alloc_always }) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return .{};
+    };
+    const props = objectValue(value) orelse return .{};
+    return .{
+        .tenant_id = optionalStringField(&props, "tenantId"),
+        .user_id = optionalStringField(&props, "userId"),
+        .agent_id = optionalStringField(&props, "agentId"),
+        .project_id = optionalStringField(&props, "projectId"),
+    };
+}
+
+fn scopeKey(allocator: std.mem.Allocator, scope: Scope) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}\x1f{s}\x1f{s}\x1f{s}", .{
+        scope.tenant_id orelse "", scope.user_id orelse "", scope.agent_id orelse "", scope.project_id orelse "",
+    });
+}
+
+fn dupeScope(allocator: std.mem.Allocator, scope: Scope) !Scope {
+    return .{
+        .tenant_id = try dupeOptional(allocator, scope.tenant_id),
+        .user_id = try dupeOptional(allocator, scope.user_id),
+        .agent_id = try dupeOptional(allocator, scope.agent_id),
+        .project_id = try dupeOptional(allocator, scope.project_id),
+    };
+}
+
+/// Property matches that select the nodes of `scope`, after `leading`.
+fn scopeWhere(arena: std.mem.Allocator, scope: Scope, leading: []const storage.PropertyMatch) ![]storage.PropertyMatch {
+    var where = std.ArrayList(storage.PropertyMatch).empty;
+    try where.appendSlice(arena, leading);
+    if (scope.tenant_id) |value| try where.append(arena, .{ .name = "tenantId", .value = value });
+    if (scope.user_id) |value| try where.append(arena, .{ .name = "userId", .value = value });
+    if (scope.agent_id) |value| try where.append(arena, .{ .name = "agentId", .value = value });
+    if (scope.project_id) |value| try where.append(arena, .{ .name = "projectId", .value = value });
+    return where.items;
+}
+
+const PatternEntry = struct {
+    key: []const u8,
+    day: ?[]const u8,
+    /// Positions in the task's messages, and in the pass's sentences.
+    messages: std.ArrayList(u32) = .empty,
+    sentences: std.ArrayList(u32) = .empty,
+};
+
+/// Where a sentence of the pass sits: its message, its place among that
+/// message's sentences, and its place among its occasion's.
+const PatternSentenceRef = struct { message: u32, index: u32, at: u32 };
+
+/// The provider half of a pattern task; touches no storage, so it may run on
+/// another thread. Groups the sentences, then runs the calls of up to
+/// `default_extract_concurrency` groups at once.
+fn callPatternTask(task: *PatternTask, allocator: std.mem.Allocator, io: ?std.Io, endpoint: providers.ProviderEndpoint) void {
+    if (task.failure != null or task.skipped != null) return;
+    planPatternTask(task, allocator) catch |err| {
+        task.failure = err;
+        return;
+    };
+    var start: usize = 0;
+    while (start < task.works.len) : (start += default_extract_concurrency) {
+        const part = task.works[start..@min(start + default_extract_concurrency, task.works.len)];
+        const threads = io orelse {
+            for (part) |*work| runPatternWork(work, null, endpoint);
+            continue;
+        };
+        var group: std.Io.Group = .init;
+        for (part) |*work| {
+            if (part.len == 1) {
+                runPatternWork(work, io, endpoint);
+                continue;
+            }
+            group.concurrent(threads, runPatternWork, .{ work, io, endpoint }) catch runPatternWork(work, io, endpoint);
+        }
+        group.await(threads) catch {
+            group.cancel(threads);
+            task.failure = error.Canceled;
+            return;
+        };
+    }
+    var replies: usize = 0;
+    var failure: ?anyerror = null;
+    for (task.works) |work| {
+        task.calls += work.calls;
+        replies += work.replies;
+        if (failure == null) failure = work.failure;
+    }
+    if (task.calls > 0 and replies == 0) {
+        task.unanswered = true;
+        task.failure = failure orelse error.ProviderUnavailable;
+    }
+}
+
+/// Groups the task's sentences and lines up each group worth a node with
+/// the node stored for it, if any.
+fn planPatternTask(task: *PatternTask, allocator: std.mem.Allocator) !void {
+    const arena = task.arena_state.allocator();
+    // With more sentences than can be compared, the newest are kept. The
+    // newest message also says which vector size is current.
+    var first_message: usize = task.messages.len;
+    var dims: usize = 0;
+    var total: usize = 0;
+    while (first_message > 0) : (first_message -= 1) {
+        const message = task.messages[first_message - 1];
+        if (message.spans.len == 0) continue;
+        if (dims == 0) dims = message.dims();
+        if (total + message.spans.len > max_pattern_sentences) break;
+        total += message.spans.len;
+    }
+
+    var entries = std.ArrayList(PatternEntry).empty;
+    var entry_of = std.StringHashMap(u32).init(arena);
+    var sentences = std.ArrayList(patterns.Sentence).empty;
+    var refs = std.ArrayList(PatternSentenceRef).empty;
+    for (task.messages[first_message..], first_message..) |message, message_index| {
+        if (message.spans.len == 0 or message.dims() != dims) continue;
+        const slot = try entry_of.getOrPut(message.entry_key);
+        if (!slot.found_existing) {
+            slot.value_ptr.* = @intCast(entries.items.len);
+            try entries.append(arena, .{ .key = message.entry_key, .day = message.day });
+        }
+        const entry_index = slot.value_ptr.*;
+        try entries.items[entry_index].messages.append(arena, @intCast(message_index));
+        for (0..message.spans.len) |index| {
+            const vector = message.vectors[index * dims ..][0..dims];
+            const entry = &entries.items[entry_index];
+            try refs.append(arena, .{ .message = @intCast(message_index), .index = @intCast(index), .at = @intCast(entry.sentences.items.len) });
+            try entry.sentences.append(arena, @intCast(sentences.items.len));
+            try sentences.append(arena, .{ .entry = entry_index, .vector = vector, .norm = patterns.norm(vector) });
+        }
+    }
+    task.counts.sentences = sentences.items.len;
+    task.counts.occasions = entries.items.len;
+
+    const groups = try patterns.gather(arena, sentences.items, entries.items.len);
+    task.counts.groups = groups.len;
+    var works = std.ArrayList(PatternWork).empty;
+    errdefer for (works.items) |*work| work.arena_state.deinit();
+    var superseded = std.ArrayList([]const u8).empty;
+    for (groups) |group| {
+        const node = try matchPatternNode(arena, task.nodes, group.entries, entries.items);
+        if (node) |matched| matched.taken = true;
+        if (!patterns.worthNode(group.entries.len, entries.items.len)) {
+            if (node) |matched| try superseded.append(arena, matched.qid);
+            continue;
+        }
+        try works.ensureUnusedCapacity(arena, 1);
+        works.appendAssumeCapacity(try buildPatternWork(arena, allocator, task, group, entries.items, sentences.items, refs.items, node));
+    }
+    for (task.nodes) |node| {
+        if (!node.taken) try superseded.append(arena, node.qid);
+    }
+    task.counts.eligible = works.items.len;
+    task.works = works.items;
+    task.superseded = superseded.items;
+}
+
+/// The stored node most of whose occasions are in the group, if any is
+/// still free: at least half of them, so a node follows its group as the
+/// group grows or absorbs another.
+fn matchPatternNode(arena: std.mem.Allocator, nodes: []PatternNodeState, group_entries: []const u32, entries: []const PatternEntry) !?*PatternNodeState {
+    if (nodes.len == 0) return null;
+    var keys = std.StringHashMap(void).init(arena);
+    for (group_entries) |entry| try keys.put(entries[entry].key, {});
+    var best: ?*PatternNodeState = null;
+    var best_common: usize = 0;
+    for (nodes) |*node| {
+        if (node.taken or node.members.len == 0) continue;
+        var common: usize = 0;
+        for (node.members) |member| {
+            if (keys.contains(member.key)) common += 1;
+        }
+        if (common * 2 < node.members.len or common <= best_common) continue;
+        best = node;
+        best_common = common;
+    }
+    return best;
+}
+
+fn patternSentenceText(task: *const PatternTask, ref: PatternSentenceRef) []const u8 {
+    const message = task.messages[ref.message];
+    const span = message.spans[ref.index];
+    return message.content[span.start..span.end];
+}
+
+fn buildPatternWork(
+    arena: std.mem.Allocator,
+    allocator: std.mem.Allocator,
+    task: *const PatternTask,
+    group: patterns.Group,
+    entries: []const PatternEntry,
+    sentences: []const patterns.Sentence,
+    refs: []const PatternSentenceRef,
+    node: ?*PatternNodeState,
+) !PatternWork {
+    const texts = try arena.alloc([]const u8, group.units.len);
+    for (group.units, texts) |unit, *slot| slot.* = patternSentenceText(task, refs[unit]);
+
+    const occasions = try arena.alloc(PatternOccasion, group.entries.len);
+    for (group.entries, occasions, 0..) |entry_index, *occasion, position| {
+        const entry = entries[entry_index];
+        var linked = std.ArrayList(u32).empty;
+        var units = std.ArrayList([2]u32).empty;
+        for (group.units) |unit| {
+            if (sentences[unit].entry != entry_index) continue;
+            const ref = refs[unit];
+            try linked.append(arena, ref.at);
+            const message_slot = std.mem.indexOfScalar(u32, entry.messages.items, ref.message).?;
+            try units.append(arena, .{ @intCast(message_slot), ref.index });
+        }
+        const entry_texts = try arena.alloc([]const u8, entry.sentences.items.len);
+        for (entry.sentences.items, entry_texts) |sentence, *slot| slot.* = patternSentenceText(task, refs[sentence]);
+        const text = try patterns.passage(arena, entry_texts, linked.items);
+        occasion.* = .{
+            .key = entry.key,
+            .day = entry.day,
+            .sig = try std.fmt.allocPrint(arena, "{x}-{d}", .{ std.hash.Wyhash.hash(3, text), units.items.len }),
+            .member = .{
+                .id = try std.fmt.allocPrint(arena, "M{d}", .{position + 1}),
+                .said = entry.day,
+                .linked = entry_texts[linked.items[0]],
+                .text = text,
+            },
+            .messages = entry.messages.items,
+            .units = units.items,
+        };
+    }
+
+    var work = PatternWork{ .arena_state = std.heap.ArenaAllocator.init(allocator), .node = node, .occasions = occasions, .sentences = texts };
+    const stored = node orelse {
+        work.dirty = true;
+        return work;
+    };
+    work.about = stored.about;
+    work.summary = stored.summary;
+    work.kind = stored.kind;
+    work.gated_at = stored.gated_at;
+    work.claims_at = stored.claims_at;
+    work.dirty = stored.members.len != occasions.len;
+    // Answers stay with an occasion as long as its text does.
+    const claims = try arena.alloc(PatternClaimWork, stored.claims.len);
+    for (claims, stored.claims) |*claim, kept| {
+        claim.* = .{ .claim = kept.claim, .answers = try arena.alloc(?patterns.Answer, occasions.len) };
+        @memset(claim.answers, null);
+    }
+    for (occasions, 0..) |occasion, position| {
+        const member_index = for (stored.members, 0..) |member, index| {
+            if (std.mem.eql(u8, member.key, occasion.key)) break index;
+        } else {
+            work.dirty = true;
+            continue;
+        };
+        if (!std.mem.eql(u8, stored.members[member_index].sig, occasion.sig)) {
+            work.dirty = true;
+            continue;
+        }
+        if (member_index != position) work.dirty = true;
+        for (claims, stored.claims) |*claim, kept| {
+            if (member_index < kept.answers.len) claim.answers[position] = kept.answers[member_index];
+        }
+    }
+    work.claims = claims;
+    return work;
+}
+
+/// The provider calls of one group, then what the counts say. A failure is
+/// kept on the work; whatever the calls before it got is still concluded
+/// and stored.
+fn runPatternWork(work: *PatternWork, io: ?std.Io, endpoint: providers.ProviderEndpoint) void {
+    const arena = work.arena_state.allocator();
+    advancePatternWork(work, arena, io, endpoint) catch |err| {
+        work.failure = err;
+    };
+    concludePatternWork(work, arena) catch |err| {
+        if (work.failure == null) work.failure = err;
+    };
+}
+
+fn askPattern(work: *PatternWork, arena: std.mem.Allocator, io: ?std.Io, endpoint: providers.ProviderEndpoint, prompt: []const u8, content: []const u8) ![]u8 {
+    work.calls += 1;
+    const reply = try providers.completeChat(arena, io, endpoint, .{
+        .system_prompt = prompt,
+        .user_content = content,
+        .json_mode = true,
+    });
+    work.replies += 1;
+    return reply;
+}
+
+/// Asks what the stored state lacks: the kind of group when it has none (or
+/// has grown by half since it was called a routine or a story), the
+/// generalisations when a recurring group has none, and the two answers for
+/// every occasion a generalisation has not been asked about. A reply that
+/// cannot be read after a retry is counted and that step left for the next
+/// pass.
+fn advancePatternWork(work: *PatternWork, arena: std.mem.Allocator, io: ?std.Io, endpoint: providers.ProviderEndpoint) !void {
+    const count = work.occasions.len;
+    if (work.kind == null or (work.kind.? != .recurring and count * 2 >= work.gated_at * 3)) {
+        const content = try patterns.buildGateContent(arena, work.sentences);
+        const gate = for (patterns.gate_attempts) |prompt| {
+            const reply = try askPattern(work, arena, io, endpoint, prompt, content);
+            break patterns.parseGate(arena, reply) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                continue;
+            };
+        } else {
+            work.malformed += 1;
+            return;
+        };
+        work.kind = gate.kind;
+        if (gate.about.len > 0 or work.about.len == 0) work.about = gate.about;
+        work.gated_at = count;
+        work.gated = true;
+        work.dirty = true;
+    }
+    if (work.kind.? != .recurring) return;
+
+    if (work.claims_at == null or (work.claims.len == 0 and count * 2 >= work.claims_at.? * 3)) {
+        const shown = try patterns.shownPositions(arena, count);
+        const members = try arena.alloc(patterns.Member, shown.len);
+        for (shown, members) |position, *slot| slot.* = work.occasions[position].member;
+        const content = try patterns.buildClaimsContent(arena, work.about, members);
+        const proposal = for (patterns.claims_attempts) |prompt| {
+            const reply = try askPattern(work, arena, io, endpoint, prompt, content);
+            break patterns.parseClaims(arena, reply) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                continue;
+            };
+        } else {
+            work.malformed += 1;
+            return;
+        };
+        const claims = try arena.alloc(PatternClaimWork, proposal.claims.len);
+        for (claims, proposal.claims) |*claim, proposed| {
+            claim.* = .{ .claim = proposed, .answers = try arena.alloc(?patterns.Answer, count) };
+            @memset(claim.answers, null);
+        }
+        work.claims = claims;
+        if (proposal.summary.len > 0) work.summary = proposal.summary;
+        work.claims_at = count;
+        work.proposed = true;
+        work.dirty = true;
+    }
+
+    for (work.claims) |*claim| {
+        var pending = std.ArrayList(usize).empty;
+        for (claim.answers, 0..) |answer, position| {
+            if (answer == null) try pending.append(arena, position);
+        }
+        var start: usize = 0;
+        while (start < pending.items.len) : (start += patterns.check_batch) {
+            const part = pending.items[start..@min(start + patterns.check_batch, pending.items.len)];
+            var members: [patterns.check_batch]patterns.Member = undefined;
+            var ids: [patterns.check_batch][]const u8 = undefined;
+            for (part, 0..) |position, slot| {
+                members[slot] = work.occasions[position].member;
+                ids[slot] = members[slot].id;
+            }
+            const content = try patterns.buildCheckContent(arena, claim.claim.when, claim.claim.then, members[0..part.len]);
+            var answers = [_]?patterns.Answer{null} ** patterns.check_batch;
+            const read = for (patterns.check_attempts) |prompt| {
+                const reply = try askPattern(work, arena, io, endpoint, prompt, content);
+                patterns.parseAnswers(arena, reply, ids[0..part.len], answers[0..part.len]) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                    continue;
+                };
+                break true;
+            } else false;
+            if (!read) {
+                work.malformed += 1;
+                continue;
+            }
+            // An occasion the reply left out says nothing either way.
+            for (part, answers[0..part.len]) |position, answer| claim.answers[position] = answer orelse .unknown;
+            work.answered += part.len;
+            work.dirty = true;
+        }
+    }
+}
+
+fn concludePatternWork(work: *PatternWork, arena: std.mem.Allocator) !void {
+    if (work.kind == null or work.kind.? != .recurring or work.claims_at == null) return;
+    const tested = try arena.alloc(patterns.Tested, work.claims.len);
+    for (work.claims, tested) |claim, *slot| {
+        slot.* = .{ .claim = claim.claim.claim, .result = patternClaimResult(claim.answers) };
+    }
+    work.conclusion = try patterns.conclude(arena, tested, work.occasions.len);
+}
+
+/// One pattern task of a background batch; see `backgroundCall`.
+fn backgroundPatternCall(batch: *BackgroundBatch, task: *PatternTask, allocator: std.mem.Allocator, io: std.Io, endpoint: providers.ProviderEndpoint) void {
+    const notify = batch.notify;
+    callPatternTask(task, allocator, io, endpoint);
+    if (batch.remaining.fetchSub(1, .acq_rel) == 1) {
+        if (notify) |hook| hook.wake(hook.context);
+    }
+}
 
 /// The provider half of a consolidate job; touches no storage, so it may run
 /// on another thread. One call proposes pairs (a malformed reply gets one
@@ -5307,6 +6875,7 @@ const OwnedContextPacket = struct {
     current_facts: std.ArrayList(MessageResult) = .empty,
     preferences: std.ArrayList(MessageResult) = .empty,
     procedural: std.ArrayList(MessageResult) = .empty,
+    patterns: std.ArrayList(MessageResult) = .empty,
     episodes: std.ArrayList(MessageResult) = .empty,
     warnings: []const []const u8 = &.{},
 
@@ -5322,6 +6891,8 @@ const OwnedContextPacket = struct {
                 try context.preferences.append(allocator, item);
             } else if (std.mem.eql(u8, item.type, "procedure")) {
                 try context.procedural.append(allocator, item);
+            } else if (std.mem.eql(u8, item.type, "pattern")) {
+                try context.patterns.append(allocator, item);
             } else {
                 try context.episodes.append(allocator, item);
             }
@@ -5335,6 +6906,7 @@ const OwnedContextPacket = struct {
             .currentFacts = self.current_facts.items,
             .preferences = self.preferences.items,
             .procedural = self.procedural.items,
+            .patterns = self.patterns.items,
             .episodes = self.episodes.items,
             .warnings = self.warnings,
         };
@@ -5345,6 +6917,7 @@ const OwnedContextPacket = struct {
         self.current_facts.deinit(self.allocator);
         self.preferences.deinit(self.allocator);
         self.procedural.deinit(self.allocator);
+        self.patterns.deinit(self.allocator);
         self.episodes.deinit(self.allocator);
     }
 };
@@ -5844,6 +7417,7 @@ fn labelType(label: []const u8) []const u8 {
     if (std.mem.eql(u8, label, "Core")) return "core";
     if (std.mem.eql(u8, label, "Assertion")) return "assertion";
     if (std.mem.eql(u8, label, "Update")) return "update";
+    if (std.mem.eql(u8, label, "Pattern")) return "pattern";
     if (std.mem.eql(u8, label, "Feedback")) return "raw";
     return "raw";
 }
@@ -6337,6 +7911,7 @@ fn renderPrompt(
     try writePromptSection(arena, out, "facts", context.currentFacts);
     try writePromptSection(arena, out, "preferences", context.preferences);
     try writePromptSection(arena, out, "procedures", context.procedural);
+    try writePromptSection(arena, out, "patterns", context.patterns);
     try writeSessionSection(arena, out, entries, options.hint_date);
     try out.writeAll("\n</memory>");
     return writer.toOwnedSlice();
@@ -10033,11 +11608,28 @@ const BackgroundTestExtractor = struct {
     }
 };
 
+/// Extract and consolidate jobs in `status`. Pattern jobs, which a store
+/// that embeds queues after every extraction, are counted by
+/// `countPatternJobs`.
 fn countJobs(store: storage.Adapter, status: []const u8) !usize {
-    var iterator = store.iterateNodes(std.testing.allocator, .{ .label = "Job", .where = &.{.{ .name = "status", .value = status }} });
+    return (try countJobsByKind(store, status, false));
+}
+
+fn countPatternJobs(store: storage.Adapter, status: []const u8) !usize {
+    return (try countJobsByKind(store, status, true));
+}
+
+fn countJobsByKind(store: storage.Adapter, status: []const u8, pattern_jobs: bool) !usize {
+    const allocator = std.testing.allocator;
+    var iterator = store.iterateNodes(allocator, .{ .label = "Job", .where = &.{.{ .name = "status", .value = status }} });
     defer iterator.deinit();
     var count: usize = 0;
-    while (try iterator.next()) |_| count += 1;
+    while (try iterator.next()) |qid| {
+        const node = (try store.getNode(allocator, qid)).?;
+        defer store.freeNode(allocator, node);
+        const is_pattern = try propertyEquals(allocator, node.properties_json, "jobType", streams.workerKindForStream(streams.pattern_requested));
+        if (is_pattern == pattern_jobs) count += 1;
+    }
     return count;
 }
 
@@ -10092,6 +11684,15 @@ test "background work extracts between requests and memory.extract.run flushes i
     const after = try searchAssertions(&runtime, "apartment", "fts");
     defer allocator.free(after);
     try std.testing.expect(std.mem.indexOf(u8, after, "\"type\":\"assertion\"") != null);
+
+    // A store that embeds rebuilds the scope's pattern nodes next. Two
+    // conversations are too few for a group, so the pass makes no call.
+    if (store.capabilities().vector) {
+        try std.testing.expect(try runtime.startBackgroundWork(allocator));
+        const built = (try runtime.finishBackgroundWork(allocator)).?.patterns;
+        try std.testing.expectEqual(@as(usize, 2), built.succeededCount);
+        try std.testing.expectEqual(@as(usize, 0), built.calls);
+    }
 
     // Nothing is pending, so the next pass starts nothing and stops looking
     // until a memory arrives.
@@ -10512,8 +12113,21 @@ test "background work consolidates once extraction has caught up" {
     try std.testing.expectEqual(@as(usize, 1), consolidated.updatesWritten);
     try std.testing.expectEqual(@as(usize, 1), try countLiveUpdates(store, sessions.may_message));
 
+    // Pattern jobs run last, on a store that embeds. Two conversations are
+    // too few for a group, so the pass makes no call.
+    if (store.capabilities().vector) {
+        try std.testing.expectEqual(@as(usize, 2), try countPatternJobs(store, "pending"));
+        try std.testing.expect(try runtime.startBackgroundWork(allocator));
+        const built = (try runtime.finishBackgroundWork(allocator)).?.patterns;
+        try std.testing.expectEqual(@as(usize, 2), built.leasedCount);
+        try std.testing.expectEqual(@as(usize, 2), built.succeededCount);
+        try std.testing.expectEqual(@as(usize, 1), built.scopes);
+        try std.testing.expectEqual(@as(usize, 2), built.counts.messagesIndexed);
+        try std.testing.expectEqual(@as(usize, 0), built.calls);
+    }
     try std.testing.expect(!try runtime.startBackgroundWork(allocator));
     try std.testing.expectEqual(@as(usize, 0), try countJobs(store, "pending"));
+    try std.testing.expectEqual(@as(usize, 0), try countPatternJobs(store, "pending"));
     const with_facts = try followerPrompt(&runtime, ",\"facts\":true");
     defer allocator.free(with_facts);
     try std.testing.expect(std.mem.indexOf(u8, with_facts, superseded_fact) != null);
@@ -10602,3 +12216,467 @@ test "time anchors bring in what was said on the day the question names" {
     try std.testing.expectEqualStrings(before, after);
 }
 
+/// A store that embeds for the pattern tests whatever the build's store
+/// does: a sentence becomes counts of its longer words, so sentences that
+/// share most of their words are alike and unrelated ones are not at all.
+const PatternTestStore = struct {
+    vtable: storage.Adapter.VTable,
+    inner: storage.Adapter,
+
+    fn init(inner: storage.Adapter) PatternTestStore {
+        var vtable = inner.vtable.*;
+        vtable.capabilities = capabilities;
+        vtable.embed_text = embedText;
+        return .{ .vtable = vtable, .inner = inner };
+    }
+
+    fn adapter(self: *PatternTestStore) storage.Adapter {
+        return .{ .context = self.inner.context, .vtable = &self.vtable };
+    }
+
+    /// What the tests turn to play an embedding outage and a changed model.
+    var down: bool = false;
+    var model: ?[]const u8 = null;
+
+    fn capabilities(_: *anyopaque) storage.Capabilities {
+        return .{ .vector = true, .embedding_model = model };
+    }
+
+    fn embedText(_: *anyopaque, allocator: std.mem.Allocator, text: []const u8) anyerror![]f32 {
+        if (down) return error.ProviderRequestFailed;
+        const vector = try allocator.alloc(f32, patterns.dims);
+        @memset(vector, 0);
+        var words = std.mem.tokenizeAny(u8, text, " .,?!'\"\n");
+        while (words.next()) |word| {
+            if (word.len <= 3) continue;
+            var lower: [64]u8 = undefined;
+            const key = std.ascii.lowerString(&lower, word[0..@min(word.len, lower.len)]);
+            vector[std.hash.Wyhash.hash(11, key) % patterns.dims] += 1;
+        }
+        return vector;
+    }
+};
+
+/// Plays the chat model for the pattern tests: calls a group of loaves
+/// recurring, proposes that fridge-proved loaves come out flat, and answers
+/// the two questions from each occasion's own text.
+const PatternTestModel = struct {
+    gate_calls: std.atomic.Value(usize) = .init(0),
+    claims_calls: std.atomic.Value(usize) = .init(0),
+    check_calls: std.atomic.Value(usize) = .init(0),
+
+    fn endpoint(self: *PatternTestModel) providers.ProviderEndpoint {
+        return .{
+            .kind = .callback,
+            .name = "test-extractor",
+            .model = "test-extract-model",
+            .callback = .{ .context = self, .respond = respond },
+        };
+    }
+
+    fn respond(context: ?*anyopaque, allocator: std.mem.Allocator, turn: providers.ChatTurn) anyerror![]u8 {
+        const self: *PatternTestModel = @ptrCast(@alignCast(context.?));
+        if (std.mem.startsWith(u8, turn.system_prompt, patterns.gate_prompt)) {
+            _ = self.gate_calls.fetchAdd(1, .monotonic);
+            return allocator.dupe(u8, "{\"about\":\"Sourdough loaves\",\"type\":\"recurring\"}");
+        }
+        if (std.mem.startsWith(u8, turn.system_prompt, patterns.claims_prompt)) {
+            _ = self.claims_calls.fetchAdd(1, .monotonic);
+            return allocator.dupe(u8, "{\"claims\":[{\"claim\":\"The user's loaves proved in the fridge come out flat.\",\"when\":\"Was the dough proved in the fridge?\",\"then\":\"Did the loaf come out flat?\"}],\"summary\":\"Loaves of sourdough baked at home.\"}");
+        }
+        if (std.mem.startsWith(u8, turn.system_prompt, patterns.check_prompt)) {
+            _ = self.check_calls.fetchAdd(1, .monotonic);
+            var parsed = try std.json.parseFromSlice(Value, allocator, turn.user_content, .{});
+            defer parsed.deinit();
+            var reply = std.ArrayList(u8).empty;
+            errdefer reply.deinit(allocator);
+            try reply.appendSlice(allocator, "{\"answers\":[");
+            for (parsed.value.object.get("members").?.array.items, 0..) |member, index| {
+                const text = member.object.get("text").?.string;
+                try reply.print(allocator, "{s}{{\"id\":\"{s}\",\"when\":\"{s}\",\"then\":\"{s}\"}}", .{
+                    if (index > 0) "," else "",
+                    member.object.get("id").?.string,
+                    if (std.mem.indexOf(u8, text, "fridge") != null) "yes" else "no",
+                    if (std.mem.indexOf(u8, text, "flat") != null) "yes" else "no",
+                });
+            }
+            try reply.appendSlice(allocator, "]}");
+            return reply.toOwnedSlice(allocator);
+        }
+        return allocator.dupe(u8, "{\"assertions\":[]}");
+    }
+};
+
+const pattern_test_fillers = [_][]const u8{
+    "The plumber replaced the leaking kitchen tap washer.",
+    "Wendell moved house towards Whitby last weekend.",
+    "Hadley's garage booked the annual inspection.",
+    "Ingrid borrowed the gardening encyclopedia again.",
+    "Oswin announced leaving drinks next Thursday.",
+    "Pottery classes begin Tuesday evening downtown.",
+    "Quarterly invoices finally reached accounting.",
+    "Marigold seedlings sprouted beside the greenhouse.",
+    "Violin practice lasted ninety minutes.",
+    "Neighbours repainted their fence bright yellow.",
+};
+
+/// Stores one conversation of one message on day `day` of January 2025 and
+/// returns the message qid.
+fn rememberPatternDay(runtime: *Runtime, day: usize, content: []const u8) ![]u8 {
+    const allocator = std.testing.allocator;
+    const request = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"method\":\"memory.remember\",\"params\":{{\"scope\":{{\"userId\":\"baker\"}},\"sessionId\":\"day-{d}\",\"messages\":[{{\"role\":\"user\",\"content\":\"{s}\",\"createdAt\":\"2025-01-{d:0>2}T19:00:00Z\"}}]}}}}",
+        .{ day, content, day },
+    );
+    defer allocator.free(request);
+    const response = try runtime.dispatch(allocator, request);
+    defer allocator.free(response);
+    return resultArrayFirst(allocator, response, "messageQids");
+}
+
+/// Runs the pending extract jobs, then the pattern jobs they queued, and
+/// returns the pattern run's response.
+fn runPatternPass(runtime: *Runtime) ![]u8 {
+    const allocator = std.testing.allocator;
+    const extracted = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"memory.extract.run\",\"params\":{}}");
+    allocator.free(extracted);
+    return runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"p\",\"method\":\"memory.patterns.run\",\"params\":{}}");
+}
+
+fn patternRetrieve(runtime: *Runtime, query: []const u8) ![]u8 {
+    const allocator = std.testing.allocator;
+    const request = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"q\",\"method\":\"memory.retrieve\",\"params\":{{\"query\":\"{s}\",\"scope\":{{\"userId\":\"baker\"}},\"mode\":\"fts\",\"budgetTokens\":2000,\"options\":{{\"includeDebug\":true,\"logRetrieval\":false}}}}}}",
+        .{query},
+    );
+    defer allocator.free(request);
+    return runtime.dispatch(allocator, request);
+}
+
+/// Eight loaves on alternate days, fridge-proved ones flat and counter-proved
+/// ones tall, among days about other things.
+fn rememberLoaves(runtime: *Runtime) ![]u8 {
+    const allocator = std.testing.allocator;
+    var first_loaf: ?[]u8 = null;
+    errdefer if (first_loaf) |qid| allocator.free(qid);
+    for (0..18) |index| {
+        const day = index + 1;
+        if (index % 2 == 1 and index / 2 < pattern_test_fillers.len) {
+            allocator.free(try rememberPatternDay(runtime, day, pattern_test_fillers[index / 2]));
+            continue;
+        }
+        if (index >= 16) {
+            allocator.free(try rememberPatternDay(runtime, day, pattern_test_fillers[index - 8]));
+            continue;
+        }
+        const fridge = (index / 2) % 2 == 0;
+        const qid = try rememberPatternDay(runtime, day, if (fridge)
+            "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense."
+        else
+            "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.");
+        if (first_loaf == null) first_loaf = qid else allocator.free(qid);
+    }
+    return first_loaf.?;
+}
+
+test "pattern jobs build a node from occasions and retrieval gives it to the question it owns" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = PatternTestModel{};
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{ .extract_provider = model.endpoint() });
+    defer runtime.deinit();
+
+    const health = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
+    defer allocator.free(health);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"patterns\":\"stopped\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"patterns\":{\"available\":true,\"promptVersion\":\"quipu.patterns.v1\"}") != null);
+
+    const first_loaf = try rememberLoaves(&runtime);
+    defer allocator.free(first_loaf);
+    const built = try runPatternPass(&runtime);
+    defer allocator.free(built);
+    // Eighteen conversations asked for one rebuild of one scope.
+    try std.testing.expect(std.mem.indexOf(u8, built, "\"leasedCount\":18,\"succeededCount\":18,\"failedCount\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, built, "\"scopes\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, built, "\"messagesIndexed\":18") != null);
+    try std.testing.expect(std.mem.indexOf(u8, built, "\"occasions\":18") != null);
+    try std.testing.expect(std.mem.indexOf(u8, built, "\"eligible\":1,\"gated\":1,\"proposed\":1,\"answered\":8,\"malformed\":0,\"written\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, built, "\"regularities\":1") != null);
+    try std.testing.expectEqual(@as(usize, 1), model.gate_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), model.claims_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 3), model.check_calls.load(.monotonic));
+
+    // The question about loaves is owned by the node; a lookup is not.
+    const owned = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
+    defer allocator.free(owned);
+    try std.testing.expect(std.mem.indexOf(u8, owned, "<patterns>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, owned, "Sourdough loaves: Worked out by the memory from 8 occasions, never stated by the person: The user's loaves proved in the fridge come out flat (so on 4 of the 4 occasions where that applied, against 0 of the 4 where it did not).") != null);
+    try std.testing.expect(std.mem.indexOf(u8, owned, "\"type\":\"pattern\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, owned, "\"patterns\":{\"candidates\":1,\"sentences\":26,\"ownedMost\":10,\"kept\":1,") != null);
+    // Its evidence is what each occasion said.
+    try std.testing.expect(std.mem.indexOf(u8, owned, "\"quote\":\"I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.\",\"timestamp\":\"2025-01-01T19:00:00Z\"") != null);
+    const lookup = try patternRetrieve(&runtime, "Which washer did the plumber replace?");
+    defer allocator.free(lookup);
+    try std.testing.expect(std.mem.indexOf(u8, lookup, "<patterns>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, lookup, "\"patterns\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lookup, "\"patterns\":{\"candidates\":1,\"sentences\":26,\"ownedMost\":0,\"kept\":0,\"tokens\":0}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lookup, "plumber replaced the leaking kitchen tap") != null);
+
+    // One more loaf: the generalisation is kept, and only the new occasion
+    // is asked about.
+    allocator.free(try rememberPatternDay(&runtime, 19, "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense."));
+    allocator.free(try rememberPatternDay(&runtime, 20, "Lighthouse keepers welcomed visiting schoolchildren."));
+    const grown = try runPatternPass(&runtime);
+    defer allocator.free(grown);
+    try std.testing.expect(std.mem.indexOf(u8, grown, "\"eligible\":1,\"gated\":0,\"proposed\":0,\"answered\":1,\"malformed\":0,\"written\":1") != null);
+    try std.testing.expectEqual(@as(usize, 1), model.gate_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), model.claims_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 4), model.check_calls.load(.monotonic));
+    const regrown = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
+    defer allocator.free(regrown);
+    try std.testing.expect(std.mem.indexOf(u8, regrown, "from 9 occasions") != null);
+    try std.testing.expect(std.mem.indexOf(u8, regrown, "(so on 5 of the 5 occasions where that applied, against 0 of the 4 where it did not)") != null);
+
+    // Nothing new: no job, no call.
+    const idle = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"p\",\"method\":\"memory.patterns.run\",\"params\":{}}");
+    defer allocator.free(idle);
+    try std.testing.expect(std.mem.indexOf(u8, idle, "\"leasedCount\":0") != null);
+    try std.testing.expectEqual(@as(usize, 4), model.check_calls.load(.monotonic));
+}
+
+test "forgetting an occasion removes its pattern node and rebuilds from the rest" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = PatternTestModel{};
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{ .extract_provider = model.endpoint() });
+    defer runtime.deinit();
+
+    const first_loaf = try rememberLoaves(&runtime);
+    defer allocator.free(first_loaf);
+    allocator.free(try rememberPatternDay(&runtime, 19, "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense."));
+    allocator.free(try rememberPatternDay(&runtime, 20, "Lighthouse keepers welcomed visiting schoolchildren."));
+    allocator.free(try runPatternPass(&runtime));
+    const before = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
+    defer allocator.free(before);
+    try std.testing.expect(std.mem.indexOf(u8, before, "from 9 occasions") != null);
+    const calls_before = model.gate_calls.load(.monotonic) + model.claims_calls.load(.monotonic);
+
+    const forget_request = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"f\",\"method\":\"memory.forget\",\"params\":{{\"selector\":{{\"qids\":[\"{s}\"]}},\"mode\":\"hard_delete\",\"reason\":\"test\"}}}}",
+        .{first_loaf},
+    );
+    defer allocator.free(forget_request);
+    const forgotten = try runtime.dispatch(allocator, forget_request);
+    defer allocator.free(forgotten);
+    // The node and the message's sentence index go with the message.
+    try std.testing.expect(std.mem.indexOf(u8, forgotten, "\"type\":\"pattern\",\"action\":\"invalidated\"") != null);
+    const index_qid = try sentenceIndexQid(allocator, first_loaf);
+    defer allocator.free(index_qid);
+    try std.testing.expect(!try runtime.nodeIsLive(allocator, index_qid));
+    const gone = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
+    defer allocator.free(gone);
+    try std.testing.expect(std.mem.indexOf(u8, gone, "<patterns>") == null);
+
+    // The forget queued a rebuild: a new node, proposed and counted afresh
+    // from the eight loaves that remain.
+    const rebuilt = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"p\",\"method\":\"memory.patterns.run\",\"params\":{}}");
+    defer allocator.free(rebuilt);
+    try std.testing.expect(std.mem.indexOf(u8, rebuilt, "\"leasedCount\":1,\"succeededCount\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rebuilt, "\"gated\":1,\"proposed\":1,\"answered\":8") != null);
+    try std.testing.expectEqual(calls_before + 2, model.gate_calls.load(.monotonic) + model.claims_calls.load(.monotonic));
+    const after = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
+    defer allocator.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "from 8 occasions") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, "(so on 4 of the 4 occasions where that applied, against 0 of the 4 where it did not)") != null);
+    const forgotten_evidence = try std.fmt.allocPrint(allocator, "\"qid\":\"{s}\"", .{first_loaf});
+    defer allocator.free(forgotten_evidence);
+    try std.testing.expect(std.mem.indexOf(u8, after, forgotten_evidence) == null);
+}
+
+test "a backlog of messages is indexed over several pattern passes before anything is grouped" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = PatternTestModel{};
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{ .extract_provider = model.endpoint() });
+    defer runtime.deinit();
+
+    // Ten loaves among seventy messages, more than one pass may embed.
+    const total = pattern_index_limit + 6;
+    for (0..total) |index| {
+        const content = if (index % 7 == 0)
+            try allocator.dupe(u8, if ((index / 7) % 2 == 0)
+                "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense."
+            else
+                "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.")
+        else
+            try std.fmt.allocPrint(allocator, "Errand number {d} involved parcel {d}x{d} downtown.", .{ index, index * 37, index * 101 });
+        defer allocator.free(content);
+        const request = try std.fmt.allocPrint(
+            allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"method\":\"memory.remember\",\"params\":{{\"scope\":{{\"userId\":\"baker\"}},\"sessionId\":\"n-{d}\",\"messages\":[{{\"role\":\"user\",\"content\":\"{s}\",\"createdAt\":\"2025-{d:0>2}-{d:0>2}T19:00:00Z\"}}]}}}}",
+            .{ index, content, index / 28 + 1, index % 28 + 1 },
+        );
+        defer allocator.free(request);
+        allocator.free(try runtime.dispatch(allocator, request));
+    }
+    const extracted = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"memory.extract.run\",\"params\":{}}");
+    allocator.free(extracted);
+
+    // Between requests one pass embeds its share and asks nothing.
+    var first = PatternJobRunResult{};
+    try runtime.runPatternPass(allocator, "test", pattern_lease_limit, &first);
+    try std.testing.expectEqual(pattern_index_limit, first.counts.messagesIndexed);
+    try std.testing.expectEqual(@as(usize, 0), first.counts.occasions);
+    try std.testing.expectEqual(@as(usize, 0), first.calls);
+    try std.testing.expect(first.continued);
+    try std.testing.expectEqual(@as(usize, 0), model.gate_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), try countPatternJobs(store.adapter(), "pending"));
+
+    // Asked to run the jobs, the daemon finishes the backlog and then groups.
+    const rest = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"p\",\"method\":\"memory.patterns.run\",\"params\":{}}");
+    defer allocator.free(rest);
+    try std.testing.expect(std.mem.indexOf(u8, rest, "\"messagesIndexed\":6,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rest, "\"occasions\":70,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rest, "\"regularities\":1") != null);
+    try std.testing.expectEqual(@as(usize, 1), model.gate_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), try countPatternJobs(store.adapter(), "pending"));
+}
+
+test "a pattern node forgotten while its calls are out is not written back" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = PatternTestModel{};
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{ .extract_provider = model.endpoint() });
+    defer runtime.deinit();
+
+    allocator.free(try rememberLoaves(&runtime));
+    allocator.free(try runPatternPass(&runtime));
+    const before = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
+    defer allocator.free(before);
+    const marker = "\"qid\":\"q_pat_";
+    const at = (std.mem.indexOf(u8, before, marker) orelse return error.TestUnexpectedResult) + "\"qid\":\"".len;
+    const node_qid = before[at .. at + (std.mem.indexOfScalar(u8, before[at..], '"') orelse return error.TestUnexpectedResult)];
+
+    // A ninth loaf: the next pass has new answers to write to the node.
+    allocator.free(try rememberPatternDay(&runtime, 19, "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense."));
+    const extracted = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"memory.extract.run\",\"params\":{}}");
+    allocator.free(extracted);
+    const leases = try jobs.leasePendingJobs(allocator, runtime.store, .{
+        .worker_kind = streams.workerKindForStream(streams.pattern_requested),
+        .owner = "test",
+        .now_ms = runtime.nowMs(),
+        .ttl_ms = pattern_lease_ttl_ms,
+    });
+    defer jobs.freeLeaseResults(allocator, leases);
+    const tasks = try runtime.preparePatternTasks(allocator, leases);
+    defer freePatternTasks(allocator, tasks);
+    for (tasks) |*task| callPatternTask(task, allocator, null, runtime.options.extract_provider);
+
+    // The node is forgotten between the calls and the write.
+    const forget_request = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"f\",\"method\":\"memory.forget\",\"params\":{{\"selector\":{{\"qids\":[\"{s}\"]}},\"mode\":\"hard_delete\",\"reason\":\"test\"}}}}",
+        .{node_qid},
+    );
+    defer allocator.free(forget_request);
+    allocator.free(try runtime.dispatch(allocator, forget_request));
+    try std.testing.expect(!try runtime.nodeIsLive(allocator, node_qid));
+
+    var result = PatternJobRunResult{};
+    try runtime.applyPatternTasks(allocator, tasks, &result);
+    try std.testing.expect(!try runtime.nodeIsLive(allocator, node_qid));
+    const gone = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
+    defer allocator.free(gone);
+    try std.testing.expect(std.mem.indexOf(u8, gone, "<patterns>") == null);
+
+    // The loaves themselves were not forgotten, so the next pass over the
+    // scope works the pattern out again, as a node of its own.
+    allocator.free(try rememberPatternDay(&runtime, 20, "Lighthouse keepers welcomed visiting schoolchildren."));
+    allocator.free(try runPatternPass(&runtime));
+    const after = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
+    defer allocator.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "from 9 occasions") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, node_qid) == null);
+    try std.testing.expect(!try runtime.nodeIsLive(allocator, node_qid));
+}
+
+test "an embedding provider that is down leaves pattern jobs unspent and the worker waiting" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = PatternTestModel{};
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{
+        .io = std.testing.io,
+        .extract_provider = model.endpoint(),
+        .background_workers = true,
+    });
+    defer runtime.deinit();
+
+    allocator.free(try rememberLoaves(&runtime));
+    const extracted = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"memory.extract.run\",\"params\":{}}");
+    allocator.free(extracted);
+    const queued = try countPatternJobs(runtime.store, "pending");
+    try std.testing.expect(queued > 0);
+
+    PatternTestStore.down = true;
+    defer PatternTestStore.down = false;
+    try std.testing.expect(try runtime.startBackgroundWork(allocator));
+    const failed = (try runtime.finishBackgroundWork(allocator)).?.patterns;
+    try std.testing.expectEqual(@as(usize, 1), failed.failedCount);
+    try std.testing.expectEqualStrings("ProviderRequestFailed", failed.lastError.?);
+    try std.testing.expectEqual(queued, try countPatternJobs(runtime.store, "pending"));
+    try std.testing.expectEqual(@as(usize, 0), try countPatternJobs(runtime.store, "failed"));
+    try std.testing.expectEqual(background_backoff_initial_ms, runtime.background_backoff_ms);
+    try std.testing.expect(!try runtime.startBackgroundWork(allocator));
+
+    // The provider is back: the same jobs build the node.
+    PatternTestStore.down = false;
+    runtime.background_retry_at_ms = 0;
+    allocator.free(try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"p\",\"method\":\"memory.patterns.run\",\"params\":{}}"));
+    const after = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
+    defer allocator.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "from 8 occasions") != null);
+}
+
+test "sentence indexes made by another embedding model are made again" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = PatternTestModel{};
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{ .extract_provider = model.endpoint() });
+    defer runtime.deinit();
+
+    PatternTestStore.model = "embed-a";
+    defer PatternTestStore.model = null;
+    allocator.free(try rememberLoaves(&runtime));
+    const first = try runPatternPass(&runtime);
+    defer allocator.free(first);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\"messagesIndexed\":18") != null);
+
+    // Under another model the stored vectors mean nothing: no node is shown
+    // from them, and the next pass indexes every message again.
+    PatternTestStore.model = "embed-b";
+    const stale = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
+    defer allocator.free(stale);
+    try std.testing.expect(std.mem.indexOf(u8, stale, "<patterns>") == null);
+    allocator.free(try rememberPatternDay(&runtime, 19, "Lighthouse keepers welcomed visiting schoolchildren."));
+    const second = try runPatternPass(&runtime);
+    defer allocator.free(second);
+    try std.testing.expect(std.mem.indexOf(u8, second, "\"messagesIndexed\":19") != null);
+    const fresh = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
+    defer allocator.free(fresh);
+    try std.testing.expect(std.mem.indexOf(u8, fresh, "from 8 occasions") != null);
+}

@@ -6,6 +6,8 @@ pub const fact_upserted = "quipu.fact.upserted";
 pub const card_created = "quipu.card.created";
 pub const consolidate_requested = "quipu.consolidate.requested";
 pub const consolidate_completed = "quipu.consolidate.completed";
+pub const pattern_requested = "quipu.pattern.requested";
+pub const pattern_completed = "quipu.pattern.completed";
 pub const forget_requested = "quipu.forget.requested";
 pub const forget_completed = "quipu.forget.completed";
 pub const retrieval_logged = "quipu.retrieval.logged";
@@ -27,6 +29,8 @@ pub const materialized_streams = [_]StreamSpec{
     .{ .name = card_created, .worker_kind = "card_created" },
     .{ .name = consolidate_requested, .worker_kind = "consolidate" },
     .{ .name = consolidate_completed, .worker_kind = "consolidate_completed" },
+    .{ .name = pattern_requested, .worker_kind = "pattern" },
+    .{ .name = pattern_completed, .worker_kind = "pattern_completed" },
     .{ .name = forget_requested, .worker_kind = "forget" },
     .{ .name = forget_completed, .worker_kind = "forget_completed" },
     .{ .name = retrieval_logged, .worker_kind = "retrieval_log" },

@@ -1292,6 +1292,31 @@ fn runCommand(
             try stdout.print("{s}\n", .{response});
             return;
         }
+        if (std.mem.eql(u8, args[command_index + 1], "run") and args.len > command_index + 2 and std.mem.eql(u8, args[command_index + 2], "patterns")) {
+            const parsed = parseExtractRunArgs(args[command_index + 3 ..]) catch {
+                return printCliError(stdout, allocator, "invalid jobs run patterns arguments");
+            };
+            const result = runtime.runPatternJobs(allocator, parsed.owner, parsed.limit) catch |err| {
+                if (err == error.ProviderUnavailable) {
+                    return printCliError(stdout, allocator, "no extract provider configured; set --extract-provider or --llm-provider");
+                }
+                return err;
+            };
+            const response = try stringifyAlloc(allocator, .{
+                .status = "ok",
+                .worker = "patterns",
+                .leasedCount = result.leasedCount,
+                .succeededCount = result.succeededCount,
+                .failedCount = result.failedCount,
+                .lastError = result.lastError,
+                .calls = result.calls,
+                .scopes = result.scopes,
+                .counts = result.counts,
+            });
+            defer allocator.free(response);
+            try stdout.print("{s}\n", .{response});
+            return;
+        }
         if (std.mem.eql(u8, args[command_index + 1], "run") and args.len > command_index + 2 and std.mem.eql(u8, args[command_index + 2], "extract")) {
             const parsed = parseExtractRunArgs(args[command_index + 3 ..]) catch {
                 return printCliError(stdout, allocator, "invalid jobs run extract arguments");
@@ -1514,7 +1539,7 @@ fn runCommand(
         return serveInline(io, allocator, runtime, stdout);
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--expand-provider PROVIDER] [--expand-url URL] [--expand-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--extract-provider openrouter|openai|anthropic|google|ollama|custom] [--extract-url URL] [--extract-model MODEL] [--background on|off] [--consolidate on|off] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams|leaks]... [--leaks] | jobs materialize|lease|complete|fail|run entity-resolve|extract|consolidate ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--expand-provider PROVIDER] [--expand-url URL] [--expand-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--extract-provider openrouter|openai|anthropic|google|ollama|custom] [--extract-url URL] [--extract-model MODEL] [--background on|off] [--consolidate on|off] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams|leaks]... [--leaks] | jobs materialize|lease|complete|fail|run entity-resolve|extract|consolidate|patterns ... | rpc-stdin | serve\n", .{});
 }
 
 /// What the serve loop waits on: the next request, or word that background

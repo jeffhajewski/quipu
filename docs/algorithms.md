@@ -621,7 +621,8 @@ Failure handling:
   the next batch. It retries when a request arrives after the wait; an idle
   daemon does not wake itself. A chat call is given up after five minutes
   (`ProviderTimeout`), so a connection that died while the machine slept
-  cannot hold a batch for good.
+  cannot hold a batch for good. For pattern jobs an embedding provider that
+  does not answer counts the same way.
 - **One job fails.** A failed call among answered ones, or a reply that stays
   malformed, uses one of the job's three attempts. After the third the job is
   dead-lettered.
@@ -631,9 +632,16 @@ Failure handling:
   by other owners expire after five minutes and are then reclaimed, which uses
   an attempt.
 
+`consolidate` jobs are drained the same way once no `extract` job is pending,
+and `pattern` jobs once no `consolidate` job is. A pattern batch takes up to
+256 jobs, because the jobs of one scope are settled by one pass, and holds
+its leases for up to 30 minutes.
+
 Known limits: the batch's claim embeddings are computed in the write step, so
 an HTTP embedding provider delays the next request by one embedding call per
-batch; entity resolution still runs only on request.
+batch; a pattern pass embeds the sentences of up to 64 new messages before
+its model calls start, which delays the next request the same way; entity
+resolution still runs only on request.
 
 ### Consolidation: knowledge updates
 
@@ -784,6 +792,123 @@ With the option off the prompt is byte-for-byte what it was. With it on, a
 question that touches no replaced fact gets no facts section, so without
 consolidation the option adds nothing.
 
+### Pattern nodes
+
+Claims and updates are about single statements. Some things a person never
+states at all: that the loaves proved in the fridge are the ones that come out
+flat, or that nothing in particular goes with the calls that end in a row.
+The evidence is spread over many occasions, one sentence here and one there,
+and a reader given a token budget sees a few of them. Pattern nodes are the
+memory's own conclusion about such occasions, built in the background and
+shown to the question that is about them.
+
+There is no switch. Every finished `extract` job publishes
+`quipu.pattern.requested` and queues a `pattern` job for its scope, on a store
+that can embed text. The jobs run after extraction and consolidation have
+caught up: in the background worker, or on request with
+`quipu jobs run patterns` and the operational RPC `memory.patterns.run`. They
+use the extract provider. Jobs for the same scope are settled by one pass.
+
+One pass rebuilds the pattern nodes of one scope:
+
+1. **Sentences.** Every message a person wrote in the scope (not the
+   assistant's replies) is split into sentences, at line breaks and at `.`,
+   `!` or `?` followed by a space; sentences of fewer than four words are
+   left out. Each sentence is embedded and the first 256 dimensions are kept,
+   renormalised, as signed bytes. They are stored in one `SentenceIndex` node
+   per message: byte ranges and vectors, never the text, with the name of
+   the embedding model where the store reports one. The node is evidenced by
+   its message, so forgetting the message removes it. A message is indexed
+   once per embedding model: an index made by another model is not compared
+   with anything and is made again on the next pass. A pass embeds at most 64
+   new messages, and a store with a backlog is indexed over several passes
+   before anything is grouped.
+2. **Occasions.** One conversation on one day is one occasion.
+3. **Groups.** Two sentences from different occasions are linked when their
+   cosine is at least 0.65, and linked sentences form a group. Groups whose
+   occasions largely coincide are merged, so the sentence that names a
+   circumstance and the one that gives the outcome end up together. A group
+   is kept when it has at least six occasions and at most half of all of
+   them. The newest 20,000 sentences are compared.
+4. **Gate.** One call per new group, given its distinct sentences (at most
+   24): what the group is about, and whether it is a `routine` (the same
+   thing each time), a `story` (one thing developing) or `recurring`
+   (separate occasions that differ in how they went). Only a recurring group
+   goes on. The others are stored as nodes with nothing to show, so they are
+   not asked about again until they have grown by half.
+5. **Propose.** One call, given the record of each occasion (its linked
+   sentences with up to three sentences either side, at most 1,000 bytes):
+   up to four generalisations, each with a circumstance (`when`) and an
+   outcome (`then`) as yes/no questions answerable from one occasion.
+6. **Count.** For each generalisation the two questions are asked of every
+   occasion, three occasions per call, each answered `yes`, `no` or
+   `unknown` from that occasion alone. The answers fill a 2×2 table. A table
+   can be tested when it has at least two occasions with the circumstance,
+   two without and six in all. The generalisation holds when Fisher's exact
+   test gives p ≤ 0.06 and the outcome is at least 60 points more frequent
+   with the circumstance than without it.
+7. **Conclude.** The node's finding is written from the counts, never by the
+   model: `Worked out by the memory from N occasions, never stated by the
+   person: <claim> (so on a of the b occasions where that applied, against c
+   of the d where it did not).` Counts that go as firmly the other way (the
+   outcome at least 60 points less frequent with the circumstance, same p)
+   are a finding too, written as `The reverse of "<claim>"` with the same
+   counts. When generalisations could be tested and none held either way,
+   the node says so and lists what was ruled out, which is also something a
+   reader cannot see from a few occasions. When none could be tested the
+   node has nothing to show.
+
+A `Pattern` node stores the group's occasions (their messages and linked
+sentences), the generalisations with their questions, and every answer. It
+has an `EVIDENCED_BY` edge to each message of each occasion. Later passes
+keep the generalisations first proposed and only ask about occasions that are
+new or whose text changed, then count again; a generalisation is never
+replaced by one that fits better, which would be testing until something
+passes. A pass over a scope with nothing new makes no call. A node whose
+group is gone is marked `superseded`. Replies are validated: an answer for an
+occasion that was not asked about is dropped, a reply that cannot be read is
+retried once and then left for the next pass. A node forgotten while a pass's
+calls are out is not written back. Forgetting a message of a node removes the
+node and queues the rebuild from what is left. Forgetting only the node
+removes that node; the messages are still there, and a pattern can recur, so
+a later pass over the scope may work it out again as a new node.
+
+**Retrieval.** `memory.retrieve` and `memory.answer` show a pattern node only
+to a question that is about its occasions:
+
+- The question is embedded and compared with every stored sentence of the
+  scope. A node owns the question when more than half of the ten nearest
+  sentences are sentences the node was built from. At most one node is shown.
+- The node is rendered ahead of the raw evidence in a `<patterns>` section
+  and returned in `context.patterns` as an item of type `pattern`, whose
+  evidence is the messages of its occasions, each quoted with the sentences
+  that were linked. It may use at most 40% of the token budget, taken from
+  the raw evidence.
+- A node built from occasions later than `time.validAt` is not shown. With
+  `needs` given, patterns appear only when `current_facts` is among them.
+- `trace.patterns` reports `candidates`, `sentences`, `ownedMost`, `kept` and
+  `tokens` whenever the scope has a node that could be shown.
+
+A lookup ("who did I lend the book to?") draws its nearest sentences from one
+or two messages, so no node owns it and its context is unchanged.
+
+Forgetting any message of an occasion tombstones the node (it is evidenced by
+all of them) and queues a pattern job for the scope, which builds a new node
+from the occasions that remain, proposing and counting afresh.
+
+Known limits. An outcome reported in a later conversation than its
+circumstance (a film roll shot one day and developed the next week) is never
+on one occasion's record, so such a pattern is not found. Grouping compares
+every pair of sentences in each pass: a pass over 2,000 messages (12,000
+sentences) with one new message took 2.8 s on an M-series laptop, most of it
+off the request thread when the background worker runs it. Retrieval reads
+every sentence index of the scope when the scope has a node to show, about
+30 ms at that size. Nothing checks that a proposed outcome is an outcome and
+not just another thing done the same day, so a group of chores can yield a
+true and useless regularity. A small extract model calls most groups a
+routine and finds fewer of the patterns a large one does; see
+[sota-sprint-results.md](sota-sprint-results.md#pattern-nodes-in-the-daemon-november-18).
+
 ## Forgetting V0
 
 `memory.forget` selects roots, then tombstones a closure computed from
@@ -808,7 +933,10 @@ Closure, for each root:
    evidence is included even if its edge write was lost. Facts, preferences,
    procedures, memory cards and episodes fall out of this rule, and so would
    any new derived label. An episode is derived from every message of its turn,
-   so forgetting any of them forgets the episode.
+   so forgetting any of them forgets the episode. A message's sentence index
+   goes the same way, and so does a pattern node built from any occasion the
+   message belongs to; a pattern job is then queued for the scope, which
+   rebuilds the node from the occasions that remain.
 3. Every live node compiled from a forgotten node (`COMPILED_FROM`, which core
    consolidation writes) is contaminated and tombstoned. A block rebuilt in
    place keeps its old edges, so a block whose `evidenceQids` no longer lists

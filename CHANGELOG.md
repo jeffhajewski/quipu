@@ -58,6 +58,30 @@
   other candidates, within half the token budget. `trace.timeAnchors` counts
   the windows and items, and `system.health` reports
   `capabilities.timeAnchors`.
+- Pattern nodes. After a conversation is extracted, a `pattern` job groups
+  alike sentences that people wrote on different occasions and, for a group of
+  six or more occasions, asks the extract model what the group is about, which
+  generalisations it might support, and whether each one's circumstance and
+  outcome were present on each occasion. The daemon counts the answers and
+  keeps a generalisation only when the counts support it (Fisher's exact test,
+  p ≤ 0.06, and a difference of at least 60 points). The result is a `Pattern`
+  node evidenced by every message it counts: either the regularity with its
+  counts, or the statement that the occasions were compared and nothing held.
+  There is no option. It needs a store that embeds text and an extract
+  provider, and runs in the background worker, with `quipu jobs run patterns`
+  or with `memory.patterns.run`. Sentence vectors are kept in `SentenceIndex`
+  nodes, one per message, without the text.
+- `memory.retrieve` and `memory.answer` show a pattern node to a question it
+  owns (more than half of the ten stored sentences nearest the question are
+  the node's own): a `<patterns>` section ahead of the raw evidence, an item
+  of type `pattern` in the new `context.patterns` array, and `trace.patterns`.
+  At most one node, at most 40% of the token budget. `context.patterns` is
+  always present and empty for a question no node owns. `system.health`
+  reports `capabilities.patterns` and `workers.patterns`.
+- Forgetting a message tombstones its sentence index and every pattern node
+  that counted it, and queues a rebuild of the scope's pattern nodes from what
+  remains. A pattern node forgotten on its own, with its messages kept, may be
+  worked out again by a later pass.
 - A chat call to a model provider is given up after five minutes with
   `ProviderTimeout`. It used to wait without limit, so a connection that died
   while the machine slept left `memory.extract.run`, or the background

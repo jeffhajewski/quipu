@@ -29,7 +29,8 @@
       },
       "workers": {
         "extractor": "unavailable",
-        "consolidator": "unavailable"
+        "consolidator": "unavailable",
+        "patterns": "unavailable"
       },
       "capabilities": {
         "reranker": {
@@ -44,6 +45,10 @@
         "factKeys": true,
         "facts": true,
         "timeAnchors": true,
+        "patterns": {
+          "available": false,
+          "promptVersion": "quipu.patterns.v1"
+        },
         "queryExpansion": {
           "modes": [
             "off",

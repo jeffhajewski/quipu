@@ -254,6 +254,21 @@ embedding provider. It runs in the background worker, with
 `workers.consolidator` reports `running`, `stopped` or `unavailable` the same
 way as the extractor.
 
+Pattern jobs use the same model and need no flag (see
+[algorithms.md](algorithms.md#pattern-nodes)). A `pattern` job is queued for
+the scope after each extracted conversation, on a store that embeds text. It
+sends the embedding provider the sentences of messages not yet indexed, and
+the extract model the sentences of each group of recurring occasions: one
+call to name a group, one to propose generalisations, and one for every three
+occasions each generalisation is checked against. Only occasions that are new
+are sent again. Like the other jobs it runs in the background worker, with
+`quipu jobs run patterns`, or with `memory.patterns.run`, so nothing is sent
+until extraction itself has been asked for. `system.health` reports
+`capabilities.patterns: {"available", "promptVersion"}`; `available` is false
+on a store without embeddings. `workers.patterns` is `running`, `stopped` or
+`unavailable` the same way as the extractor, and `unavailable` on such a
+store.
+
 `system.health` reports `workers.extractor` and
 `capabilities.extractor: {"configured", "model", "promptVersion"}`. The worker
 is `running` when the daemon drains jobs in the background, `stopped` when an

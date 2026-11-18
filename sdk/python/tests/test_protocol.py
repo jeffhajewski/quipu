@@ -240,6 +240,39 @@ class ProtocolFixtureTests(unittest.TestCase):
         default = json.loads((FIXTURE_DIR / "memory.retrieve.success.json").read_text())
         self.assertNotIn("timeAnchors", default["response"]["result"]["trace"])
 
+    def test_pattern_nodes_are_part_of_every_context_with_no_option(self):
+        defs = json.loads((SCHEMA_DIR / "methods.schema.json").read_text())["$defs"]
+        self.assertIn("pattern", defs["memoryItem"]["properties"]["type"]["enum"])
+        for result in ("memoryRetrieveResult", "memoryAnswerResult"):
+            self.assertIn("patterns", defs[result]["properties"]["context"]["required"])
+        for params in ("memoryRetrieveParams", "memoryAnswerParams"):
+            self.assertNotIn("patterns", defs[params]["properties"]["options"]["properties"])
+        capability = defs["systemHealthResult"]["properties"]["capabilities"]["properties"]["patterns"]
+        self.assertEqual(capability["required"], ["available", "promptVersion"])
+
+        fixture = json.loads((FIXTURE_DIR / "memory.retrieve.patterns.json").read_text())
+        self.assertNotIn("patterns", fixture["request"]["params"]["options"])
+        result = fixture["response"]["result"]
+        self.assertIn("<patterns>\n[q_pat_", result["prompt"])
+        self.assertEqual(len(result["context"]["patterns"]), 1)
+        pattern = result["context"]["patterns"][0]
+        self.assertEqual(pattern["type"], "pattern")
+        self.assertIn("Worked out by the memory from 8 occasions, never stated by the person", pattern["text"])
+        # Every occasion the finding counts is evidence, quoted.
+        self.assertEqual(len(pattern["evidence"]), 8)
+        item_qids = {item["qid"] for item in result["items"]}
+        for evidence in pattern["evidence"]:
+            self.assertIn("sourdough loaf", evidence["quote"])
+            self.assertIn(evidence["qid"], item_qids)
+        self.assertEqual(
+            result["trace"]["patterns"],
+            {"candidates": 1, "sentences": 26, "ownedMost": 10, "kept": 1, "tokens": 75},
+        )
+
+        plain = json.loads((FIXTURE_DIR / "memory.retrieve.success.json").read_text())
+        self.assertEqual(plain["response"]["result"]["context"]["patterns"], [])
+        self.assertNotIn("patterns", plain["response"]["result"]["trace"])
+
     def test_query_expansion_is_part_of_the_retrieve_and_answer_contract(self):
         defs = json.loads((SCHEMA_DIR / "methods.schema.json").read_text())["$defs"]
         self.assertEqual(defs["queryExpansionMode"]["enum"], ["off", "rules", "llm"])

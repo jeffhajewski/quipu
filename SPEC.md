@@ -1319,6 +1319,8 @@ quipu.fact.upserted
 quipu.card.created
 quipu.consolidate.requested
 quipu.consolidate.completed
+quipu.pattern.requested
+quipu.pattern.completed
 quipu.forget.requested
 quipu.forget.completed
 quipu.retrieval.logged
@@ -1583,6 +1585,7 @@ Response:
     "currentFacts": [],
     "preferences": [],
     "procedural": [],
+    "patterns": [],
     "episodes": [],
     "warnings": []
   },
@@ -2080,6 +2083,38 @@ nodes. `docs/algorithms.md` is the detailed reference; the contract is:
   Without `options.facts`, claims and updates take no part in the context.
 - Both jobs are asynchronous. `memory.remember` only queues them; they run in
   the background worker (`--background on`) or on request.
+
+#### 10.7.2 Implemented second: pattern nodes
+
+The second consolidation output is a node above the raw messages rather than
+a link between two claims: what the memory works out from occasions that
+recur. `docs/algorithms.md` is the detailed reference; the contract is:
+
+- A `pattern` job, queued per scope after an `extract` job succeeds on a store
+  that embeds text, groups alike sentences that people wrote on different
+  occasions. It works from the raw messages, not from extracted claims, which
+  drop too many of the sentences that say how an occasion went.
+- For a group of at least six occasions the extract model names the group,
+  proposes generalisations as a circumstance and an outcome, and answers both
+  questions for each occasion separately. Whether a generalisation holds is
+  decided by counting those answers (Fisher's exact test and a minimum
+  difference), never by the model (invariant: validate LLM output). The
+  finding states the counts, or that the occasions were compared and nothing
+  held.
+- A `:Pattern` node is `EVIDENCED_BY` every message of every occasion it
+  counts (invariant 2) and carries the scope of those messages (invariant 3).
+  No message is rewritten (invariant 1). Forgetting any of the messages
+  tombstones the node and the message's `:SentenceIndex` node, and queues a
+  rebuild from what remains (invariant 5).
+- A pattern node is inferred, and its text says so. It is shown by
+  `memory.retrieve` and `memory.answer` only to a question whose nearest
+  stored sentences are mostly the node's own, at most one node, in
+  `context.patterns`, ahead of the raw evidence it summarises and never
+  instead of it. This is daemon behaviour with no request option: a question
+  that no node owns gets the context it would have had.
+- The generalisations first proposed for a node are kept; new occasions are
+  counted against them. A regularity that stops holding is reported as no
+  longer holding by the counts.
 
 ### 10.8 Retrieval planner
 

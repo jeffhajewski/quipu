@@ -173,6 +173,38 @@ test("timeAnchors is a retrieve and answer option that brings in what was said o
   assert.deepEqual(result.trace.timeAnchors, { windows: 1, items: 1, tokens: 31 });
 });
 
+test("pattern nodes are part of every retrieve and answer context, with no option", () => {
+  const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
+  assert.ok(schema.$defs.memoryItem.properties.type.enum.includes("pattern"));
+  for (const def of ["memoryRetrieveResult", "memoryAnswerResult"]) {
+    assert.ok(schema.$defs[def].properties.context.required.includes("patterns"));
+  }
+  for (const def of ["memoryRetrieveParams", "memoryAnswerParams"]) {
+    assert.equal(schema.$defs[def].properties.options.properties.patterns, undefined);
+  }
+  assert.deepEqual(schema.$defs.systemHealthResult.properties.capabilities.properties.patterns.required, ["available", "promptVersion"]);
+
+  const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.retrieve.patterns.json"), "utf8"));
+  assert.equal(fixture.request.params.options.patterns, undefined);
+  const result = fixture.response.result;
+  assert.ok(result.prompt.includes("<patterns>\n[q_pat_"));
+  assert.equal(result.context.patterns.length, 1);
+  const pattern = result.context.patterns[0];
+  assert.equal(pattern.type, "pattern");
+  assert.ok(pattern.text.includes("Worked out by the memory from 8 occasions, never stated by the person"));
+  // Every occasion the finding counts is evidence, quoted.
+  assert.equal(pattern.evidence.length, 8);
+  for (const evidence of pattern.evidence) {
+    assert.ok(evidence.quote.includes("sourdough loaf"));
+    assert.ok(result.items.some((item) => item.qid === evidence.qid));
+  }
+  assert.deepEqual(result.trace.patterns, { candidates: 1, sentences: 26, ownedMost: 10, kept: 1, tokens: 75 });
+
+  const plain = JSON.parse(readFileSync(path.join(fixtureDir, "memory.retrieve.success.json"), "utf8"));
+  assert.deepEqual(plain.response.result.context.patterns, []);
+  assert.equal(plain.response.result.trace.patterns, undefined);
+});
+
 test("method schema accepts slot metadata, support validity, and answer prompt", () => {
   const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
   assert.ok(schema.$defs.memoryItem.properties.slotKey);

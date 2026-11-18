@@ -1,0 +1,543 @@
+{
+  "name": "memory.retrieve with a pattern node",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_patterns",
+    "method": "memory.retrieve",
+    "params": {
+      "query": "Why do some of my sourdough loaves come out flat?",
+      "mode": "fts",
+      "budgetTokens": 2000,
+      "scope": {
+        "userId": "baker"
+      },
+      "options": {
+        "includeDebug": true,
+        "logRetrieval": false
+      }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_patterns",
+    "result": {
+      "retrievalId": "q_retr_92",
+      "prompt": "<memory>\n<patterns>\n[q_pat_91] (current, from 2025-01-01) Sourdough loaves: Worked out by the memory from 8 occasions, never stated by the person: The user's loaves proved in the fridge come out flat (so on 4 of the 4 occasions where that applied, against 0 of the 4 where it did not).\n</patterns>\n<sessions>\n## session day-1 2025-01-01 (Wed)\n[q_msg_4] user: I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.\n## session day-3 2025-01-03 (Fri)\n[q_msg_14] user: I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.\n## session day-5 2025-01-05 (Sun)\n[q_msg_24] user: I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.\n## session day-7 2025-01-07 (Tue)\n[q_msg_34] user: I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.\n## session day-9 2025-01-09 (Thu)\n[q_msg_44] user: I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.\n## session day-11 2025-01-11 (Sat)\n[q_msg_54] user: I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.\n## session day-13 2025-01-13 (Mon)\n[q_msg_64] user: I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.\n## session day-15 2025-01-15 (Wed)\n[q_msg_74] user: I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.\n</sessions>\n</memory>",
+      "context": {
+        "core": [],
+        "currentFacts": [],
+        "preferences": [],
+        "procedural": [],
+        "patterns": [
+          {
+            "qid": "q_pat_91",
+            "type": "pattern",
+            "text": "Sourdough loaves: Worked out by the memory from 8 occasions, never stated by the person: The user's loaves proved in the fridge come out flat (so on 4 of the 4 occasions where that applied, against 0 of the 4 where it did not).",
+            "score": 1,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2025-01-01T19:00:00Z",
+            "validTo": null,
+            "evidence": [
+              {
+                "qid": "q_msg_4",
+                "quote": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+                "timestamp": "2025-01-01T19:00:00Z"
+              },
+              {
+                "qid": "q_msg_14",
+                "quote": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+                "timestamp": "2025-01-03T19:00:00Z"
+              },
+              {
+                "qid": "q_msg_24",
+                "quote": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+                "timestamp": "2025-01-05T19:00:00Z"
+              },
+              {
+                "qid": "q_msg_34",
+                "quote": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+                "timestamp": "2025-01-07T19:00:00Z"
+              },
+              {
+                "qid": "q_msg_44",
+                "quote": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+                "timestamp": "2025-01-09T19:00:00Z"
+              },
+              {
+                "qid": "q_msg_54",
+                "quote": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+                "timestamp": "2025-01-11T19:00:00Z"
+              },
+              {
+                "qid": "q_msg_64",
+                "quote": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+                "timestamp": "2025-01-13T19:00:00Z"
+              },
+              {
+                "qid": "q_msg_74",
+                "quote": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+                "timestamp": "2025-01-15T19:00:00Z"
+              }
+            ]
+          }
+        ],
+        "episodes": [
+          {
+            "qid": "q_msg_64",
+            "type": "message",
+            "text": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+            "score": 2.866297721862793,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2025-01-13T19:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_44",
+            "type": "message",
+            "text": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+            "score": 2.866297721862793,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2025-01-09T19:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_24",
+            "type": "message",
+            "text": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+            "score": 2.866297721862793,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2025-01-05T19:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "text": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+            "score": 2.866297721862793,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2025-01-01T19:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_74",
+            "type": "message",
+            "text": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+            "score": 1.6551002264022827,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2025-01-15T19:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_54",
+            "type": "message",
+            "text": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+            "score": 1.6551002264022827,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2025-01-11T19:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_34",
+            "type": "message",
+            "text": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+            "score": 1.6551002264022827,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2025-01-07T19:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_14",
+            "type": "message",
+            "text": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+            "score": 1.6551002264022827,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2025-01-03T19:00:00Z",
+            "validTo": null,
+            "evidence": []
+          }
+        ],
+        "warnings": []
+      },
+      "items": [
+        {
+          "qid": "q_msg_64",
+          "type": "message",
+          "text": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+          "score": 2.866297721862793,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2025-01-13T19:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_44",
+          "type": "message",
+          "text": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+          "score": 2.866297721862793,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2025-01-09T19:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_24",
+          "type": "message",
+          "text": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+          "score": 2.866297721862793,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2025-01-05T19:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_4",
+          "type": "message",
+          "text": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+          "score": 2.866297721862793,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2025-01-01T19:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_74",
+          "type": "message",
+          "text": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+          "score": 1.6551002264022827,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2025-01-15T19:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_54",
+          "type": "message",
+          "text": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+          "score": 1.6551002264022827,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2025-01-11T19:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_34",
+          "type": "message",
+          "text": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+          "score": 1.6551002264022827,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2025-01-07T19:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_14",
+          "type": "message",
+          "text": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+          "score": 1.6551002264022827,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2025-01-03T19:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_pat_91",
+          "type": "pattern",
+          "text": "Sourdough loaves: Worked out by the memory from 8 occasions, never stated by the person: The user's loaves proved in the fridge come out flat (so on 4 of the 4 occasions where that applied, against 0 of the 4 where it did not).",
+          "score": 1,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2025-01-01T19:00:00Z",
+          "validTo": null,
+          "evidence": [
+            {
+              "qid": "q_msg_4",
+              "quote": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+              "timestamp": "2025-01-01T19:00:00Z"
+            },
+            {
+              "qid": "q_msg_14",
+              "quote": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+              "timestamp": "2025-01-03T19:00:00Z"
+            },
+            {
+              "qid": "q_msg_24",
+              "quote": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+              "timestamp": "2025-01-05T19:00:00Z"
+            },
+            {
+              "qid": "q_msg_34",
+              "quote": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+              "timestamp": "2025-01-07T19:00:00Z"
+            },
+            {
+              "qid": "q_msg_44",
+              "quote": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+              "timestamp": "2025-01-09T19:00:00Z"
+            },
+            {
+              "qid": "q_msg_54",
+              "quote": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+              "timestamp": "2025-01-11T19:00:00Z"
+            },
+            {
+              "qid": "q_msg_64",
+              "quote": "I baked a sourdough loaf and proved the dough in the fridge overnight. That sourdough loaf came out flat and dense.",
+              "timestamp": "2025-01-13T19:00:00Z"
+            },
+            {
+              "qid": "q_msg_74",
+              "quote": "I baked a sourdough loaf and proved the dough on the counter today. That sourdough loaf came out tall and airy.",
+              "timestamp": "2025-01-15T19:00:00Z"
+            }
+          ]
+        }
+      ],
+      "tokenEstimate": 394,
+      "confidence": 0.7200000286102295,
+      "warnings": [],
+      "trace": {
+        "query": "Why do some of my sourdough loaves come out flat?",
+        "requestedNeedsCount": 0,
+        "budgetTokens": 2000,
+        "candidateSources": {
+          "fts": 8,
+          "vector": 0,
+          "hybrid": 0,
+          "graph": 0,
+          "core": 0
+        },
+        "candidateCount": 8,
+        "keptCount": 9,
+        "droppedForNeeds": 0,
+        "droppedForBudget": 0,
+        "tokenEstimate": 394,
+        "validAt": null,
+        "scoreBreakdowns": [
+          {
+            "qid": "q_msg_64",
+            "type": "message",
+            "score": 2.866297721862793,
+            "lexical": 0.7413546442985535,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_44",
+            "type": "message",
+            "score": 2.866297721862793,
+            "lexical": 0.7413546442985535,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_24",
+            "type": "message",
+            "score": 2.866297721862793,
+            "lexical": 0.7413546442985535,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "score": 2.866297721862793,
+            "lexical": 0.7413546442985535,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_74",
+            "type": "message",
+            "score": 1.6551002264022827,
+            "lexical": 0.6233663558959961,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_54",
+            "type": "message",
+            "score": 1.6551002264022827,
+            "lexical": 0.6233663558959961,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_34",
+            "type": "message",
+            "score": 1.6551002264022827,
+            "lexical": 0.6233663558959961,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_14",
+            "type": "message",
+            "score": 1.6551002264022827,
+            "lexical": 0.6233663558959961,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_pat_91",
+            "type": "pattern",
+            "score": 1,
+            "lexical": 0.5,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          }
+        ],
+        "scoringDetails": [
+          {
+            "qid": "q_msg_64",
+            "type": "message",
+            "finalScore": 2.866297721862793,
+            "lexical": 0.7413546442985535,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_msg_44",
+            "type": "message",
+            "finalScore": 2.866297721862793,
+            "lexical": 0.7413546442985535,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_msg_24",
+            "type": "message",
+            "finalScore": 2.866297721862793,
+            "lexical": 0.7413546442985535,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "finalScore": 2.866297721862793,
+            "lexical": 0.7413546442985535,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_msg_74",
+            "type": "message",
+            "finalScore": 1.6551002264022827,
+            "lexical": 0.6233663558959961,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_msg_54",
+            "type": "message",
+            "finalScore": 1.6551002264022827,
+            "lexical": 0.6233663558959961,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_msg_34",
+            "type": "message",
+            "finalScore": 1.6551002264022827,
+            "lexical": 0.6233663558959961,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_msg_14",
+            "type": "message",
+            "finalScore": 1.6551002264022827,
+            "lexical": 0.6233663558959961,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_pat_91",
+            "type": "pattern",
+            "finalScore": 1,
+            "lexical": 0.5,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          }
+        ],
+        "droppedItemReasons": [],
+        "patterns": {
+          "candidates": 1,
+          "sentences": 26,
+          "ownedMost": 10,
+          "kept": 1,
+          "tokens": 75
+        }
+      }
+    }
+  }
+}

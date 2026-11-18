@@ -67,6 +67,13 @@ Quipu currently supports:
   core memory blocks.
 - Native LatticeDB-backed persistence with graph nodes/edges, FTS,
   configurable hash or OpenAI-compatible vector search, and durable streams.
+- Pattern nodes: after extraction, a background job groups what a person
+  wrote about one kind of recurring occasion, has the extract model propose
+  generalisations and answer them occasion by occasion, and stores what the
+  counts support, or that nothing held, as a node evidenced by every message
+  it counted. `memory.retrieve` and `memory.answer` show a node only to a
+  question that is about its occasions, with no option. See
+  [docs/algorithms.md](./docs/algorithms.md#pattern-nodes).
 - Durable stream events can be materialized into idempotent `Job` nodes for
   extraction, async entity resolution, consolidation, forgetting, retrieval
   logging, and feedback work.
@@ -366,11 +373,11 @@ Still in progress:
 - Release artifacts for Quipu itself.
 - Full migration runner and compatibility checks.
 - Learned scoring beyond deterministic RRF/graph boosts and the optional reranker.
-- LLM-backed consolidation beyond knowledge updates (summaries, reflections,
-  procedures). Extraction and the opt-in update consolidation
-  (`--consolidate on`, read back with `options.facts`) run as a background
-  worker when the daemon is started with `--background on`; entity resolution
-  still runs only on request.
+- LLM-backed consolidation beyond knowledge updates and pattern nodes
+  (summaries, reflections, procedures). Extraction, the opt-in update
+  consolidation (`--consolidate on`, read back with `options.facts`) and
+  pattern nodes run as a background worker when the daemon is started with
+  `--background on`; entity resolution still runs only on request.
 - Judge scoring for LoCoMo publication.
 - MemoryAgentBench adapter.
 - Richer host integrations.

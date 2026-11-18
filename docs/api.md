@@ -99,6 +99,17 @@ relevant first, using at most half the token budget. A question that names no
 time is unaffected. The trace gains a `timeAnchors` block. See
 [algorithms.md](algorithms.md#time-anchors).
 
+Pattern nodes need no option. When the background work has built a node from
+occasions that recur (the same kind of thing told on six or more days), and
+the question is about those occasions, the node is placed ahead of the raw
+evidence in a `<patterns>` section and returned in `context.patterns` as one
+item of type `pattern`. Its text says that the memory worked it out and from
+how many occasions, and its evidence is the messages of those occasions, each
+quoted. It uses at most 40% of the token budget. A question no node owns has
+an empty `context.patterns` and the context it would have had. The trace
+gains a `patterns` block when the scope has a node that could be shown. See
+[algorithms.md](algorithms.md#pattern-nodes).
+
 ## Search V0
 
 `memory.search` supports `mode: "fts"`, `"vector"`, `"hybrid"`, and `"graph"`.

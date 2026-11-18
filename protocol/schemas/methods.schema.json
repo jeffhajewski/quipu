@@ -43,7 +43,7 @@
         "qid": { "$ref": "#/$defs/qid" },
         "type": {
           "type": "string",
-          "enum": ["raw", "message", "episode", "memory_card", "fact", "preference", "procedure", "core", "summary", "entity", "assertion"]
+          "enum": ["raw", "message", "episode", "memory_card", "fact", "preference", "procedure", "core", "summary", "entity", "assertion", "pattern"]
         },
         "text": { "type": "string" },
         "score": { "type": "number", "minimum": 0 },
@@ -159,7 +159,21 @@
         "factKeys": { "$ref": "#/$defs/factKeysTrace" },
         "queryExpansion": { "$ref": "#/$defs/queryExpansionTrace" },
         "facts": { "$ref": "#/$defs/factsTrace" },
-        "timeAnchors": { "$ref": "#/$defs/timeAnchorsTrace" }
+        "timeAnchors": { "$ref": "#/$defs/timeAnchorsTrace" },
+        "patterns": { "$ref": "#/$defs/patternsTrace" }
+      }
+    },
+    "patternsTrace": {
+      "type": "object",
+      "description": "Present when the scope has pattern nodes that could be shown. A pattern node is shown only to a question it owns: more than half of the ten stored sentences nearest the question are sentences the node was built from.",
+      "required": ["candidates", "sentences", "ownedMost", "kept", "tokens"],
+      "additionalProperties": false,
+      "properties": {
+        "candidates": { "type": "integer", "minimum": 0, "description": "Current pattern nodes in scope with a finding to show." },
+        "sentences": { "type": "integer", "minimum": 0, "description": "Stored sentences compared with the question." },
+        "ownedMost": { "type": "integer", "minimum": 0, "maximum": 10, "description": "How many of the ten nearest sentences belong to the node that has the most of them." },
+        "kept": { "type": "integer", "minimum": 0, "maximum": 1, "description": "Pattern nodes put in the context." },
+        "tokens": { "type": "integer", "minimum": 0, "description": "Budget tokens the pattern node took." }
       }
     },
     "queryExpansionMode": {
@@ -453,6 +467,16 @@
               "type": "boolean",
               "description": "memory.retrieve and memory.answer accept options.timeAnchors."
             },
+            "patterns": {
+              "type": "object",
+              "required": ["available", "promptVersion"],
+              "additionalProperties": false,
+              "description": "Pattern nodes: what the background worker works out from occasions that recur. Built when the store embeds text and an extract provider is configured; memory.retrieve and memory.answer show one to a question it owns.",
+              "properties": {
+                "available": { "type": "boolean", "description": "True when the store can embed sentences." },
+                "promptVersion": { "type": "string" }
+              }
+            },
             "queryExpansion": {
               "type": "object",
               "required": ["modes", "llmConfigured", "model"],
@@ -618,7 +642,7 @@
         "prompt": { "type": "string" },
         "context": {
           "type": "object",
-          "required": ["core", "currentFacts", "preferences", "procedural", "episodes", "warnings"],
+          "required": ["core", "currentFacts", "preferences", "procedural", "patterns", "episodes", "warnings"],
           "additionalProperties": false,
           "properties": {
             "core": {
@@ -635,6 +659,12 @@
             },
             "procedural": {
               "type": "array",
+              "items": { "$ref": "#/$defs/memoryItem" }
+            },
+            "patterns": {
+              "type": "array",
+              "maxItems": 1,
+              "description": "A pattern node the question owns: a regularity the memory worked out across occasions, or the record that it compared them and found none. Its evidence is the messages of those occasions.",
               "items": { "$ref": "#/$defs/memoryItem" }
             },
             "episodes": {
@@ -750,7 +780,7 @@
         },
         "context": {
           "type": "object",
-          "required": ["core", "currentFacts", "preferences", "procedural", "episodes", "warnings"],
+          "required": ["core", "currentFacts", "preferences", "procedural", "patterns", "episodes", "warnings"],
           "additionalProperties": false,
           "properties": {
             "core": {
@@ -767,6 +797,12 @@
             },
             "procedural": {
               "type": "array",
+              "items": { "$ref": "#/$defs/memoryItem" }
+            },
+            "patterns": {
+              "type": "array",
+              "maxItems": 1,
+              "description": "A pattern node the question owns: a regularity the memory worked out across occasions, or the record that it compared them and found none. Its evidence is the messages of those occasions.",
               "items": { "$ref": "#/$defs/memoryItem" }
             },
             "episodes": {
