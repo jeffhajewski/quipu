@@ -138,12 +138,16 @@ fn isHex4(text: []const u8) bool {
 /// One grounded claim. `text` and `event_date` borrow from the parsed reply
 /// and `quote` from its source message, so both must outlive the claim.
 pub const Claim = struct {
+    /// The fact, with its relative times written as calendar dates.
     text: []const u8,
+    /// The fact as the model wrote it, when `text` differs from that.
+    stated_text: ?[]const u8 = null,
     /// The quoted span exactly as the message has it.
     quote: []const u8,
     /// Index into the source messages; the quote occurs verbatim in it.
     message_index: usize,
     /// `YYYY-MM-DD` or `YYYY-MM`, validated; null when absent or rejected.
+    /// When the fact names one day ("yesterday"), this is that day.
     event_date: ?[]const u8 = null,
     planned: bool = false,
     /// The model's index was wrong or missing; the quote located the message.
@@ -170,6 +174,14 @@ pub const Counts = struct {
     /// Event dates dropped as malformed or implausible; their claims stay.
     eventDatesRejected: usize = 0,
     planned: usize = 0,
+    /// Accepted claims whose relative times were written as calendar dates.
+    timesResolved: usize = 0,
+    /// Event dates taken from the one day a claim names, where the model gave
+    /// none (included in `eventDates`).
+    eventDatesDerived: usize = 0,
+    /// Event dates the model gave that differed from that day and were
+    /// replaced by it.
+    eventDatesCorrected: usize = 0,
 
     pub fn add(self: *Counts, other: Counts) void {
         inline for (std.meta.fields(Counts)) |field| {
@@ -181,14 +193,23 @@ pub const Counts = struct {
 pub const Grounding = struct {
     claims: []Claim,
     counts: Counts,
+    /// Rewritten texts and derived dates that claims borrow.
+    owned: [][]u8 = &.{},
 
     pub fn deinit(self: Grounding, allocator: std.mem.Allocator) void {
+        for (self.owned) |string| allocator.free(string);
+        allocator.free(self.owned);
         allocator.free(self.claims);
     }
 };
 
 /// Grounds every item of a parsed reply against `messages`. Claims borrow
 /// strings from `payload`, which must outlive the result.
+///
+/// A fact is said on its message's date, so the relative times in it are
+/// then written as calendar dates (`temporal.resolveStatedTimes`): a fact that
+/// says "yesterday" reads wrongly on every day but one. When a fact names one
+/// day, that day is its event date, whatever the model computed.
 pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: []const SourceMessage) !Grounding {
     const items = switch (payload) {
         .object => |object| switch (object.get("assertions") orelse return error.MalformedExtraction) {
@@ -199,6 +220,11 @@ pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: [
     };
     var claims = std.ArrayList(Claim).empty;
     errdefer claims.deinit(allocator);
+    var owned = std.ArrayList([]u8).empty;
+    errdefer {
+        for (owned.items) |string| allocator.free(string);
+        owned.deinit(allocator);
+    }
     var counts = Counts{ .candidates = items.len };
     for (items) |item| {
         const object = switch (item) {
@@ -252,7 +278,7 @@ pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: [
             continue;
         }
 
-        const planned = switch (object.get("planned") orelse .null) {
+        var planned = switch (object.get("planned") orelse .null) {
             .bool => |value| value,
             else => false,
         };
@@ -269,8 +295,23 @@ pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: [
             },
             else => counts.eventDatesRejected += 1,
         }
+        var resolved_text: ?[]const u8 = null;
+        if (try resolveTimes(allocator, &owned, text, messages[located].created_at)) |resolved| {
+            resolved_text = resolved.text;
+            counts.timesResolved += 1;
+            if (resolved.day) |day| {
+                if (event_date == null) {
+                    counts.eventDatesDerived += 1;
+                } else if (!std.mem.eql(u8, event_date.?, day)) {
+                    counts.eventDatesCorrected += 1;
+                }
+                event_date = day;
+                if (resolved.after_said) planned = true;
+            }
+        }
         try claims.append(allocator, .{
-            .text = text,
+            .text = resolved_text orelse text,
+            .stated_text = if (resolved_text != null) text else null,
             .quote = quote,
             .message_index = located,
             .event_date = event_date,
@@ -282,7 +323,43 @@ pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: [
         if (event_date != null) counts.eventDates += 1;
         if (planned) counts.planned += 1;
     }
-    return .{ .claims = try claims.toOwnedSlice(allocator), .counts = counts };
+    const owned_slice = try owned.toOwnedSlice(allocator);
+    errdefer {
+        for (owned_slice) |string| allocator.free(string);
+        allocator.free(owned_slice);
+    }
+    return .{ .claims = try claims.toOwnedSlice(allocator), .counts = counts, .owned = owned_slice };
+}
+
+const ResolvedTimes = struct {
+    text: []const u8,
+    /// `YYYY-MM-DD`, when the fact names exactly one day.
+    day: ?[]const u8 = null,
+    /// That day is after the day the fact was said.
+    after_said: bool = false,
+};
+
+/// `text` with its relative times resolved against the day it was said, or
+/// null when it names none or the message has no date. The strings go into
+/// `owned`.
+fn resolveTimes(allocator: std.mem.Allocator, owned: *std.ArrayList([]u8), text: []const u8, created_at: ?[]const u8) !?ResolvedTimes {
+    const said = temporal.parseIsoDate(created_at orelse return null) catch return null;
+    const stated = (try temporal.resolveStatedTimes(allocator, text, said)) orelse return null;
+    owned.append(allocator, stated.text) catch |err| {
+        allocator.free(stated.text);
+        return err;
+    };
+    var resolved = ResolvedTimes{ .text = stated.text };
+    if (stated.day) |day| {
+        const written = try std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u32, @intCast(day.year)), day.month, day.day });
+        owned.append(allocator, written) catch |err| {
+            allocator.free(written);
+            return err;
+        };
+        resolved.day = written;
+        resolved.after_said = temporal.daysFromCivil(day) > temporal.daysFromCivil(said);
+    }
+    return resolved;
 }
 
 fn nonBlankString(value: ?std.json.Value) ?[]const u8 {
@@ -348,7 +425,7 @@ fn uniqueMessageContaining(messages: []const SourceMessage, quote: []const u8) L
 
 fn containsClaim(claims: []const Claim, message_index: usize, quote: []const u8, text: []const u8) bool {
     for (claims) |claim| {
-        if (claim.message_index == message_index and std.mem.eql(u8, claim.quote, quote) and std.mem.eql(u8, claim.text, text)) return true;
+        if (claim.message_index == message_index and std.mem.eql(u8, claim.quote, quote) and std.mem.eql(u8, claim.stated_text orelse claim.text, text)) return true;
     }
     return false;
 }
@@ -532,6 +609,54 @@ test "grounding rejects malformed and implausible event dates but keeps the clai
     try testing.expectEqual(@as(usize, 4), result.grounding.counts.eventDatesRejected);
     try testing.expectEqual(@as(usize, 2), result.grounding.counts.eventDates);
     try testing.expectEqual(@as(usize, 1), result.grounding.counts.planned);
+}
+
+test "grounding writes relative times as dates and dates the claim by them" {
+    // The messages are dated 2023-05-22, a Monday.
+    const result = try groundReply(
+        \\{"assertions":[
+        \\{"text":"The user adopted a cat named Miso yesterday.","messageIndex":0,"quote":"I adopted a cat named Miso yesterday."},
+        \\{"text":"The user adopted a cat yesterday.","messageIndex":0,"quote":"adopted a cat","eventDate":"2023-05-14"},
+        \\{"text":"The user takes Miso to the vet tomorrow.","messageIndex":2,"quote":"I named her Miso"},
+        \\{"text":"The user named a cat last week.","messageIndex":2,"quote":"because of the soup","eventDate":"2023-05"},
+        \\{"text":"The user recently adopted a cat.","messageIndex":0,"quote":"named Miso"},
+        \\{"text":"The user named her cat Miso because of the soup.","messageIndex":2,"quote":"I named her Miso because of the soup."},
+        \\{"text":"The user adopted a cat named Miso yesterday.","messageIndex":0,"quote":"I adopted a cat named Miso yesterday."}
+        \\]}
+    );
+    defer result.parsed.deinit();
+    defer result.grounding.deinit(testing.allocator);
+    const claims = result.grounding.claims;
+    try testing.expectEqual(@as(usize, 6), claims.len);
+
+    // One day named, no date from the model: the day becomes the event date.
+    try testing.expectEqualStrings("The user adopted a cat named Miso on Sunday, May 21, 2023.", claims[0].text);
+    try testing.expectEqualStrings("The user adopted a cat named Miso yesterday.", claims[0].stated_text.?);
+    try testing.expectEqualStrings("2023-05-21", claims[0].event_date.?);
+    try testing.expect(!claims[0].planned);
+    // The model's own arithmetic loses to the calendar.
+    try testing.expectEqualStrings("2023-05-21", claims[1].event_date.?);
+    // A day after the message is a plan.
+    try testing.expectEqualStrings("The user takes Miso to the vet on Tuesday, May 23, 2023.", claims[2].text);
+    try testing.expectEqualStrings("2023-05-23", claims[2].event_date.?);
+    try testing.expect(claims[2].planned);
+    // A period is written out; the model's coarser date stays.
+    try testing.expectEqualStrings("The user named a cat in the week of May 15 to May 21, 2023.", claims[3].text);
+    try testing.expectEqualStrings("2023-05", claims[3].event_date.?);
+    // A time that cannot be placed gets the day it was said.
+    try testing.expectEqualStrings("The user recently adopted a cat (said on May 22, 2023).", claims[4].text);
+    try testing.expectEqual(@as(?[]const u8, null), claims[4].event_date);
+    // Nothing to resolve: the text is the model's.
+    try testing.expectEqual(@as(?[]const u8, null), claims[5].stated_text);
+
+    const counts = result.grounding.counts;
+    // The repeat of the first item is still recognised after the rewrite.
+    try testing.expectEqual(@as(usize, 1), counts.duplicates);
+    try testing.expectEqual(@as(usize, 5), counts.timesResolved);
+    try testing.expectEqual(@as(usize, 2), counts.eventDatesDerived);
+    try testing.expectEqual(@as(usize, 1), counts.eventDatesCorrected);
+    try testing.expectEqual(@as(usize, 4), counts.eventDates);
+    try testing.expectEqual(@as(usize, 1), counts.planned);
 }
 
 test "event date validation" {

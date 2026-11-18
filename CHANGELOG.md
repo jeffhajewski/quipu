@@ -19,6 +19,15 @@
   ASCII-only index.
 - A store opened with different vector dimensions than it was created with
   fails with `VectorConfigMismatch`.
+- Extracted claims no longer keep relative times. "Yesterday", "last week",
+  "10 days ago" and the like are written as calendar dates, resolved against
+  the date of the message by a fixed grammar, not by the model: "went to the
+  dentist yesterday" is stored as "went to the dentist on Monday, May 8,
+  2023". Times that cannot be placed ("recently") get "(said on DATE)". A
+  claim that names one day takes that day as its `eventDate`. The model's
+  wording is kept as `statedText` and remains what search indexes, and the
+  extract job result counts
+  `timesResolved`, `eventDatesDerived` and `eventDatesCorrected`.
 - Job leases use wall-clock time (they used 0), and an expired lease returns
   its job to `pending`, or dead-letters it once its attempts run out.
   `quipu jobs lease|complete|fail` record real times too.

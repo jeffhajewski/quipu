@@ -524,18 +524,49 @@ pending jobs:
    day) or `YYYY-MM`, with a year from 1900 to 2999. It must not fall after the
    source message's date unless the claim is `planned`. A bad date is dropped
    and counted (`eventDatesRejected`); the claim stays.
-6. Write each accepted claim as an `Assertion` node with
-   `{kind: "assertion", text, quote, eventDate, planned, sourceMessageQid,
-   evidenceQid, chunkQids, messageIndex, role, createdAt, sessionQid,
-   sessionId, turnQid, tenantId, userId, agentId, projectId,
+6. Write the claim's relative times as calendar dates
+   (`temporal.resolveStatedTimes`). A claim is said on its message's date, and
+   "yesterday" reads wrongly on every later day. No model is involved: the
+   phrases are resolved by a fixed grammar against the message's `createdAt`.
+   - A single day is written in place: "yesterday" becomes "on Monday, May 8,
+     2023", "last Friday" its date, "10 days ago" its date.
+   - A period is written as itself: "last week" becomes "in the week of May 1
+     to May 7, 2023", "next month" becomes "in June 2023", "two weeks ago"
+     becomes "around April 25, 2023" (no finer than the unit counted in).
+   - A stretch up to or from the day of speaking keeps its words and gains
+     its dates: "for the past two weeks (April 25 to May 9, 2023)".
+   - A time that cannot be placed ("recently", "a few weeks ago", "next
+     Friday") is kept, and the claim ends with "(said on May 9, 2023)".
+   - Explicit dates, bare month names, titles and quoted words are left alone.
+
+   When the claim names exactly one day, that day is its `eventDate`, replacing
+   the model's if they differ (`eventDatesDerived`, `eventDatesCorrected`), and
+   a day after the message makes the claim `planned`. The model's own wording
+   is kept as `statedText`, and it stays the claim's search text
+   (`searchText`): a claim is found by what it is about, and when it happened
+   is matched through `eventDate`. With the dates in the search text, a
+   question naming "March and April" matched every claim said in those
+   months. On 3,928 claims from 24 LongMemEval-S histories,
+   654 (17%) named a relative time: 369 had dates written in and 285 could only
+   be given the day they were said. Of 101 claims naming one day the model had
+   dated 33. Six of those differed, each a week earlier than the grammar's
+   reading of "last Saturday" or "last Sunday" as the most recent one; that
+   reading is a choice, and the benchmark does not test it. Claims with an
+   event date rose from 273 to 341.
+7. Write each accepted claim as an `Assertion` node with
+   `{kind: "assertion", text, statedText, searchText, quote, eventDate, planned,
+   sourceMessageQid, evidenceQid, chunkQids, messageIndex, role, createdAt,
+   sessionQid, sessionId, turnQid, tenantId, userId, agentId, projectId,
    extractorProvider, extractorModel, promptVersion, groundingRepaired, jobQid,
    state: "current"}`. Its qid (`q_asrt_<hash>`) is derived from the message,
-   quote and text, so rerunning a job rewrites the same nodes.
+   quote and the model's wording of the text, so rerunning a job rewrites the
+   same nodes.
    `Assertion -[EVIDENCED_BY]-> Message` always, plus `-[EVIDENCED_BY]-> Chunk`
-   for every chunk the quote overlaps. The claim text is the node's search
-   text, so it is BM25- and vector-indexed through the normal adapter path.
+   for every chunk the quote overlaps. The claim as the model worded it is the
+   node's search text, so it is BM25- and vector-indexed through the normal
+   adapter path.
    Claim embeddings are fetched in batched requests before the writes.
-7. Complete the job with its counts in `resultJson` and publish
+8. Complete the job with its counts in `resultJson` and publish
    `quipu.extract.completed`.
 
 Up to `--concurrency` jobs (default 8) have their provider calls in flight at

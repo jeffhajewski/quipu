@@ -3206,7 +3206,7 @@ pub const Runtime = struct {
                 task.failure = err;
                 continue;
             };
-            for (task.grounding.?.claims) |claim| try texts.append(allocator, claim.text);
+            for (task.grounding.?.claims) |claim| try texts.append(allocator, claim.stated_text orelse claim.text);
         }
         self.store.prefetchEmbeddings(texts.items) catch {};
         defer self.store.clearPrefetchedEmbeddings();
@@ -3371,7 +3371,9 @@ pub const Runtime = struct {
         self.store.freeNode(allocator, message);
         if (forgotten) return false;
 
-        const key = try std.fmt.allocPrint(allocator, "{s}\x1f{s}\x1f{s}", .{ source.message_qid, claim.quote, claim.text });
+        // Keyed on the fact as the model wrote it, so the qid does not depend
+        // on how its times are written out.
+        const key = try std.fmt.allocPrint(allocator, "{s}\x1f{s}\x1f{s}", .{ source.message_qid, claim.quote, claim.stated_text orelse claim.text });
         defer allocator.free(key);
         const qid = try hashQid(allocator, "asrt", key);
         defer allocator.free(qid);
@@ -3398,10 +3400,18 @@ pub const Runtime = struct {
         defer allocator.free(text);
         const quote = try clampPropertyText(allocator, claim.quote);
         defer allocator.free(quote);
+        const stated_text = if (claim.stated_text) |stated| try clampPropertyText(allocator, stated) else null;
+        defer if (stated_text) |stated| allocator.free(stated);
         const props = try stringifyAlloc(allocator, .{
             .kind = "assertion",
             .qtype = "assertion",
             .text = text,
+            .statedText = stated_text,
+            // Search matches a claim by what it is about, in the words it was
+            // said in. When it happened is matched through `eventDate`: with
+            // "April 2023" in the search text, a question that names April
+            // pulls in everything said that month.
+            .searchText = stated_text,
             .quote = quote,
             .eventDate = claim.event_date,
             .planned = claim.planned,
@@ -8443,6 +8453,54 @@ test "extract worker sends the speaker-facts prompt and grounds claims into asse
     defer allocator.free(rerun);
     try std.testing.expect(std.mem.indexOf(u8, rerun, "\"leasedCount\":0") != null);
     try std.testing.expectEqual(@as(usize, 2), extractor_model.calls);
+}
+
+test "extract worker stores a claim's relative time as a date and searches it as said" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+    const replies = [_][2][]const u8{.{ "beagle",
+        \\{"assertions":[{"text":"The user adopted a beagle named Biscuit yesterday.","messageIndex":0,"quote":"I adopted a beagle named Biscuit yesterday"}]}
+    }};
+    var extractor_model = TestExtractor{ .replies = &replies };
+    defer extractor_model.deinit();
+    var runtime = Runtime.initWithOptions(store, harness.health(), .{ .extract_provider = extractor_model.endpoint() });
+    defer runtime.deinit();
+    // 2023-05-09 is a Tuesday.
+    const remembered = try runtime.dispatch(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:facts\"},\"sessionId\":\"s-dog\",\"messages\":[{\"role\":\"user\",\"content\":\"I adopted a beagle named Biscuit yesterday.\",\"createdAt\":\"2023-05-09T09:00:00Z\"}]}}",
+    );
+    defer allocator.free(remembered);
+    const run = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x1\",\"method\":\"memory.extract.run\",\"params\":{\"owner\":\"test\"}}");
+    defer allocator.free(run);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"assertionsWritten\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"eventDates\":1,\"eventDatesRejected\":0,\"planned\":0,\"timesResolved\":1,\"eventDatesDerived\":1,\"eventDatesCorrected\":0") != null);
+
+    // Found by the words it was said in, not by the date written into it.
+    const said = try searchAssertions(&runtime, "yesterday", "fts");
+    defer allocator.free(said);
+    const qid = (try firstResultQid(allocator, said)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(qid);
+    const by_month = try searchAssertions(&runtime, "May", "fts");
+    defer allocator.free(by_month);
+    try std.testing.expectEqual(@as(?[]u8, null), try firstResultQid(allocator, by_month));
+
+    const node = (try store.getNode(allocator, qid)) orelse return error.TestUnexpectedResult;
+    defer store.freeNode(allocator, node);
+    for ([_][]const u8{
+        "\"text\":\"The user adopted a beagle named Biscuit on Monday, May 8, 2023.\"",
+        "\"statedText\":\"The user adopted a beagle named Biscuit yesterday.\"",
+        "\"searchText\":\"The user adopted a beagle named Biscuit yesterday.\"",
+        "\"eventDate\":\"2023-05-08\"",
+        "\"planned\":false",
+    }) |needle| {
+        if (std.mem.indexOf(u8, node.properties_json, needle) == null) {
+            std.debug.print("missing {s} in {s}\n", .{ needle, node.properties_json });
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 test "extract worker retries malformed JSON a bounded number of times" {
