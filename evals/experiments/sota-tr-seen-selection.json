@@ -1,0 +1,32 @@
+{
+  "name": "sota-tr-seen",
+  "source": "xiaowu0162/longmemeval-cleaned longmemeval_s_cleaned.json",
+  "sourceSha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+  "procedure": "The temporal-reasoning questions, `_abs` ones included, that are in the sota-dev or sota-heldout selections. With sota-tr-tune and sota-tr-confirm it completes the benchmark's 133-question temporal-reasoning category. These questions were seen during development.",
+  "questionIds": [
+    "4dfccbf7",
+    "71017276",
+    "982b5123_abs",
+    "a3838d2b",
+    "af082822",
+    "bcbe585f",
+    "c8090214_abs",
+    "f0853d11",
+    "gpt4_1a1dc16d",
+    "gpt4_1d4ab0c9",
+    "gpt4_2f584639",
+    "gpt4_4929293a",
+    "gpt4_59149c78",
+    "gpt4_6ed717ea",
+    "gpt4_70e84552_abs",
+    "gpt4_7a0daae1",
+    "gpt4_7bc6cf22",
+    "gpt4_8c8961ae",
+    "gpt4_b0863698",
+    "gpt4_b5700ca0",
+    "gpt4_b5700ca9",
+    "gpt4_c27434e8_abs",
+    "gpt4_fa19884c",
+    "gpt4_fe651585_abs"
+  ]
+}

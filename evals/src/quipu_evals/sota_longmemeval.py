@@ -367,6 +367,8 @@ def daemon_command(config: Mapping[str, Any], *, answer_url: str, embedding_url:
     if config.get("llmExtract") and extract_url is not None:
         command += ["--extract-provider", "openrouter", "--extract-url", extract_url,
                     "--extract-model", config["llmExtract"]["model"]]
+        if config.get("consolidate"):
+            command += ["--consolidate", "on"]
     if config.get("rerankerUrl"):
         command += ["--reranker-url", config["rerankerUrl"]]
         if config.get("rerankerModel"):
@@ -517,6 +519,13 @@ def run_question(case: Mapping[str, Any], config: Mapping[str, Any], proxy: Any,
                     record["status"] = "error"
                     record["rows"] = failed_rows("extract", record["extraction"]["error"])
                     return record
+                # Consolidation (--consolidate): the jobs extraction queued.
+                if config.get("consolidate"):
+                    record["consolidation"] = run_consolidation(daemon, config, proxy, tag)
+                    if "error" in record["consolidation"]:
+                        record["status"] = "error"
+                        record["rows"] = failed_rows("consolidate", record["consolidation"]["error"])
+                        return record
 
             # Answer + judge per budget ---------------------------------------
             for budget in budgets:
@@ -594,27 +603,96 @@ def run_question(case: Mapping[str, Any], config: Mapping[str, Any], proxy: Any,
     return record
 
 
-def run_extraction(daemon: Daemon, config: Mapping[str, Any], proxy: Any, tag: str) -> dict[str, Any]:
-    """Run every pending extract job through ``memory.extract.run``.
+JOB_PASSES = 3
 
-    Provider calls go to the caching proxy under the question's tag, so the
-    extraction cost is the proxy records between the marks: chat calls plus
-    the embeddings of new Assertion nodes.
+
+def merge_job_results(passes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """One result for several runs of the same job queue.
+
+    Counters add up across passes. ``leasedCount`` is the first pass's (later
+    passes lease the same jobs again) and ``failedCount`` is the last pass's:
+    the jobs still unfinished.
+    """
+    def add(total: dict[str, Any], part: Mapping[str, Any]) -> None:
+        for key, value in part.items():
+            if isinstance(value, bool) or value is None:
+                total[key] = value
+            elif isinstance(value, (int, float)):
+                total[key] = total.get(key, 0) + value
+            elif isinstance(value, Mapping):
+                add(total.setdefault(key, {}), value)
+            else:
+                total[key] = value
+
+    merged: dict[str, Any] = {}
+    for part in passes:
+        add(merged, part)
+    if passes:
+        merged["leasedCount"] = passes[0].get("leasedCount", 0)
+        merged["failedCount"] = passes[-1].get("failedCount", 0)
+    return merged
+
+
+def run_jobs(daemon: Daemon, method: str, config: Mapping[str, Any], proxy: Any, tag: str) -> dict[str, Any]:
+    """Run a job queue to the end through ``method``.
+
+    A job that fails (a dropped provider connection, JSON still malformed
+    after the retries) goes back to pending, so the method is called again,
+    up to ``JOB_PASSES`` times, while jobs keep failing. Provider calls go to
+    the caching proxy under the question's tag, so the cost is the proxy
+    records between the marks.
     """
     settings = config["llmExtract"]
     mark = proxy.state.mark()
     started = time.perf_counter()
+    passes: list[dict[str, Any]] = []
     try:
-        result = daemon.call("memory.extract.run", {"owner": "sota-harness", "concurrency": settings["concurrency"]},
-                             timeout=settings["timeout"])
+        for _ in range(JOB_PASSES):
+            passes.append(dict(daemon.call(method, {"owner": "sota-harness", "concurrency": settings["concurrency"]},
+                                           timeout=settings["timeout"])))
+            if not passes[-1].get("failedCount"):
+                break
     except DaemonError as exc:
         return {"seconds": time.perf_counter() - started, "error": str(exc)[:1000],
                 "calls": summarize_calls(proxy.state.records_for(tag, mark))}
-    # A failed job (provider error, JSON still malformed after E1's retries)
-    # leaves its session unextracted; the run goes on and reports it.
+    # A job that still fails leaves its session unprocessed; the run goes on
+    # and reports it.
     return {"seconds": time.perf_counter() - started,
             "calls": summarize_calls(proxy.state.records_for(tag, mark)),
-            "result": dict(result)}
+            "passes": len(passes), "result": merge_job_results(passes)}
+
+
+def run_extraction(daemon: Daemon, config: Mapping[str, Any], proxy: Any, tag: str) -> dict[str, Any]:
+    """Run every pending extract job through ``memory.extract.run``."""
+    return run_jobs(daemon, "memory.extract.run", config, proxy, tag)
+
+
+def run_consolidation(daemon: Daemon, config: Mapping[str, Any], proxy: Any, tag: str) -> dict[str, Any]:
+    """Run every pending consolidate job through ``memory.consolidate.run``."""
+    return run_jobs(daemon, "memory.consolidate.run", config, proxy, tag)
+
+
+def summarize_consolidation(records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    runs = [r["consolidation"] for r in records if isinstance(r.get("consolidation"), Mapping)]
+    if not runs:
+        return None
+    ok = [run for run in runs if "result" in run]
+    counts: Counter[str] = Counter()
+    for run in ok:
+        counts.update({k: v for k, v in (run["result"].get("counts") or {}).items() if isinstance(v, int)})
+    return {
+        "questions": len(runs), "errors": sum("error" in run for run in runs),
+        "failedJobs": sum(run["result"].get("failedCount", 0) for run in ok),
+        "secondsMean": mean(run["seconds"] for run in ok) if ok else None,
+        "chatCalls": sum(run["calls"]["chatCalls"] for run in runs),
+        "costUsd": sum(run["calls"]["costUsd"] for run in runs),
+        "nominalCostUsd": sum(run["calls"]["nominalCostUsd"] for run in runs),
+        "costUsdPerQuestion": sum(run["calls"]["nominalCostUsd"] for run in runs) / len(runs),
+        "jobs": sum(run["result"].get("leasedCount", 0) for run in ok),
+        "claims": sum(run["result"].get("claims", 0) for run in ok),
+        "updatesWritten": sum(run["result"].get("updatesWritten", 0) for run in ok),
+        "counts": dict(counts),
+    }
 
 
 def extraction_row(extraction: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -872,6 +950,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not os.environ.get("OPENROUTER_API_KEY") and not args.offline:
         print("OPENROUTER_API_KEY is required (or pass --offline to serve cache hits only)", file=sys.stderr)
         return 2
+    if args.consolidate and not args.extract:
+        print("--consolidate needs the claims that --extract writes", file=sys.stderr)
+        return 2
     if args.extract and args.no_extract:
         print("--extract needs the extract jobs that --no-extract turns off", file=sys.stderr)
         return 2
@@ -904,6 +985,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         # Only present with --extract, so default runs keep their config hash.
         config["llmExtract"] = {"model": args.extract_model, "concurrency": args.extract_concurrency,
                                 "timeout": args.extract_timeout}
+    if args.consolidate:
+        # Only present with --consolidate, for the same reason.
+        config["consolidate"] = True
     reranker = reranker_health(args.reranker_url)
     if args.reranker_url:
         if reranker is None:
@@ -986,6 +1070,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "identity": identity, "elapsedSeconds": time.perf_counter() - started,
         **aggregate(rows, args.budgets), "ingest": summarize_ingest(records),
         "extraction": summarize_extraction(records),
+        "consolidation": summarize_consolidation(records),
         "spend": {"thisInvocationProxy": proxy_totals,
                   "judgeFreshUsdAllRows": judge_fresh, "judgeNominalUsdAllRows": judge_nominal,
                   "note": "proxy costUsd/judgeFresh are new spend; nominal includes cache hits' original cost"},
@@ -1227,6 +1312,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--no-extract", action="store_true", help="remember with extract=false (default: daemon default true)")
     run.add_argument("--extract", action="store_true",
                      help="after ingest, run LLM fact extraction (memory.extract.run) through the proxy")
+    run.add_argument("--consolidate", action="store_true",
+                     help="with --extract: also run the consolidation jobs (memory.consolidate.run); "
+                          "pair with --answer-option facts=true")
     run.add_argument("--extract-model", default=EXTRACT_MODEL, help="extraction model (with --extract)")
     run.add_argument("--extract-concurrency", type=int, default=8, help="extract jobs whose calls run at once")
     run.add_argument("--extract-timeout", type=float, default=1800)

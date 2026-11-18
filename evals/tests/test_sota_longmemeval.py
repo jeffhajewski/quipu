@@ -229,6 +229,31 @@ class ExtractionTests(unittest.TestCase):
                 raise self.result
             return self.result
 
+    class FlakyDaemon:
+        """Fails some jobs on the first call and finishes them on the second."""
+
+        def __init__(self):
+            self.calls = []
+
+        def call(self, method, params, timeout):
+            self.calls.append(method)
+            if len(self.calls) == 1:
+                return {"leasedCount": 5, "succeededCount": 3, "failedCount": 2, "calls": 7,
+                        "updatesWritten": 1, "counts": {"proposed": 4, "accepted": 1}, "lastError": "ConnectionReset"}
+            return {"leasedCount": 2, "succeededCount": 2, "failedCount": 0, "calls": 3,
+                    "updatesWritten": 2, "counts": {"proposed": 3, "accepted": 2}, "lastError": None}
+
+    def test_failed_jobs_are_run_again_and_the_passes_add_up(self):
+        from quipu_evals.sota_longmemeval import run_consolidation
+        config = {"llmExtract": {"model": "m", "concurrency": 4, "timeout": 60}}
+        daemon = self.FlakyDaemon()
+        consolidation = run_consolidation(daemon, config, self.Proxy([]), "q1")
+        self.assertEqual(daemon.calls, ["memory.consolidate.run", "memory.consolidate.run"])
+        self.assertEqual(consolidation["passes"], 2)
+        self.assertEqual(consolidation["result"], {
+            "leasedCount": 5, "succeededCount": 5, "failedCount": 0, "calls": 10, "updatesWritten": 3,
+            "counts": {"proposed": 7, "accepted": 3}, "lastError": None})
+
     def test_daemon_gets_extract_flags_only_with_extract(self):
         plain = daemon_command(self.CONFIG, answer_url="http://proxy/chat", embedding_url=None, db_path=None,
                                extract_url="http://proxy/chat")
