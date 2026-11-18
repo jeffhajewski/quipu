@@ -700,6 +700,38 @@ step 6 mostly admits numeric and time changes, so a changed name or place with
 a reworded sentence is missed; and a job's embedding and search run on the
 request thread.
 
+### Time anchors
+
+`options.timeAnchors` (on `memory.retrieve` and `memory.answer`, default
+`false`) is for questions that name a time instead of a topic: "what did I buy
+10 days ago?", "who did I go with last Saturday?". Such a question says little
+about the thing it asks for, so relevance alone often leaves the message out.
+
+- The relative time expressions in the question are resolved against
+  `time.validAt` with the grammar of the temporal hints. An exact day
+  (`yesterday`, `10 days ago`, `last Saturday`) is a one-day window. An
+  approximate one (`two weeks ago`) is widened by a seventh of its distance
+  from the question date, at least a day each way. Ranges (`past weekend`,
+  `in January`) are used as they are. `today` and windows wider than 92 days
+  are ignored.
+- The question is searched 1,000 hits deep in the request's mode. A message or
+  chunk is inside a window when it was written then. With `options.factKeys`,
+  a claim with an event date inside the window (the message said "yesterday")
+  brings in its source message; a planned event or a month-only date does not.
+- Only what a speaker said is anchored. The assistant's replies of that day
+  are long and do not say what the person did.
+- The anchored items are placed ahead of every other candidate, most relevant
+  first: at most 24 per window, and half the token budget in all. The rest of
+  the budget is filled as usual.
+- Without a parseable `time.validAt`, or a time in the question, the context
+  is byte-for-byte what it was. `trace.timeAnchors` reports `windows`, `items`
+  and `tokens`.
+
+On LongMemEval-S temporal-reasoning questions this raised gold-turn coverage
+at 4,096 tokens from 87–90% to 94–96%. Accuracy followed with a GPT-4o reader
+and not with GPT-4o-mini; see
+[sota-sprint-results.md](sota-sprint-results.md).
+
 ### The facts section
 
 `options.facts` (on `memory.retrieve` and `memory.answer`, default `false`)

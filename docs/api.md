@@ -91,6 +91,14 @@ is the message they were drawn from; a superseded one has
 `state: "superseded"` and `validTo` set. The trace gains a `facts` block. `Update` nodes are never returned as
 items. See [algorithms.md](algorithms.md#the-facts-section).
 
+`options.timeAnchors` (on `memory.retrieve` and `memory.answer`, default
+`false`) handles questions that name a time ("what did I buy 10 days ago?").
+The time is resolved against `time.validAt` to a window of days, and what
+people said inside that window is placed ahead of the other candidates, most
+relevant first, using at most half the token budget. A question that names no
+time is unaffected. The trace gains a `timeAnchors` block. See
+[algorithms.md](algorithms.md#time-anchors).
+
 ## Search V0
 
 `memory.search` supports `mode: "fts"`, `"vector"`, `"hybrid"`, and `"graph"`.

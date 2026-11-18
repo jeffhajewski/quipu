@@ -52,6 +52,12 @@
   items of type `fact` in
   `context.currentFacts`, and `trace.facts` counts them. `system.health`
   reports `capabilities.facts` and a real `workers.consolidator` state.
+- `options.timeAnchors` on `memory.retrieve` and `memory.answer` (default
+  `false`): when the question names a time ("10 days ago", "last Saturday",
+  "in January"), what people said inside that window is placed ahead of the
+  other candidates, within half the token budget. `trace.timeAnchors` counts
+  the windows and items, and `system.health` reports
+  `capabilities.timeAnchors`.
 - Job leases use wall-clock time (they used 0), and an expired lease returns
   its job to `pending`, or dead-letters it once its attempts run out.
   `quipu jobs lease|complete|fail` record real times too.

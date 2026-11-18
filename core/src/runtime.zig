@@ -39,6 +39,12 @@ const message_chunk_boundary_window = 200;
 const default_budget_tokens: i64 = 4096;
 /// Candidate items kept per retrieval; enough chunks to fill the default budget.
 const retrieval_candidate_limit: usize = 80;
+/// `options.timeAnchors`: how deep the search goes for items dated inside a
+/// window the question names, and how many of them each window may bring in.
+const time_anchor_hit_limit: usize = 1000;
+const time_anchor_items_per_window: usize = 24;
+/// The share of the token budget that anchored items may take.
+const time_anchor_budget_percent: usize = 50;
 /// Leading candidates sent to a configured reranker (`options.rerankCandidates`).
 const default_rerank_candidates: usize = 50;
 /// Rerank scores listed in the retrieval trace.
@@ -265,6 +271,8 @@ const RetrievalTrace = struct {
     queryExpansion: ?query_expansion.Trace = null,
     /// Present only when `options.facts` is true.
     facts: ?FactsTrace = null,
+    /// Present only when `options.timeAnchors` is true.
+    timeAnchors: ?TimeAnchorsTrace = null,
 
     pub fn jsonStringify(self: @This(), jw: anytype) !void {
         try jw.beginObject();
@@ -309,6 +317,17 @@ const FactsTrace = struct {
     /// Facts added because a kept fact replaces them or is replaced by them.
     linked: usize = 0,
     /// Estimated tokens of the section, taken out of the raw evidence budget.
+    tokens: usize = 0,
+};
+
+/// `options.timeAnchors`: what the times named in the question brought in.
+const TimeAnchorsTrace = struct {
+    /// Date windows resolved from the question.
+    windows: usize = 0,
+    /// Items dated inside a window that were moved ahead of the other
+    /// candidates, before the token budget was applied.
+    items: usize = 0,
+    /// Estimated tokens of those items.
     tokens: usize = 0,
 };
 
@@ -835,6 +854,7 @@ pub const Runtime = struct {
                     },
                     .factKeys = true,
                     .facts = true,
+                    .timeAnchors = true,
                     .queryExpansion = .{
                         .modes = [_][]const u8{ "off", "rules", "llm" },
                         .llmConfigured = expansion_llm,
@@ -1263,6 +1283,7 @@ pub const Runtime = struct {
         const temporal_hints = if (options) |opts| boolField(&opts, "temporalHints") orelse false else false;
         const fact_keys = if (options) |opts| boolField(&opts, "factKeys") orelse false else false;
         const with_facts = if (options) |opts| boolField(&opts, "facts") orelse false else false;
+        const time_anchors = if (options) |opts| boolField(&opts, "timeAnchors") orelse false else false;
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
         };
@@ -1283,6 +1304,16 @@ pub const Runtime = struct {
             .include_debug = include_trace,
         }, fact_keys);
         defer results.deinit();
+        var time_anchors_trace: ?TimeAnchorsTrace = null;
+        if (time_anchors) {
+            time_anchors_trace = try self.applyTimeAnchors(allocator, &results, query, retrieve_mode, .{
+                .scope = scope,
+                .valid_at = valid_at,
+                .event_window = event_window,
+                .include_evidence = include_evidence,
+                .include_debug = include_trace,
+            }, fact_keys, @intCast(budget));
+        }
         if (needsIncludes(needs_value, "core")) {
             try self.appendCoreItems(allocator, &results, scope, include_evidence, include_trace);
         }
@@ -1355,6 +1386,7 @@ pub const Runtime = struct {
             .factKeys = results.factKeysTrace(),
             .queryExpansion = expansion_trace,
             .facts = if (with_facts) facts.trace else null,
+            .timeAnchors = time_anchors_trace,
         };
 
         const item_qids = try allocator.alloc([]const u8, results.items.items.len);
@@ -1430,6 +1462,7 @@ pub const Runtime = struct {
         const temporal_hints = if (options) |opts| boolField(&opts, "temporalHints") orelse false else false;
         const fact_keys = if (options) |opts| boolField(&opts, "factKeys") orelse false else false;
         const with_facts = if (options) |opts| boolField(&opts, "facts") orelse false else false;
+        const time_anchors = if (options) |opts| boolField(&opts, "timeAnchors") orelse false else false;
         const log_retrieval = if (options) |opts| boolField(&opts, "logRetrieval") orelse (boolField(&opts, "logTrace") orelse true) else true;
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
@@ -1451,6 +1484,16 @@ pub const Runtime = struct {
             .include_debug = include_trace,
         }, fact_keys);
         defer results.deinit();
+        var time_anchors_trace: ?TimeAnchorsTrace = null;
+        if (time_anchors) {
+            time_anchors_trace = try self.applyTimeAnchors(allocator, &results, query, retrieve_mode, .{
+                .scope = scope,
+                .valid_at = valid_at,
+                .event_window = event_window,
+                .include_evidence = include_evidence,
+                .include_debug = include_trace,
+            }, fact_keys, @intCast(budget));
+        }
         if (needsIncludes(needs_value, "core")) {
             try self.appendCoreItems(allocator, &results, scope, include_evidence, include_trace);
         }
@@ -1522,6 +1565,7 @@ pub const Runtime = struct {
             .factKeys = results.factKeysTrace(),
             .queryExpansion = expansion_trace,
             .facts = if (with_facts) facts.trace else null,
+            .timeAnchors = time_anchors_trace,
         };
 
         // One answer path: with a reader configured, every non-empty context
@@ -3014,6 +3058,100 @@ pub const Runtime = struct {
         try self.markStaleRawEvidence(allocator, &owned, filter.valid_at);
         if (fact_keys) try self.attachEventDates(allocator, &owned);
         return owned;
+    }
+
+    /// `options.timeAnchors`: when the question names a time (`10 days ago`,
+    /// `last Saturday`, `in January`), what people said inside that window is
+    /// moved ahead of every other candidate, most relevant first. A question
+    /// like "what did I buy 10 days ago?" says little about the purchase, so
+    /// relevance alone often leaves the message out. An item is inside a
+    /// window when its message was written then, or, with fact keys, when a
+    /// claim drawn from it has an event date then (the message said
+    /// "yesterday"). Only speakers' messages are anchored: the assistant's
+    /// replies of that day are long and say nothing about what the person
+    /// did. The search goes `time_anchor_hit_limit` hits deep, each window
+    /// brings in at most `time_anchor_items_per_window` items, and all of
+    /// them together at most `time_anchor_budget_percent` of the budget.
+    /// Without a parseable `time.validAt`, or a time in the question, nothing
+    /// changes.
+    fn applyTimeAnchors(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        owned: *OwnedItems,
+        query: []const u8,
+        mode: SearchMode,
+        filter: ItemFilter,
+        fact_keys: bool,
+        budget: usize,
+    ) !TimeAnchorsTrace {
+        var trace = TimeAnchorsTrace{};
+        const current = parseIsoDate(filter.valid_at orelse return trace) catch return trace;
+        const windows = try temporal.resolveWindows(allocator, query, current);
+        defer allocator.free(windows);
+        if (windows.len == 0) return trace;
+        trace.windows = windows.len;
+
+        const hits = try self.collectSearchHits(allocator, query, mode, time_anchor_hit_limit, !fact_keys);
+        defer freeHits(allocator, hits);
+        var top_score: f32 = 0;
+        for (owned.items.items) |item| top_score = @max(top_score, item.score);
+        const token_limit = budget * time_anchor_budget_percent / 100;
+        var used: usize = 0;
+
+        for (windows) |window| {
+            var anchored = OwnedItems{ .allocator = allocator };
+            defer anchored.deinit();
+            for (hits) |hit| {
+                if (anchored.items.items.len >= time_anchor_items_per_window) break;
+                const node = (try self.store.getNode(allocator, hit.qid)) orelse continue;
+                defer self.store.freeNode(allocator, node);
+                const is_claim = std.mem.eql(u8, node.label, "Assertion");
+                if (!is_claim and !std.mem.eql(u8, node.label, "Message") and !std.mem.eql(u8, node.label, "Chunk")) continue;
+                if (!try nodeDatedWithin(allocator, node, window, is_claim)) continue;
+                const before = anchored.items.items.len;
+                if (is_claim) {
+                    try self.appendAssertionEvidence(allocator, &anchored, node, hit.score, filter, time_anchor_items_per_window);
+                } else if (!anchored.containsQid(node.qid)) {
+                    _ = try appendNodeItem(allocator, &anchored, node, hit.score, filter);
+                }
+                // Keep what a speaker said, while it fits the anchors' share.
+                var index = before;
+                while (index < anchored.items.items.len) {
+                    const item = anchored.items.items[index];
+                    const role = if (item.raw_source) |source| source.role orelse "user" else "user";
+                    const tokens = estimateItemTokens(item);
+                    if (!isSpeakerRole(role) or used + tokens > token_limit) {
+                        anchored.freeItem(anchored.items.orderedRemove(index));
+                        continue;
+                    }
+                    used += tokens;
+                    index += 1;
+                }
+            }
+            if (fact_keys) try self.attachEventDates(allocator, &anchored);
+
+            trace.items += anchored.items.items.len;
+
+            // Above every unanchored candidate, in their own order.
+            for (anchored.items.items) |*item| item.score += top_score + 1;
+            var index: usize = 0;
+            while (index < anchored.items.items.len) {
+                const item = anchored.items.items[index];
+                const existing = for (owned.items.items) |*candidate| {
+                    if (std.mem.eql(u8, candidate.qid, item.qid)) break candidate;
+                } else null;
+                if (existing) |candidate| {
+                    candidate.score = @max(candidate.score, item.score);
+                    index += 1;
+                    continue;
+                }
+                try owned.items.append(allocator, item);
+                _ = anchored.items.orderedRemove(index);
+            }
+        }
+        sortItemsByScore(owned);
+        trace.tokens = used;
+        return trace;
     }
 
     /// `options.facts`: the claims matching the query that consolidation
@@ -5782,6 +5920,25 @@ fn itemAllowedByNeeds(item: MessageResult, needs_value: ?Value) bool {
     }
     if (std.mem.eql(u8, item.type, "raw")) return needsIncludes(needs_value, "raw");
     return true;
+}
+
+/// Whether a node's date falls inside a window the question names: the day a
+/// message or chunk was written, or a claim's event date when it has one
+/// (`YYYY-MM-DD`; a month-only date is too coarse to anchor on) and
+/// otherwise the day it was said.
+fn nodeDatedWithin(allocator: std.mem.Allocator, node: storage.Node, window: temporal.Window, is_claim: bool) !bool {
+    if (is_claim) {
+        if (try readOptionalPropertyString(allocator, node.properties_json, "eventDate")) |event_date| {
+            defer allocator.free(event_date);
+            if (try propertyBool(allocator, node.properties_json, "planned")) return false;
+            const date = parseIsoDate(event_date) catch return false;
+            return temporal.windowContains(window, date);
+        }
+    }
+    const created_at = (try readOptionalPropertyString(allocator, node.properties_json, "createdAt")) orelse return false;
+    defer allocator.free(created_at);
+    const date = parseIsoDate(created_at) catch return false;
+    return temporal.windowContains(window, date);
 }
 
 fn nodeWithinEventWindow(allocator: std.mem.Allocator, node: storage.Node, window: EventWindow) !bool {
@@ -10361,5 +10518,87 @@ test "background work consolidates once extraction has caught up" {
     defer allocator.free(with_facts);
     try std.testing.expect(std.mem.indexOf(u8, with_facts, superseded_fact) != null);
     try std.testing.expect(std.mem.indexOf(u8, with_facts, current_fact) != null);
+}
+
+fn rememberDated(runtime: *Runtime, session: []const u8, created_at: []const u8, content: []const u8) ![]u8 {
+    const allocator = std.testing.allocator;
+    const request = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"method\":\"memory.remember\",\"params\":{{\"scope\":{{\"projectId\":\"repo:anchors\"}},\"sessionId\":\"{s}\",\"messages\":[{{\"role\":\"user\",\"content\":\"{s}\",\"createdAt\":\"{s}\"}}]}}}}",
+        .{ session, content, created_at },
+    );
+    defer allocator.free(request);
+    const response = try runtime.dispatch(allocator, request);
+    defer allocator.free(response);
+    return resultArrayFirst(allocator, response, "messageQids");
+}
+
+fn anchorPrompt(runtime: *Runtime, query: []const u8, options_json: []const u8) ![]u8 {
+    const allocator = std.testing.allocator;
+    const request = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"q\",\"method\":\"memory.retrieve\",\"params\":{{\"query\":\"{s}\",\"mode\":\"fts\",\"budgetTokens\":90,\"scope\":{{\"projectId\":\"repo:anchors\"}},\"time\":{{\"validAt\":\"2023-03-25T09:00:00Z\"}},\"options\":{{\"logRetrieval\":false,\"logAudit\":false{s}}}}}}}",
+        .{ query, options_json },
+    );
+    defer allocator.free(request);
+    const response = try runtime.dispatch(allocator, request);
+    defer allocator.free(response);
+    return resultStringField(allocator, response, "prompt");
+}
+
+test "time anchors bring in what was said on the day the question names" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var runtime = Runtime.init(harness.adapter(), harness.health());
+    defer runtime.deinit();
+
+    // Three messages that match "kitchen appliance" better than the one
+    // written ten days before the question.
+    const blender = try rememberDated(&runtime, "s-blender", "2023-02-02T10:00:00Z", "My favorite kitchen appliance is the blender I did buy as a kitchen appliance for smoothies.");
+    defer allocator.free(blender);
+    const toaster = try rememberDated(&runtime, "s-toaster", "2023-02-20T10:00:00Z", "Which kitchen appliance should I buy next, a toaster or another kitchen appliance?");
+    defer allocator.free(toaster);
+    const kettle = try rememberDated(&runtime, "s-kettle", "2023-03-01T10:00:00Z", "I did buy a kettle, a small kitchen appliance, and I use this kitchen appliance daily.");
+    defer allocator.free(kettle);
+    const smoker = try rememberDated(&runtime, "s-smoker", "2023-03-15T10:00:00Z", "Just got a smoker today for the kitchen patio, brisket soon.");
+    defer allocator.free(smoker);
+    const reply = try runtime.dispatch(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:anchors\"},\"sessionId\":\"s-smoker\",\"messages\":[{\"role\":\"assistant\",\"content\":\"Among kitchen appliance options, pellet grills are easy.\",\"createdAt\":\"2023-03-15T10:01:00Z\"}]}}",
+    );
+    defer allocator.free(reply);
+
+    const question = "What kitchen appliance did I buy 10 days ago?";
+    const plain = try anchorPrompt(&runtime, question, "");
+    defer allocator.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "smoker") == null);
+
+    const anchored = try anchorPrompt(&runtime, question, ",\"timeAnchors\":true");
+    defer allocator.free(anchored);
+    try std.testing.expect(std.mem.indexOf(u8, anchored, "Just got a smoker today") != null);
+    // The assistant's reply of that day is not what the person did.
+    try std.testing.expect(std.mem.indexOf(u8, anchored, "pellet grills") == null);
+
+    // The trace says what the anchors brought in.
+    const traced = try runtime.dispatch(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"t\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"What kitchen appliance did I buy 10 days ago?\",\"mode\":\"fts\",\"budgetTokens\":90,\"scope\":{\"projectId\":\"repo:anchors\"},\"time\":{\"validAt\":\"2023-03-25T09:00:00Z\"},\"options\":{\"logRetrieval\":false,\"logAudit\":false,\"includeDebug\":true,\"timeAnchors\":true}}}",
+    );
+    defer allocator.free(traced);
+    var parsed = try std.json.parseFromSlice(Value, allocator, traced, .{});
+    defer parsed.deinit();
+    const anchors_trace = parsed.value.object.get("result").?.object.get("trace").?.object.get("timeAnchors").?.object;
+    try std.testing.expectEqual(@as(i64, 1), anchors_trace.get("windows").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), anchors_trace.get("items").?.integer);
+    try std.testing.expect(anchors_trace.get("tokens").?.integer > 0);
+
+    // A question that names no time is left as it was.
+    const untimed = "What kitchen appliance did I buy?";
+    const before = try anchorPrompt(&runtime, untimed, "");
+    defer allocator.free(before);
+    const after = try anchorPrompt(&runtime, untimed, ",\"timeAnchors\":true");
+    defer allocator.free(after);
+    try std.testing.expectEqualStrings(before, after);
 }
 

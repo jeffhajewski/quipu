@@ -152,6 +152,27 @@ test("facts is a retrieve and answer option that lists dated current and superse
   assert.equal(result.context.currentFacts[0].validTo, result.context.currentFacts[1].validFrom);
   assert.equal(result.trace.facts.superseded, 1);
 });
+
+test("timeAnchors is a retrieve and answer option that brings in what was said on the day named", () => {
+  const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
+  for (const def of ["memoryRetrieveParams", "memoryAnswerParams"]) {
+    assert.equal(schema.$defs[def].properties.options.properties.timeAnchors.type, "boolean");
+  }
+  assert.equal(schema.$defs.systemHealthResult.properties.capabilities.properties.timeAnchors.type, "boolean");
+
+  for (const method of ["memory.retrieve", "memory.answer"]) {
+    validateRpcParams(method, { query: "q", options: { timeAnchors: true } });
+    assert.throws(() => validateRpcParams(method, { query: "q", options: { timeAnchors: "yes" } }), QuipuProtocolError);
+  }
+
+  const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.retrieve.timeAnchors.json"), "utf8"));
+  assert.equal(fixture.request.params.options.timeAnchors, true);
+  const result = fixture.response.result;
+  assert.ok(result.prompt.includes("Just got a smoker today"));
+  assert.ok(!result.prompt.includes("pellet grills"));
+  assert.deepEqual(result.trace.timeAnchors, { windows: 1, items: 1, tokens: 31 });
+});
+
 test("method schema accepts slot metadata, support validity, and answer prompt", () => {
   const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
   assert.ok(schema.$defs.memoryItem.properties.slotKey);

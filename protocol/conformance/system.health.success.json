@@ -43,6 +43,7 @@
         },
         "factKeys": true,
         "facts": true,
+        "timeAnchors": true,
         "queryExpansion": {
           "modes": [
             "off",

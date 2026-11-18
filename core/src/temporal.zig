@@ -247,6 +247,72 @@ pub fn resolveTimeReferences(allocator: std.mem.Allocator, query: []const u8, cu
     return try out.toOwnedSlice();
 }
 
+/// An inclusive span of days that a time reference in a question points at.
+pub const Window = struct { start: CivilDate, end: CivilDate };
+
+/// A window wider than this says too little about when something happened to
+/// be worth anchoring retrieval on (`this year`, `in 2023`).
+const max_window_days: i64 = 92;
+
+/// The windows the relative time expressions in `query` point at, resolved
+/// against `current` with the grammar of `resolveTimeReferences`. An exact day
+/// is a one-day window. An approximate day (`2 weeks ago`) is widened by a
+/// seventh of its distance from `current`, at least one day each way. `today`
+/// and windows wider than `max_window_days` are left out. Caller owns the
+/// slice.
+pub fn resolveWindows(allocator: std.mem.Allocator, query: []const u8, current: CivilDate) ![]Window {
+    if (!writable(current)) return &.{};
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tokens = std.ArrayList([]const u8).empty;
+    var cursor: usize = 0;
+    while (cursor < query.len) {
+        while (cursor < query.len and !std.ascii.isAlphanumeric(query[cursor])) : (cursor += 1) {}
+        const start = cursor;
+        while (cursor < query.len and std.ascii.isAlphanumeric(query[cursor])) : (cursor += 1) {}
+        if (cursor > start) try tokens.append(arena, query[start..cursor]);
+    }
+
+    var windows = std.ArrayList(Window).empty;
+    errdefer windows.deinit(allocator);
+    const today = daysFromCivil(current);
+    var index: usize = 0;
+    while (index < tokens.items.len) {
+        const found = matchAt(tokens.items, index, current) orelse {
+            index += 1;
+            continue;
+        };
+        index += found.len;
+        if (!found.value.isWritable()) continue;
+        const window: Window = switch (found.value) {
+            .day => |date| .{ .start = date, .end = date },
+            .around => |date| blk: {
+                const distance = @abs(today - daysFromCivil(date));
+                const slack: i64 = @intCast(@max(1, distance / 7));
+                break :blk .{ .start = addDays(date, -slack), .end = addDays(date, slack) };
+            },
+            .range => |span| .{ .start = span.start, .end = span.end },
+        };
+        const first = daysFromCivil(window.start);
+        const last = daysFromCivil(window.end);
+        if (first == today and last == today) continue;
+        if (last < first or last - first + 1 > max_window_days) continue;
+        const repeated = for (windows.items) |seen| {
+            if (seen.start.eql(window.start) and seen.end.eql(window.end)) break true;
+        } else false;
+        if (!repeated) try windows.append(allocator, window);
+    }
+    return windows.toOwnedSlice(allocator);
+}
+
+/// Whether `date` falls inside `window`, ends included.
+pub fn windowContains(window: Window, date: CivilDate) bool {
+    const day = daysFromCivil(date);
+    return day >= daysFromCivil(window.start) and day <= daysFromCivil(window.end);
+}
+
 const month_names = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
 
 /// `May 8, 2023`.
@@ -1149,3 +1215,32 @@ test "stated times leave names, dates and other wording alone" {
     try expectStated("The user owns 37 coins.", now, null, null);
 }
 
+fn expectWindows(query: []const u8, current: []const u8, expected: []const [2][]const u8) !void {
+    const windows = try resolveWindows(std.testing.allocator, query, testDate(current));
+    defer std.testing.allocator.free(windows);
+    try std.testing.expectEqual(expected.len, windows.len);
+    for (expected, windows) |want, got| {
+        try std.testing.expect(testDate(want[0]).eql(got.start));
+        try std.testing.expect(testDate(want[1]).eql(got.end));
+    }
+}
+
+test "time windows cover the day meant, with slack for approximate ones" {
+    // An exact day is one day wide; "N weeks ago" gets a seventh of its distance each way.
+    try expectWindows("What kitchen appliance did I buy 10 days ago?", "2023-03-25", &.{.{ "2023-03-15", "2023-03-15" }});
+    try expectWindows("Who did I go with to the music event last Saturday?", "2023-04-22", &.{.{ "2023-04-15", "2023-04-15" }});
+    try expectWindows("What gardening-related activity did I do two weeks ago?", "2023-05-05", &.{.{ "2023-04-19", "2023-04-23" }});
+    try expectWindows("Which bike did I fix the past weekend?", "2023-03-21", &.{.{ "2023-03-18", "2023-03-19" }});
+    try expectWindows("What did I watch in January?", "2023-01-30", &.{.{ "2023-01-01", "2023-01-31" }});
+
+    // Today, spans too wide to anchor on, and questions with no time reference give nothing.
+    try expectWindows("What is the order of airlines I flew with before today?", "2023-03-02", &.{});
+    try expectWindows("Where did I travel this year?", "2023-08-20", &.{});
+    try expectWindows("How many weeks ago did I attend the sale at Nordstrom?", "2022-12-01", &.{});
+    try expectWindows("Did I go running last Friday or was it last Friday evening?", "2023-06-07", &.{.{ "2023-06-02", "2023-06-02" }});
+
+    const window: Window = .{ .start = testDate("2023-04-19"), .end = testDate("2023-04-23") };
+    try std.testing.expect(windowContains(window, testDate("2023-04-19")));
+    try std.testing.expect(windowContains(window, testDate("2023-04-23")));
+    try std.testing.expect(!windowContains(window, testDate("2023-04-24")));
+}

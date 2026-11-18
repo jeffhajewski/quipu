@@ -1,0 +1,169 @@
+{
+  "name": "memory.retrieve with time anchors",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_time_anchors",
+    "method": "memory.retrieve",
+    "params": {
+      "query": "What kitchen appliance did I buy 10 days ago?",
+      "mode": "fts",
+      "budgetTokens": 90,
+      "scope": {
+        "userId": "user-local"
+      },
+      "time": {
+        "validAt": "2023-03-25T09:00:00Z"
+      },
+      "options": {
+        "includeDebug": true,
+        "logRetrieval": false,
+        "timeAnchors": true
+      }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_time_anchors",
+    "result": {
+      "retrievalId": "q_retr_21",
+      "prompt": "Current date: 2023-03-25 (Saturday)\n<memory>\n<sessions>\n## session s-blender 2023-02-02 (Thu)\n[q_msg_4] user: My favorite kitchen appliance is the blender I did buy as a kitchen appliance for smoothies.\n## session s-smoker 2023-03-15 (Wed)\n[q_msg_14] user: Just got a smoker today for the kitchen patio, brisket soon.\n</sessions>\n</memory>",
+      "context": {
+        "core": [],
+        "currentFacts": [],
+        "preferences": [],
+        "procedural": [],
+        "episodes": [
+          {
+            "qid": "q_msg_14",
+            "type": "message",
+            "text": "Just got a smoker today for the kitchen patio, brisket soon.",
+            "score": 2.413100481033325,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2023-03-15T10:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "text": "My favorite kitchen appliance is the blender I did buy as a kitchen appliance for smoothies.",
+            "score": 1.2983512878417969,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2023-02-02T10:00:00Z",
+            "validTo": null,
+            "evidence": []
+          }
+        ],
+        "warnings": [
+          "token_budget_truncated"
+        ]
+      },
+      "items": [
+        {
+          "qid": "q_msg_14",
+          "type": "message",
+          "text": "Just got a smoker today for the kitchen patio, brisket soon.",
+          "score": 2.413100481033325,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2023-03-15T10:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_4",
+          "type": "message",
+          "text": "My favorite kitchen appliance is the blender I did buy as a kitchen appliance for smoothies.",
+          "score": 1.2983512878417969,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2023-02-02T10:00:00Z",
+          "validTo": null,
+          "evidence": []
+        }
+      ],
+      "tokenEstimate": 81,
+      "confidence": 0.7200000286102295,
+      "warnings": [
+        "token_budget_truncated"
+      ],
+      "trace": {
+        "query": "What kitchen appliance did I buy 10 days ago?",
+        "requestedNeedsCount": 0,
+        "budgetTokens": 90,
+        "candidateSources": {
+          "fts": 4,
+          "vector": 0,
+          "hybrid": 0,
+          "graph": 0,
+          "core": 0
+        },
+        "candidateCount": 4,
+        "keptCount": 2,
+        "droppedForNeeds": 0,
+        "droppedForBudget": 2,
+        "tokenEstimate": 81,
+        "validAt": "2023-03-25T09:00:00Z",
+        "scoreBreakdowns": [
+          {
+            "qid": "q_msg_14",
+            "type": "message",
+            "score": 2.413100481033325,
+            "lexical": 0.7070112824440002,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "score": 1.2983512878417969,
+            "lexical": 0.5649055242538452,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          }
+        ],
+        "scoringDetails": [
+          {
+            "qid": "q_msg_14",
+            "type": "message",
+            "finalScore": 2.413100481033325,
+            "lexical": 0.7070112824440002,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "finalScore": 1.2983512878417969,
+            "lexical": 0.5649055242538452,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          }
+        ],
+        "droppedItemReasons": [
+          {
+            "reason": "dropped_for_token_budget",
+            "count": 2
+          }
+        ],
+        "timeAnchors": {
+          "windows": 1,
+          "items": 1,
+          "tokens": 31
+        }
+      }
+    }
+  }
+}

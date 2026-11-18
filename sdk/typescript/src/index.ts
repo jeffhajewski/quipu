@@ -346,6 +346,7 @@ function validateRetrieve(params: Record<string, unknown>): void {
         "temporalHints",
         "factKeys",
         "facts",
+        "timeAnchors",
         "queryExpansion",
       ]),
       "options",
@@ -360,6 +361,7 @@ function validateRetrieve(params: Record<string, unknown>): void {
       "temporalHints",
       "factKeys",
       "facts",
+      "timeAnchors",
     ]) {
       optionalBoolean(params.options, key, "options");
     }
@@ -414,6 +416,7 @@ function validateAnswer(params: Record<string, unknown>): void {
         "temporalHints",
         "factKeys",
         "facts",
+        "timeAnchors",
         "queryExpansion",
       ]),
       "options",
@@ -429,6 +432,7 @@ function validateAnswer(params: Record<string, unknown>): void {
       "temporalHints",
       "factKeys",
       "facts",
+      "timeAnchors",
     ]) {
       optionalBoolean(params.options, key, "options");
     }
