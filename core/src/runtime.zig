@@ -3,6 +3,7 @@ const answer_synthesis = @import("answer_synthesis.zig");
 const build_options = @import("build_options");
 const extractor = @import("extractor.zig");
 const fact_extraction = @import("fact_extraction.zig");
+const fact_updates = @import("fact_updates.zig");
 const forgetting = @import("forgetting.zig");
 const in_memory_storage = if (build_options.enable_lattice) struct {} else @import("in_memory_storage.zig");
 const jobs = @import("jobs.zig");
@@ -47,6 +48,22 @@ const default_extract_concurrency: usize = 8;
 /// Assertion qids carry this prefix, so search channels can drop assertion
 /// hits without loading the node.
 const assertion_qid_prefix = "q_asrt_";
+const update_qid_prefix = "q_upd_";
+/// Consolidation: claims compared per job, earlier facts fetched per claim
+/// and sent per job, and search hits scanned to find them (raw hits share
+/// the list, so it is several times what is kept).
+const max_consolidate_claims: usize = 32;
+const max_earlier_per_claim: usize = 3;
+const max_consolidate_earlier: usize = 30;
+const consolidate_search_limit: usize = 48;
+/// `options.facts`: share of the token budget the facts section may use,
+/// and search hits scanned for claims that match the query.
+const facts_budget_percent: usize = 30;
+const fact_search_limit: usize = 200;
+/// `options.facts`: heads the facts section, so the reader knows what the
+/// states mean. Without it GPT-4o-mini answered 54 of 70 development
+/// questions at 4K; with it, 57.
+const facts_legend = "(What people said about themselves, with the date said. A superseded fact was replaced by a later one; the current fact holds now.)";
 /// factKeys: event dates listed on one raw line, earliest first.
 const max_event_dates_per_item: usize = 4;
 /// With `options.queryExpansion`, each query's leading candidates that lead
@@ -246,12 +263,14 @@ const RetrievalTrace = struct {
     factKeys: ?FactKeysTrace = null,
     /// Present only when `options.queryExpansion` is not off.
     queryExpansion: ?query_expansion.Trace = null,
+    /// Present only when `options.facts` is true.
+    facts: ?FactsTrace = null,
 
     pub fn jsonStringify(self: @This(), jw: anytype) !void {
         try jw.beginObject();
         inline for (std.meta.fields(@This())) |field| {
             const value = @field(self, field.name);
-            if (comptime (std.mem.eql(u8, field.name, "rerank") or std.mem.eql(u8, field.name, "factKeys") or std.mem.eql(u8, field.name, "queryExpansion"))) {
+            if (comptime (std.mem.eql(u8, field.name, "rerank") or std.mem.eql(u8, field.name, "factKeys") or std.mem.eql(u8, field.name, "queryExpansion") or std.mem.eql(u8, field.name, "facts") or std.mem.eql(u8, field.name, "timeAnchors"))) {
                 if (value) |present| {
                     try jw.objectField(field.name);
                     try jw.write(present);
@@ -278,6 +297,19 @@ const RerankTrace = struct {
     /// Best scores first, at most `rerank_trace_top_scores`.
     topScores: []const RerankScore = &.{},
     @"error": ?[]const u8 = null,
+};
+
+/// `options.facts`: what the facts section of the context holds.
+const FactsTrace = struct {
+    /// Claims among the search hits for the query.
+    candidates: usize = 0,
+    /// Facts in the context, and how many of them are superseded.
+    kept: usize = 0,
+    superseded: usize = 0,
+    /// Facts added because a kept fact replaces them or is replaced by them.
+    linked: usize = 0,
+    /// Estimated tokens of the section, taken out of the raw evidence budget.
+    tokens: usize = 0,
 };
 
 /// `options.factKeys`: how assertion search keys shaped the candidates.
@@ -412,9 +444,24 @@ pub const ExtractJobRunResult = struct {
     counts: fact_extraction.Counts = .{},
 };
 
+/// Outcome of one `memory.consolidate.run` / `quipu jobs run consolidate` pass.
+pub const ConsolidateJobRunResult = struct {
+    leasedCount: usize = 0,
+    succeededCount: usize = 0,
+    failedCount: usize = 0,
+    lastError: ?[]const u8 = null,
+    calls: usize = 0,
+    /// Claims compared and earlier facts they were compared with.
+    claims: usize = 0,
+    earlier: usize = 0,
+    updatesWritten: usize = 0,
+    counts: fact_updates.Counts = .{},
+};
+
 /// What a finished background batch did.
 pub const BackgroundResult = union(enum) {
     extract: ExtractJobRunResult,
+    consolidate: ConsolidateJobRunResult,
 };
 
 pub const RuntimeOptions = struct {
@@ -431,6 +478,10 @@ pub const RuntimeOptions = struct {
     /// Whether the host drains long-term jobs between requests with
     /// `startBackgroundWork`. Off, jobs run only when a caller asks.
     background_workers: bool = false,
+    /// Whether extraction queues a `consolidate` job for the user's new
+    /// claims. The job looks for earlier statements a claim replaces, using
+    /// the extract provider.
+    consolidate_updates: bool = false,
 };
 
 /// Called from a worker thread when the last provider call of a background
@@ -445,6 +496,7 @@ const BackgroundBatch = struct {
     allocator: std.mem.Allocator,
     leases: []jobs.LeaseResult,
     tasks: []ExtractTask = &.{},
+    consolidate_tasks: []ConsolidateTask = &.{},
     group: std.Io.Group = .init,
     /// Provider calls that have not returned yet.
     remaining: std.atomic.Value(usize),
@@ -454,6 +506,8 @@ const BackgroundBatch = struct {
         const allocator = self.allocator;
         for (self.tasks) |*task| task.deinit(allocator);
         allocator.free(self.tasks);
+        for (self.consolidate_tasks) |*task| task.deinit(allocator);
+        allocator.free(self.consolidate_tasks);
         jobs.freeLeaseResults(allocator, self.leases);
         allocator.destroy(self);
     }
@@ -551,6 +605,9 @@ pub const Runtime = struct {
         });
         if (leases.len == 0) {
             jobs.freeLeaseResults(allocator, leases);
+            // Consolidation follows extraction: its jobs run once no extract
+            // job is waiting.
+            if (self.options.consolidate_updates and try self.startBackgroundConsolidation(allocator, io)) return true;
             self.background_dirty = false;
             return false;
         }
@@ -583,6 +640,46 @@ pub const Runtime = struct {
         return true;
     }
 
+    fn startBackgroundConsolidation(self: *Runtime, allocator: std.mem.Allocator, io: std.Io) !bool {
+        const leases = try jobs.leasePendingJobs(allocator, self.store, .{
+            .worker_kind = streams.workerKindForStream(streams.consolidate_requested),
+            .owner = background_owner,
+            .now_ms = self.nowMs(),
+            .limit = default_extract_concurrency,
+        });
+        if (leases.len == 0) {
+            jobs.freeLeaseResults(allocator, leases);
+            return false;
+        }
+        errdefer {
+            for (leases) |lease| jobs.releaseLease(allocator, self.store, lease.qid) catch {};
+            jobs.freeLeaseResults(allocator, leases);
+        }
+        const tasks = try allocator.alloc(ConsolidateTask, leases.len);
+        for (tasks, leases) |*task, lease| task.* = .{ .lease = lease };
+        errdefer {
+            for (tasks) |*task| task.deinit(allocator);
+            allocator.free(tasks);
+        }
+        try self.prepareConsolidateTasks(allocator, tasks);
+
+        const batch = try allocator.create(BackgroundBatch);
+        batch.* = .{
+            .allocator = allocator,
+            .leases = leases,
+            .consolidate_tasks = tasks,
+            .remaining = .init(tasks.len),
+            .notify = self.background_notify,
+        };
+        self.background = batch;
+        const endpoint = self.options.extract_provider;
+        for (tasks) |*task| {
+            batch.group.concurrent(io, backgroundConsolidateCall, .{ batch, task, allocator, io, endpoint }) catch
+                backgroundConsolidateCall(batch, task, allocator, io, endpoint);
+        }
+        return true;
+    }
+
     /// Whether a batch is in flight.
     pub fn backgroundActive(self: *const Runtime) bool {
         return self.background != null;
@@ -608,12 +705,21 @@ pub const Runtime = struct {
         self.background = null;
         defer batch.destroy();
         if (self.options.io) |io| batch.group.await(io) catch {};
+        const consolidating = batch.consolidate_tasks.len > 0;
 
         var calls: usize = 0;
         var called: usize = 0;
         var unanswered: usize = 0;
         var last_error: ?[]const u8 = null;
         for (batch.tasks) |task| {
+            if (task.calls == 0) continue;
+            called += 1;
+            calls += task.calls;
+            if (!task.unanswered) continue;
+            unanswered += 1;
+            last_error = @errorName(task.failure.?);
+        }
+        for (batch.consolidate_tasks) |task| {
             if (task.calls == 0) continue;
             called += 1;
             calls += task.calls;
@@ -628,12 +734,18 @@ pub const Runtime = struct {
             else
                 @min(self.background_backoff_ms * 2, background_backoff_max_ms);
             self.background_retry_at_ms = self.nowMs() + self.background_backoff_ms;
+            if (consolidating) return .{ .consolidate = .{ .leasedCount = batch.leases.len, .failedCount = unanswered, .calls = calls, .lastError = last_error } };
             return .{ .extract = .{ .leasedCount = batch.leases.len, .failedCount = unanswered, .calls = calls, .lastError = last_error } };
         }
         self.background_backoff_ms = 0;
         self.background_retry_at_ms = 0;
         // Jobs the failed write did not settle go back to pending.
         errdefer for (batch.leases) |lease| jobs.releaseLease(allocator, self.store, lease.qid) catch {};
+        if (consolidating) {
+            var result = ConsolidateJobRunResult{ .leasedCount = batch.leases.len };
+            try self.applyConsolidateTasks(allocator, batch.consolidate_tasks, &result);
+            return .{ .consolidate = result };
+        }
         var result = ExtractJobRunResult{ .leasedCount = batch.leases.len };
         try self.applyExtractTasks(allocator, batch.tasks, &result);
         return .{ .extract = result };
@@ -683,6 +795,7 @@ pub const Runtime = struct {
         if (std.mem.eql(u8, method, "memory.feedback")) return self.memoryFeedback(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.entityResolve.run")) return self.memoryEntityResolveRun(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.extract.run")) return self.memoryExtractRun(allocator, id, &params);
+        if (std.mem.eql(u8, method, "memory.consolidate.run")) return self.memoryConsolidateRun(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.get")) return self.memoryCoreGet(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.update")) return self.memoryCoreUpdate(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.consolidate")) return self.memoryCoreConsolidate(allocator, id, &params);
@@ -706,7 +819,7 @@ pub const Runtime = struct {
                 .storage = storageHealth(self.store.capabilities()),
                 .workers = .{
                     .extractor = if (self.backgroundEnabled()) "running" else if (extractProviderUsable(self.options.extract_provider)) "stopped" else "unavailable",
-                    .consolidator = "unavailable",
+                    .consolidator = if (!self.options.consolidate_updates or !extractProviderUsable(self.options.extract_provider)) "unavailable" else if (self.backgroundEnabled()) "running" else "stopped",
                     .entityResolver = if (self.options.entity_provider.kind == .none) "unavailable" else "stopped",
                     .answerer = if (self.options.answer_provider.kind == .none) "unavailable" else "running",
                 },
@@ -721,6 +834,7 @@ pub const Runtime = struct {
                         .promptVersion = fact_extraction.prompt_version,
                     },
                     .factKeys = true,
+                    .facts = true,
                     .queryExpansion = .{
                         .modes = [_][]const u8{ "off", "rules", "llm" },
                         .llmConfigured = expansion_llm,
@@ -785,6 +899,43 @@ pub const Runtime = struct {
                 .jsonRetries = result.jsonRetries,
                 .sourceMessages = result.sourceMessages,
                 .assertionsWritten = result.assertionsWritten,
+                .counts = result.counts,
+            },
+        };
+        return stringifyAlloc(allocator, response);
+    }
+
+    /// Operational, like `memory.extract.run`: runs the pending
+    /// `consolidate` jobs and returns when they are done.
+    fn memoryConsolidateRun(self: *Runtime, allocator: std.mem.Allocator, id: ?[]const u8, params: *const ObjectMap) ![]u8 {
+        const owner = stringField(params, "owner") orelse "consolidate-runner";
+        const requested_limit = integerField(params, "limit") orelse 100000;
+        if (requested_limit < 1) {
+            return errorResponse(allocator, id, "invalid_request", "limit must be positive");
+        }
+        const requested_concurrency = integerField(params, "concurrency") orelse default_extract_concurrency;
+        if (requested_concurrency < 1) {
+            return errorResponse(allocator, id, "invalid_request", "concurrency must be positive");
+        }
+        if (!extractProviderUsable(self.options.extract_provider)) {
+            return errorResponse(allocator, id, "provider_error", "no extract provider configured; set --extract-provider or --llm-provider");
+        }
+        const result = try self.runConsolidateJobs(allocator, owner, @intCast(requested_limit), @intCast(requested_concurrency));
+        const response = .{
+            .jsonrpc = "2.0",
+            .id = id,
+            .result = .{
+                .leasedCount = result.leasedCount,
+                .succeededCount = result.succeededCount,
+                .failedCount = result.failedCount,
+                .lastError = result.lastError,
+                .provider = self.options.extract_provider.name,
+                .model = self.options.extract_provider.model,
+                .promptVersion = fact_updates.prompt_version,
+                .calls = result.calls,
+                .claims = result.claims,
+                .earlier = result.earlier,
+                .updatesWritten = result.updatesWritten,
                 .counts = result.counts,
             },
         };
@@ -1111,6 +1262,7 @@ pub const Runtime = struct {
         const log_audit = if (options) |opts| boolField(&opts, "logAudit") orelse true else true;
         const temporal_hints = if (options) |opts| boolField(&opts, "temporalHints") orelse false else false;
         const fact_keys = if (options) |opts| boolField(&opts, "factKeys") orelse false else false;
+        const with_facts = if (options) |opts| boolField(&opts, "facts") orelse false else false;
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
         };
@@ -1139,7 +1291,15 @@ pub const Runtime = struct {
         results.applyRawEvidencePolicy();
         var rerank = try self.rerankItems(allocator, query, &results, rerank_settings);
         defer if (rerank) |*stage| stage.deinit();
-        const dropped_for_budget = results.applyTokenBudget(@intCast(budget));
+        var facts = try self.collectFactItems(allocator, with_facts, query, retrieve_mode, .{
+            .scope = scope,
+            .valid_at = valid_at,
+            .include_evidence = include_evidence,
+            .include_debug = include_trace,
+        }, needs_value, @intCast(budget));
+        defer facts.items.deinit();
+        const dropped_for_budget = results.applyTokenBudget(@as(usize, @intCast(budget)) - facts.trace.tokens);
+        try results.adopt(&facts.items);
 
         var warnings = std.ArrayList([]const u8).empty;
         defer warnings.deinit(allocator);
@@ -1194,6 +1354,7 @@ pub const Runtime = struct {
             .rerank = if (rerank) |*stage| stage.view() else null,
             .factKeys = results.factKeysTrace(),
             .queryExpansion = expansion_trace,
+            .facts = if (with_facts) facts.trace else null,
         };
 
         const item_qids = try allocator.alloc([]const u8, results.items.items.len);
@@ -1268,6 +1429,7 @@ pub const Runtime = struct {
         const reader_reasoning = if (options) |opts| boolField(&opts, "readerReasoning") orelse false else false;
         const temporal_hints = if (options) |opts| boolField(&opts, "temporalHints") orelse false else false;
         const fact_keys = if (options) |opts| boolField(&opts, "factKeys") orelse false else false;
+        const with_facts = if (options) |opts| boolField(&opts, "facts") orelse false else false;
         const log_retrieval = if (options) |opts| boolField(&opts, "logRetrieval") orelse (boolField(&opts, "logTrace") orelse true) else true;
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
@@ -1297,7 +1459,15 @@ pub const Runtime = struct {
         results.applyRawEvidencePolicy();
         var rerank = try self.rerankItems(allocator, query, &results, rerank_settings);
         defer if (rerank) |*stage| stage.deinit();
-        const dropped_for_budget = results.applyTokenBudget(@intCast(budget));
+        var facts = try self.collectFactItems(allocator, with_facts, query, retrieve_mode, .{
+            .scope = scope,
+            .valid_at = valid_at,
+            .include_evidence = include_evidence,
+            .include_debug = include_trace,
+        }, needs_value, @intCast(budget));
+        defer facts.items.deinit();
+        const dropped_for_budget = results.applyTokenBudget(@as(usize, @intCast(budget)) - facts.trace.tokens);
+        try results.adopt(&facts.items);
 
         var warnings = std.ArrayList([]const u8).empty;
         defer warnings.deinit(allocator);
@@ -1351,6 +1521,7 @@ pub const Runtime = struct {
             .rerank = if (rerank) |*stage| stage.view() else null,
             .factKeys = results.factKeysTrace(),
             .queryExpansion = expansion_trace,
+            .facts = if (with_facts) facts.trace else null,
         };
 
         // One answer path: with a reader configured, every non-empty context
@@ -2845,6 +3016,148 @@ pub const Runtime = struct {
         return owned;
     }
 
+    /// `options.facts`: the claims matching the query that consolidation
+    /// found replaced, or that replaced another, as dated facts for the
+    /// context's facts section. A replaced fact is `superseded` and valid
+    /// until the day it was replaced, and the fact that replaced it comes
+    /// along, so the reader never sees an old value without the current
+    /// one. A claim with no replacement on either side is not listed: the
+    /// raw evidence already carries it, and nothing has checked that it
+    /// still holds. Claims drawn from the assistant's replies (extraction
+    /// up to v3) are left out. The section takes at most
+    /// `facts_budget_percent` of the budget, out of the raw evidence's share.
+    fn collectFactItems(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        enabled: bool,
+        query: []const u8,
+        mode: SearchMode,
+        filter: ItemFilter,
+        needs_value: ?Value,
+        budget: usize,
+    ) !FactItems {
+        var facts = FactItems{ .items = .{ .allocator = allocator } };
+        errdefer facts.items.deinit();
+        if (!enabled or (needsCount(needs_value) > 0 and !needsIncludes(needs_value, "current_facts"))) return facts;
+
+        const hits = try self.collectSearchHits(allocator, query, mode, fact_search_limit, false);
+        defer freeHits(allocator, hits);
+        const limit = budget * facts_budget_percent / 100;
+        var used = estimatePromptTokens(facts_legend) + 8;
+        for (hits) |hit| {
+            if (!std.mem.startsWith(u8, hit.qid, assertion_qid_prefix)) continue;
+            facts.trace.candidates += 1;
+            if (facts.items.containsQid(hit.qid)) continue;
+
+            // Only claims with a history; see the doc comment.
+            var links = try self.updateLinks(allocator, hit.qid, filter.valid_at);
+            defer links.deinit(allocator);
+            if (links.replaced_by.items.items.len == 0 and links.replaces.items.items.len == 0) continue;
+            if (!try self.appendFactItem(allocator, &facts.items, hit.qid, hit.score, filter, &used, limit)) continue;
+
+            // Both sides of a replacement, whichever one matched the query.
+            for ([_][]const []const u8{ links.replaced_by.items.items, links.replaces.items.items }) |linked| {
+                for (linked) |qid| {
+                    if (facts.items.containsQid(qid)) continue;
+                    if (try self.appendFactItem(allocator, &facts.items, qid, hit.score, filter, &used, limit)) facts.trace.linked += 1;
+                }
+            }
+        }
+        for (facts.items.items.items) |item| {
+            if (std.mem.eql(u8, item.state, "superseded")) facts.trace.superseded += 1;
+        }
+        facts.trace.kept = facts.items.items.items.len;
+        facts.trace.tokens = if (facts.trace.kept > 0) used else 0;
+        return facts;
+    }
+
+    /// Adds one claim to the facts section when it is live, in scope, said
+    /// by a person and still fits. Returns whether it was added.
+    fn appendFactItem(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        owned: *OwnedItems,
+        assertion_qid: []const u8,
+        score: f32,
+        filter: ItemFilter,
+        used: *usize,
+        limit: usize,
+    ) !bool {
+        const node = (try self.store.getNode(allocator, assertion_qid)) orelse return false;
+        defer self.store.freeNode(allocator, node);
+        if (!std.mem.eql(u8, node.label, "Assertion")) return false;
+        const role = try readOptionalPropertyString(allocator, node.properties_json, "role");
+        defer if (role) |value| allocator.free(value);
+        if (!isSpeakerRole(role orelse "user")) return false;
+
+        var fact_filter = filter;
+        fact_filter.labels_value = null;
+        fact_filter.event_window = .{};
+        fact_filter.allow_hidden = true;
+        if (!try appendNodeItem(allocator, owned, node, score, fact_filter)) return false;
+        const item = &owned.items.items[owned.items.items.len - 1];
+        item.type = "fact";
+
+        var links = try self.updateLinks(allocator, assertion_qid, filter.valid_at);
+        defer links.deinit(allocator);
+        if (links.replaced_at) |replaced_at| {
+            const state = try allocator.dupe(u8, "superseded");
+            allocator.free(item.state);
+            item.state = state;
+            const valid_to = try allocator.dupe(u8, replaced_at);
+            if (item.validTo) |value| allocator.free(value);
+            item.validTo = valid_to;
+        }
+        const tokens = estimateFactTokens(item.*);
+        if (used.* + tokens > limit) {
+            owned.freeItem(owned.items.pop().?);
+            return false;
+        }
+        used.* += tokens;
+        return true;
+    }
+
+    /// The live updates that touch a claim: the claims that replaced it (and
+    /// when the latest did), and the claims it replaced. An update dated
+    /// after `valid_at` has not happened yet for that question.
+    fn updateLinks(self: *Runtime, allocator: std.mem.Allocator, assertion_qid: []const u8, valid_at: ?[]const u8) !UpdateLinks {
+        const edges = try self.store.findEdges(allocator, .{ .to_qid = assertion_qid, .edge_type = "DERIVED_FROM", .limit = 4096 });
+        defer self.store.freeEdges(allocator, edges);
+        var links = UpdateLinks{ .replaced_by = .{ .allocator = allocator }, .replaces = .{ .allocator = allocator } };
+        errdefer links.deinit(allocator);
+        for (edges) |edge| {
+            if (!std.mem.startsWith(u8, edge.from_qid, update_qid_prefix)) continue;
+            const node = (try self.store.getNode(allocator, edge.from_qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            if (!std.mem.eql(u8, node.label, "Update")) continue;
+            if (try propertyBool(allocator, node.properties_json, "deleted")) continue;
+            const newer = (try readOptionalPropertyString(allocator, node.properties_json, "assertionQid")) orelse continue;
+            defer allocator.free(newer);
+            const older = (try readOptionalPropertyString(allocator, node.properties_json, "replacedQid")) orelse continue;
+            defer allocator.free(older);
+            const created_at = try readOptionalPropertyString(allocator, node.properties_json, "createdAt");
+            defer if (created_at) |value| allocator.free(value);
+            if (valid_at) |timestamp| {
+                if (created_at) |value| {
+                    if (timestampBefore(timestamp, value)) continue;
+                }
+            }
+            if (std.mem.eql(u8, older, assertion_qid)) {
+                try links.replaced_by.appendUnique(allocator, newer);
+                if (created_at) |value| {
+                    if (links.replaced_at == null or std.mem.order(u8, value, links.replaced_at.?) == .gt) {
+                        const copy = try allocator.dupe(u8, value);
+                        if (links.replaced_at) |previous| allocator.free(previous);
+                        links.replaced_at = copy;
+                    }
+                }
+            } else if (std.mem.eql(u8, newer, assertion_qid)) {
+                try links.replaces.appendUnique(allocator, older);
+            }
+        }
+        return links;
+    }
+
     /// factKeys: adds the raw evidence behind one Assertion hit.
     fn appendAssertionEvidence(
         self: *Runtime,
@@ -3345,6 +3658,7 @@ pub const Runtime = struct {
         var result = ExtractJobRunResult{};
         if (try self.finishBackgroundWork(allocator)) |finished| switch (finished) {
             .extract => |extracted| result = extracted,
+            .consolidate => {},
         };
         const worker_kind = streams.workerKindForStream(streams.extract_requested);
         const materialized = try jobs.materializeStream(allocator, self.store, streams.extract_requested, worker_kind, .{ .limit = limit });
@@ -3557,6 +3871,9 @@ pub const Runtime = struct {
         });
         defer allocator.free(event_payload);
         _ = try self.publishEvent(streams.extract_completed, event_payload);
+        if (self.options.consolidate_updates and task.user_assertions.items.len > 0) {
+            try self.queueConsolidateJob(allocator, task);
+        }
         return written;
     }
 
@@ -3643,7 +3960,337 @@ pub const Runtime = struct {
         for (chunk_qids.items) |chunk_qid| {
             try self.putDeterministicEdge(allocator, qid, chunk_qid, "EVIDENCED_BY");
         }
+        const owned_qid = try allocator.dupe(u8, qid);
+        task.user_assertions.append(allocator, owned_qid) catch |err| {
+            allocator.free(owned_qid);
+            return err;
+        };
         return true;
+    }
+
+    /// Queues the consolidation of an extract job's claims against what was
+    /// said before.
+    fn queueConsolidateJob(self: *Runtime, allocator: std.mem.Allocator, task: *const ExtractTask) !void {
+        const payload = try stringifyAlloc(allocator, .{
+            .method = "memory.consolidate.requested",
+            .sourceMethod = "memory.extract",
+            .sessionQid = task.session_qid,
+            .assertionQids = task.user_assertions.items,
+            .scope = task.scope.json(),
+        });
+        defer allocator.free(payload);
+        const event = try self.publishEvent(streams.consolidate_requested, payload);
+        _ = try jobs.materializeStream(allocator, self.store, streams.consolidate_requested, streams.workerKindForStream(streams.consolidate_requested), .{
+            .after_sequence = if (event.sequence > 0) event.sequence - 1 else 0,
+            .limit = 1,
+        });
+        self.background_dirty = true;
+    }
+
+    /// Runs pending `consolidate` jobs. Each compares the claims extracted
+    /// from one conversation's user messages with what the user said in
+    /// earlier conversations, and stores an `Update` node for every claim
+    /// that replaces an earlier statement. The node is evidenced by both
+    /// messages, so forgetting either removes it. Nothing is rewritten: both
+    /// messages and both claims keep their text, and `options.facts` lists
+    /// the earlier claim as superseded.
+    pub fn runConsolidateJobs(self: *Runtime, allocator: std.mem.Allocator, owner: []const u8, limit: usize, concurrency: usize) !ConsolidateJobRunResult {
+        if (!extractProviderUsable(self.options.extract_provider)) return error.ProviderUnavailable;
+        var result = ConsolidateJobRunResult{};
+        if (try self.finishBackgroundWork(allocator)) |finished| switch (finished) {
+            .consolidate => |consolidated| result = consolidated,
+            .extract => {},
+        };
+        _ = try jobs.reclaimExpiredLeases(allocator, self.store, self.nowMs());
+        const leases = try jobs.leasePendingJobs(allocator, self.store, .{
+            .worker_kind = streams.workerKindForStream(streams.consolidate_requested),
+            .owner = owner,
+            .now_ms = self.nowMs(),
+            .limit = limit,
+        });
+        defer jobs.freeLeaseResults(allocator, leases);
+        result.leasedCount += leases.len;
+
+        const batch_size = @max(concurrency, 1);
+        var start: usize = 0;
+        while (start < leases.len) : (start += batch_size) {
+            const batch = leases[start..@min(start + batch_size, leases.len)];
+            const tasks = try allocator.alloc(ConsolidateTask, batch.len);
+            for (tasks, batch) |*task, lease| task.* = .{ .lease = lease };
+            defer {
+                for (tasks) |*task| task.deinit(allocator);
+                allocator.free(tasks);
+            }
+            try self.prepareConsolidateTasks(allocator, tasks);
+            self.callConsolidateTasks(allocator, tasks);
+            try self.applyConsolidateTasks(allocator, tasks, &result);
+        }
+        return result;
+    }
+
+    fn prepareConsolidateTasks(self: *Runtime, allocator: std.mem.Allocator, tasks: []ConsolidateTask) !void {
+        for (tasks) |*task| {
+            self.prepareConsolidateTask(allocator, task) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                task.failure = err;
+            };
+        }
+    }
+
+    /// Loads the job's live claims and, for each, the same person's earlier
+    /// claims that search ranks closest to it. A job with no claim or no
+    /// earlier fact makes no call.
+    fn prepareConsolidateTask(self: *Runtime, allocator: std.mem.Allocator, task: *ConsolidateTask) !void {
+        const payload_json = try self.payloadJsonForLease(allocator, task.lease);
+        defer allocator.free(payload_json);
+        task.payload = try std.json.parseFromSlice(Value, allocator, payload_json, .{ .allocate = .alloc_always });
+        const payload = objectValue(task.payload.?.value) orelse return error.InvalidRequest;
+        task.scope = parseScope(&payload);
+        task.session_qid = stringField(&payload, "sessionQid");
+        const assertion_qids = arrayValue(payload.get("assertionQids")) orelse return error.InvalidRequest;
+        var claims = std.ArrayList(ConsolidateClaim).empty;
+        defer {
+            for (claims.items) |claim| claim.deinit(allocator);
+            claims.deinit(allocator);
+        }
+        for (assertion_qids.items) |qid_value| {
+            if (claims.items.len >= max_consolidate_claims) break;
+            const assertion_qid = stringValue(qid_value) orelse continue;
+            const claim = (try self.loadConsolidateClaim(allocator, assertion_qid, task.scope)) orelse continue;
+            claims.append(allocator, claim) catch |err| {
+                claim.deinit(allocator);
+                return err;
+            };
+        }
+        if (claims.items.len == 0) return;
+
+        // One batched embedding request serves the searches below.
+        if (self.store.capabilities().vector) {
+            const texts = try allocator.alloc([]const u8, claims.items.len);
+            defer allocator.free(texts);
+            for (claims.items, texts) |claim, *slot| slot.* = claim.search_text;
+            self.store.prefetchEmbeddings(texts) catch {};
+        }
+        defer self.store.clearPrefetchedEmbeddings();
+        // Only a claim with something to compare against is sent.
+        for (claims.items) |*claim| {
+            if (try self.appendEarlierFacts(allocator, task, claim.*) == 0) continue;
+            try task.claims.append(allocator, claim.*);
+            claim.* = .{};
+        }
+        if (task.claims.items.len == 0 or task.earlier.items.len == 0) return;
+
+        const wire_claims = try task.wireClaims(allocator);
+        defer allocator.free(wire_claims);
+        const wire_earlier = try task.wireEarlier(allocator);
+        defer allocator.free(wire_earlier);
+        task.user_content = try fact_updates.buildUserContent(allocator, wire_claims, wire_earlier);
+    }
+
+    /// A live claim in `scope` that a person stated; null for anything else.
+    fn loadConsolidateClaim(self: *Runtime, allocator: std.mem.Allocator, assertion_qid: []const u8, scope: Scope) !?ConsolidateClaim {
+        const node = (try self.store.getNode(allocator, assertion_qid)) orelse return null;
+        defer self.store.freeNode(allocator, node);
+        if (!std.mem.eql(u8, node.label, "Assertion")) return null;
+        if (!try scope.matchesNode(allocator, node)) return null;
+        var parsed = try std.json.parseFromSlice(Value, allocator, node.properties_json, .{});
+        defer parsed.deinit();
+        const props = objectValue(parsed.value) orelse return null;
+        if (boolField(&props, "deleted") orelse false) return null;
+        const text = stringField(&props, "text") orelse return null;
+        const message_qid = stringField(&props, "sourceMessageQid") orelse return null;
+        const role = stringField(&props, "role") orelse "user";
+        if (!isSpeakerRole(role)) return null;
+
+        var claim = ConsolidateClaim{};
+        errdefer claim.deinit(allocator);
+        claim.assertion_qid = try allocator.dupe(u8, assertion_qid);
+        claim.message_qid = try allocator.dupe(u8, message_qid);
+        claim.text = try allocator.dupe(u8, text);
+        claim.search_text = try allocator.dupe(u8, stringField(&props, "statedText") orelse text);
+        claim.quote = try allocator.dupe(u8, stringField(&props, "quote") orelse "");
+        claim.role = try allocator.dupe(u8, role);
+        claim.created_at = try dupeOptional(allocator, optionalStringField(&props, "createdAt"));
+        claim.session_qid = try dupeOptional(allocator, optionalStringField(&props, "sessionQid"));
+        return claim;
+    }
+
+    /// Adds the earlier claims by the same person that match `claim`: from
+    /// another conversation, stated before it. Hybrid search where the store
+    /// has vectors, since an update rarely repeats the old wording ("gym at
+    /// 7:00 pm" against "before heading to the gym, usually at 6:00 pm").
+    /// Returns how many earlier facts the claim has to be compared with.
+    fn appendEarlierFacts(self: *Runtime, allocator: std.mem.Allocator, task: *ConsolidateTask, claim: ConsolidateClaim) !usize {
+        if (fact_updates.dayOf(claim.created_at) == null) return 0;
+        const mode: SearchMode = if (self.store.capabilities().vector) .hybrid else .fts;
+        const hits = try self.collectSearchHits(allocator, claim.search_text, mode, consolidate_search_limit, false);
+        defer freeHits(allocator, hits);
+        var found: usize = 0;
+        for (hits) |hit| {
+            if (found >= max_earlier_per_claim) break;
+            if (!std.mem.startsWith(u8, hit.qid, assertion_qid_prefix)) continue;
+            if (std.mem.eql(u8, hit.qid, claim.assertion_qid)) continue;
+            if (task.hasEarlier(hit.qid)) {
+                found += 1;
+                continue;
+            }
+            if (task.earlier.items.len >= max_consolidate_earlier) break;
+            const fact = (try self.loadConsolidateClaim(allocator, hit.qid, task.scope)) orelse continue;
+            var keep = fact_updates.isBefore(fact.created_at, claim.created_at) and std.mem.eql(u8, fact.role, claim.role);
+            // An earlier conversation, not an earlier line of this one.
+            if (claim.session_qid) |session_qid| {
+                if (fact.session_qid) |other| {
+                    if (std.mem.eql(u8, other, session_qid)) keep = false;
+                }
+            }
+            if (!keep) {
+                fact.deinit(allocator);
+                continue;
+            }
+            task.earlier.append(allocator, fact) catch |err| {
+                fact.deinit(allocator);
+                return err;
+            };
+            found += 1;
+        }
+        return found;
+    }
+
+    fn callConsolidateTasks(self: *Runtime, allocator: std.mem.Allocator, tasks: []ConsolidateTask) void {
+        const endpoint = self.options.extract_provider;
+        const io = self.options.io orelse {
+            for (tasks) |*task| callConsolidateTask(task, allocator, null, endpoint);
+            return;
+        };
+        var group: std.Io.Group = .init;
+        for (tasks) |*task| {
+            if (tasks.len == 1) {
+                callConsolidateTask(task, allocator, io, endpoint);
+                continue;
+            }
+            group.concurrent(io, callConsolidateTask, .{ task, allocator, @as(?std.Io, io), endpoint }) catch
+                callConsolidateTask(task, allocator, io, endpoint);
+        }
+        group.await(io) catch {};
+    }
+
+    /// The storage half of a batch: checks every proposed update against
+    /// the stored text, writes the ones that hold and settles each job.
+    fn applyConsolidateTasks(self: *Runtime, allocator: std.mem.Allocator, tasks: []ConsolidateTask, result: *ConsolidateJobRunResult) !void {
+        for (tasks) |*task| {
+            result.calls += task.calls;
+            if (task.failure) |err| {
+                result.failedCount += 1;
+                result.lastError = @errorName(err);
+                const error_json = try stringifyAlloc(allocator, .{ .@"error" = @errorName(err), .calls = task.calls });
+                defer allocator.free(error_json);
+                _ = jobs.failJob(allocator, self.store, task.lease.qid, error_json, self.nowMs()) catch {};
+                continue;
+            }
+            try self.writeConsolidateTask(allocator, task, result);
+            result.succeededCount += 1;
+        }
+    }
+
+    fn writeConsolidateTask(self: *Runtime, allocator: std.mem.Allocator, task: *ConsolidateTask, result: *ConsolidateJobRunResult) !void {
+        var written: usize = 0;
+        for (task.accepted.items) |update| {
+            const claim = task.claims.items[update.claim_index];
+            const fact = task.earlier.items[update.earlier_index];
+            if (try self.writeUpdate(allocator, task, claim, fact, update)) written += 1;
+        }
+        const summary = .{
+            .promptVersion = fact_updates.prompt_version,
+            .provider = self.options.extract_provider.name,
+            .model = self.options.extract_provider.model,
+            .calls = task.calls,
+            .claims = task.claims.items.len,
+            .earlier = task.earlier.items.len,
+            .updatesWritten = written,
+            .counts = task.counts,
+        };
+        const result_json = try stringifyAlloc(allocator, summary);
+        defer allocator.free(result_json);
+        try jobs.completeJobWithResult(allocator, self.store, task.lease.qid, self.nowMs(), result_json);
+        const event_payload = try stringifyAlloc(allocator, .{
+            .method = "memory.consolidate.completed",
+            .jobQid = task.lease.qid,
+            .sessionQid = task.session_qid,
+            .result = summary,
+        });
+        defer allocator.free(event_payload);
+        _ = try self.publishEvent(streams.consolidate_completed, event_payload);
+        result.claims += task.claims.items.len;
+        result.earlier += task.earlier.items.len;
+        result.updatesWritten += written;
+        result.counts.add(task.counts);
+    }
+
+    /// Stores one update: `claim` replaces the earlier `fact`. The node is
+    /// derived from both claims and evidenced by both of their messages, so
+    /// forgetting either message tombstones it and the earlier fact reads as
+    /// current again. Neither claim is rewritten; `options.facts` reads the
+    /// update to mark the earlier one superseded. It is not searchable.
+    fn writeUpdate(self: *Runtime, allocator: std.mem.Allocator, task: *const ConsolidateTask, claim: ConsolidateClaim, fact: ConsolidateClaim, update: AcceptedUpdate) !bool {
+        // Either side may have been forgotten while the provider calls ran.
+        for ([_][]const u8{ claim.assertion_qid, claim.message_qid, fact.assertion_qid, fact.message_qid }) |qid| {
+            if (!try self.nodeIsLive(allocator, qid)) return false;
+        }
+
+        const key = try std.fmt.allocPrint(allocator, "{s}\x1f{s}", .{ claim.assertion_qid, fact.assertion_qid });
+        defer allocator.free(key);
+        const qid = try hashQid(allocator, "upd", key);
+        defer allocator.free(qid);
+        const text = try clampPropertyText(allocator, claim.text);
+        defer allocator.free(text);
+        const replaced_text = try clampPropertyText(allocator, fact.text);
+        defer allocator.free(replaced_text);
+        const quote = try clampPropertyText(allocator, claim.quote);
+        defer allocator.free(quote);
+        const old_value = try clampPropertyText(allocator, update.old_value);
+        defer allocator.free(old_value);
+        const new_value = try clampPropertyText(allocator, update.new_value);
+        defer allocator.free(new_value);
+        const props = try stringifyAlloc(allocator, .{
+            .kind = "update",
+            .qtype = "update",
+            .text = text,
+            .replacedText = replaced_text,
+            .quote = quote,
+            .oldValue = old_value,
+            .newValue = new_value,
+            .createdAt = claim.created_at,
+            .replacedAt = fact.created_at,
+            .assertionQid = claim.assertion_qid,
+            .evidenceQid = claim.message_qid,
+            .replacedQid = fact.assertion_qid,
+            .replacedMessageQid = fact.message_qid,
+            .sessionQid = task.session_qid,
+            .tenantId = task.scope.tenant_id,
+            .userId = task.scope.user_id,
+            .agentId = task.scope.agent_id,
+            .projectId = task.scope.project_id,
+            .consolidatorProvider = self.options.extract_provider.name,
+            .consolidatorModel = self.options.extract_provider.model,
+            .promptVersion = fact_updates.prompt_version,
+            .jobQid = task.lease.qid,
+            .state = "current",
+            .searchable = false,
+            .deleted = false,
+        });
+        defer allocator.free(props);
+        try self.store.putNode(.{ .qid = qid, .label = "Update", .properties_json = props });
+        try self.putDeterministicEdge(allocator, qid, claim.assertion_qid, "DERIVED_FROM");
+        try self.putDeterministicEdge(allocator, qid, fact.assertion_qid, "DERIVED_FROM");
+        try self.putDeterministicEdge(allocator, qid, claim.message_qid, "EVIDENCED_BY");
+        try self.putDeterministicEdge(allocator, qid, fact.message_qid, "EVIDENCED_BY");
+        return true;
+    }
+
+    fn nodeIsLive(self: *Runtime, allocator: std.mem.Allocator, qid: []const u8) !bool {
+        const node = (try self.store.getNode(allocator, qid)) orelse return false;
+        defer self.store.freeNode(allocator, node);
+        return !try propertyBool(allocator, node.properties_json, "deleted");
     }
 };
 
@@ -3685,6 +4332,8 @@ const ExtractTask = struct {
     failure: ?anyerror = null,
     /// The failure came from the provider call itself: no reply to judge.
     unanswered: bool = false,
+    /// Qids of the assertions written, for the consolidation job.
+    user_assertions: std.ArrayList([]u8) = .empty,
 
     fn sourceMessages(self: *const ExtractTask, allocator: std.mem.Allocator) ![]fact_extraction.SourceMessage {
         const messages = try allocator.alloc(fact_extraction.SourceMessage, self.sources.items.len);
@@ -3700,9 +4349,194 @@ const ExtractTask = struct {
         if (self.user_content) |content| allocator.free(content);
         for (self.sources.items) |source| source.deinit(allocator);
         self.sources.deinit(allocator);
+        for (self.user_assertions.items) |qid| allocator.free(qid);
+        self.user_assertions.deinit(allocator);
         if (self.payload) |payload| payload.deinit();
     }
 };
+
+/// A claim in a `consolidate` job: one of the conversation's new claims, or
+/// an earlier claim it may replace. Strings are owned.
+const ConsolidateClaim = struct {
+    assertion_qid: []u8 = &.{},
+    message_qid: []u8 = &.{},
+    text: []u8 = &.{},
+    /// The claim as it is indexed: in the words it was said in.
+    search_text: []u8 = &.{},
+    /// The span of the message the claim was drawn from.
+    quote: []u8 = &.{},
+    /// Who said it: the role of the source message.
+    role: []u8 = &.{},
+    created_at: ?[]u8 = null,
+    session_qid: ?[]u8 = null,
+
+    fn deinit(self: ConsolidateClaim, allocator: std.mem.Allocator) void {
+        allocator.free(self.assertion_qid);
+        allocator.free(self.message_qid);
+        allocator.free(self.text);
+        allocator.free(self.search_text);
+        allocator.free(self.quote);
+        allocator.free(self.role);
+        if (self.created_at) |value| allocator.free(value);
+        if (self.session_qid) |value| allocator.free(value);
+    }
+};
+
+/// A pair that passed every check, with the values the verify call named.
+const AcceptedUpdate = struct {
+    claim_index: usize,
+    earlier_index: usize,
+    old_value: []u8,
+    new_value: []u8,
+};
+
+/// One `consolidate` job: a conversation's new claims and the earlier
+/// claims they may replace.
+const ConsolidateTask = struct {
+    lease: jobs.LeaseResult,
+    /// The job payload; `scope` and `session_qid` borrow from it.
+    payload: ?std.json.Parsed(Value) = null,
+    scope: Scope = .{},
+    session_qid: ?[]const u8 = null,
+    claims: std.ArrayList(ConsolidateClaim) = .empty,
+    earlier: std.ArrayList(ConsolidateClaim) = .empty,
+    user_content: ?[]u8 = null,
+    accepted: std.ArrayList(AcceptedUpdate) = .empty,
+    counts: fact_updates.Counts = .{},
+    calls: usize = 0,
+    failure: ?anyerror = null,
+    /// The failure came from the provider call itself: no reply to judge.
+    unanswered: bool = false,
+
+    fn hasEarlier(self: *const ConsolidateTask, qid: []const u8) bool {
+        for (self.earlier.items) |fact| {
+            if (std.mem.eql(u8, fact.assertion_qid, qid)) return true;
+        }
+        return false;
+    }
+
+    fn wireClaims(self: *const ConsolidateTask, allocator: std.mem.Allocator) ![]fact_updates.NewClaim {
+        const wire = try allocator.alloc(fact_updates.NewClaim, self.claims.items.len);
+        for (self.claims.items, wire) |claim, *slot| slot.* = .{ .text = claim.text, .date = claim.created_at };
+        return wire;
+    }
+
+    fn wireEarlier(self: *const ConsolidateTask, allocator: std.mem.Allocator) ![]fact_updates.Earlier {
+        const wire = try allocator.alloc(fact_updates.Earlier, self.earlier.items.len);
+        for (self.earlier.items, wire) |fact, *slot| slot.* = .{ .text = fact.text, .date = fact.created_at };
+        return wire;
+    }
+
+    fn deinit(self: *ConsolidateTask, allocator: std.mem.Allocator) void {
+        if (self.user_content) |content| allocator.free(content);
+        for (self.accepted.items) |update| {
+            allocator.free(update.old_value);
+            allocator.free(update.new_value);
+        }
+        self.accepted.deinit(allocator);
+        for (self.claims.items) |claim| claim.deinit(allocator);
+        self.claims.deinit(allocator);
+        for (self.earlier.items) |fact| fact.deinit(allocator);
+        self.earlier.deinit(allocator);
+        if (self.payload) |payload| payload.deinit();
+    }
+};
+
+/// The provider half of a consolidate job; touches no storage, so it may run
+/// on another thread. One call proposes pairs (a malformed reply gets one
+/// retry), then each pair that holds up against the texts gets its own
+/// verify call. A call the provider does not answer fails the whole job, so
+/// nothing half-checked is written and the job is tried again.
+fn callConsolidateTask(task: *ConsolidateTask, allocator: std.mem.Allocator, io: ?std.Io, endpoint: providers.ProviderEndpoint) void {
+    const user_content = task.user_content orelse return;
+    if (task.failure != null) return;
+    for (fact_updates.attempt_prompts) |prompt| {
+        task.calls += 1;
+        const reply = providers.completeChat(allocator, io, endpoint, .{
+            .system_prompt = prompt,
+            .user_content = user_content,
+            .json_mode = true,
+        }) catch |err| {
+            task.failure = err;
+            task.unanswered = true;
+            return;
+        };
+        defer allocator.free(reply);
+        const parsed = fact_updates.parseReply(allocator, reply) catch |err| {
+            if (err == error.OutOfMemory) {
+                task.failure = err;
+                return;
+            }
+            continue;
+        };
+        defer parsed.deinit();
+        verifyProposals(task, allocator, io, endpoint, parsed.value) catch |err| {
+            task.failure = err;
+        };
+        return;
+    }
+    task.failure = error.MalformedUpdates;
+}
+
+/// Checks the proposed pairs of one reply and fills `task.accepted`.
+fn verifyProposals(task: *ConsolidateTask, allocator: std.mem.Allocator, io: ?std.Io, endpoint: providers.ProviderEndpoint, payload: Value) !void {
+    const claims = try task.wireClaims(allocator);
+    defer allocator.free(claims);
+    const earlier = try task.wireEarlier(allocator);
+    defer allocator.free(earlier);
+    const proposals = try fact_updates.propose(allocator, payload, claims, earlier);
+    defer proposals.deinit(allocator);
+    task.counts = proposals.counts;
+    for (proposals.items) |proposal| {
+        const claim = claims[proposal.claim_index];
+        const fact = earlier[proposal.earlier_index];
+        const content = try fact_updates.buildVerifyContent(allocator, fact, claim);
+        defer allocator.free(content);
+        var confirmed = false;
+        for (fact_updates.verify_attempt_prompts) |prompt| {
+            task.calls += 1;
+            const reply = providers.completeChat(allocator, io, endpoint, .{
+                .system_prompt = prompt,
+                .user_content = content,
+                .json_mode = true,
+            }) catch |err| {
+                task.unanswered = true;
+                return err;
+            };
+            defer allocator.free(reply);
+            const parsed = fact_updates.parseVerdict(allocator, reply) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                continue;
+            };
+            defer parsed.deinit();
+            const verdict = fact_updates.verdictOf(parsed.value);
+            if (try fact_updates.confirms(allocator, fact.text, claim.text, verdict)) {
+                const old_value = try allocator.dupe(u8, verdict.earlier_value.?);
+                errdefer allocator.free(old_value);
+                const new_value = try allocator.dupe(u8, verdict.later_value.?);
+                errdefer allocator.free(new_value);
+                try task.accepted.append(allocator, .{
+                    .claim_index = proposal.claim_index,
+                    .earlier_index = proposal.earlier_index,
+                    .old_value = old_value,
+                    .new_value = new_value,
+                });
+                confirmed = true;
+            }
+            break;
+        }
+        if (confirmed) task.counts.accepted += 1 else task.counts.unverified += 1;
+    }
+}
+
+/// One consolidate call of a background batch; see `backgroundCall`.
+fn backgroundConsolidateCall(batch: *BackgroundBatch, task: *ConsolidateTask, allocator: std.mem.Allocator, io: std.Io, endpoint: providers.ProviderEndpoint) void {
+    const notify = batch.notify;
+    callConsolidateTask(task, allocator, io, endpoint);
+    if (batch.remaining.fetchSub(1, .acq_rel) == 1) {
+        if (notify) |hook| hook.wake(hook.context);
+    }
+}
 
 /// The provider half of an extract job; touches no storage, so it may run on
 /// another thread. Malformed replies get E1's two bounded retries, each with
@@ -4115,6 +4949,12 @@ const OwnedItems = struct {
         return dropped;
     }
 
+    /// Moves every item of `other` to the end of this list.
+    fn adopt(self: *OwnedItems, other: *OwnedItems) !void {
+        try self.items.appendSlice(self.allocator, other.items.items);
+        other.items.clearRetainingCapacity();
+    }
+
     fn containsQid(self: *const OwnedItems, qid: []const u8) bool {
         for (self.items.items) |item| {
             if (std.mem.eql(u8, item.qid, qid)) return true;
@@ -4155,6 +4995,27 @@ const OwnedItems = struct {
     }
 };
 
+/// `options.facts`: the fact items of one retrieval and what they add up to.
+const FactItems = struct {
+    items: OwnedItems,
+    trace: FactsTrace = .{},
+};
+
+/// The updates around one claim; see `Runtime.updateLinks`.
+const UpdateLinks = struct {
+    /// Claims that replaced it, and when the latest one was stated.
+    replaced_by: OwnedQids,
+    replaced_at: ?[]u8 = null,
+    /// Claims it replaced.
+    replaces: OwnedQids,
+
+    fn deinit(self: *UpdateLinks, allocator: std.mem.Allocator) void {
+        self.replaced_by.deinit();
+        self.replaces.deinit();
+        if (self.replaced_at) |value| allocator.free(value);
+    }
+};
+
 /// Whether a message was written by a person: anything but the assistant's
 /// replies, system text and tool output. Only such messages state facts
 /// about their author.
@@ -4174,6 +5035,9 @@ const ItemFilter = struct {
     event_window: EventWindow = .{},
     include_evidence: bool = true,
     include_debug: bool = false,
+    /// `options.facts`: claims are hidden from search, but they are what
+    /// the facts section is made of.
+    allow_hidden: bool = false,
 };
 
 /// Appends `node` as an item scored `score` when it passes `filter`.
@@ -4185,7 +5049,7 @@ fn appendNodeItem(allocator: std.mem.Allocator, owned: *OwnedItems, node: storag
     if (!try filter.scope.matchesNode(allocator, node)) return false;
     if (isInternalLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) return false;
     if (isStructuralLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) return false;
-    if (isHiddenSearchLabel(node.label) and !labelRequestedExplicitly(node.label, labels_value)) return false;
+    if (isHiddenSearchLabel(node.label) and !filter.allow_hidden and !labelRequestedExplicitly(node.label, labels_value)) return false;
     if (!labelAllowed(node.label, labels_value)) return false;
     // Chunked messages and copy-only episodes are reached through
     // their chunks/messages; never surface them as items themselves.
@@ -4246,6 +5110,10 @@ fn appendNodeItem(allocator: std.mem.Allocator, owned: *OwnedItems, node: storag
         .raw_source = raw_source,
     });
     return true;
+}
+
+fn stringGreaterThan(_: void, left: []const u8, right: []const u8) bool {
+    return std.mem.order(u8, left, right) == .gt;
 }
 
 fn stringLessThan(_: void, left: []const u8, right: []const u8) bool {
@@ -4837,6 +5705,7 @@ fn labelType(label: []const u8) []const u8 {
     if (std.mem.eql(u8, label, "Entity")) return "entity";
     if (std.mem.eql(u8, label, "Core")) return "core";
     if (std.mem.eql(u8, label, "Assertion")) return "assertion";
+    if (std.mem.eql(u8, label, "Update")) return "update";
     if (std.mem.eql(u8, label, "Feedback")) return "raw";
     return "raw";
 }
@@ -4851,7 +5720,7 @@ fn isSlotMemoryLabel(label: []const u8) bool {
 
 fn isEvidenceLinkedLabel(label: []const u8) bool {
     return isDerivedLabel(label) or std.mem.eql(u8, label, "MemoryCard") or std.mem.eql(u8, label, "Episode") or
-        std.mem.eql(u8, label, "Assertion");
+        std.mem.eql(u8, label, "Assertion") or std.mem.eql(u8, label, "Update");
 }
 
 fn isConsolidatableLabel(label: []const u8) bool {
@@ -4876,7 +5745,7 @@ fn isStructuralLabel(label: []const u8) bool {
 /// label: entities seed graph search, and assertions stand in for their
 /// source evidence under `options.factKeys`.
 fn isHiddenSearchLabel(label: []const u8) bool {
-    return std.mem.eql(u8, label, "Entity") or std.mem.eql(u8, label, "Assertion");
+    return std.mem.eql(u8, label, "Entity") or std.mem.eql(u8, label, "Assertion") or std.mem.eql(u8, label, "Update");
 }
 
 fn labelRequestedExplicitly(label: []const u8, labels_value: ?Value) bool {
@@ -5207,6 +6076,12 @@ fn estimateItemTokens(item: MessageResult) usize {
     return (item.text.len * 5 + 20) / 21 + 16 + eventTagTokens(item);
 }
 
+/// A line of the facts section: `[qid] (superseded, 2023-02-11 to 2023-05-30) text`.
+/// The prefix is about 20 tokens; the text counts at the item estimator's rate.
+fn estimateFactTokens(item: MessageResult) usize {
+    return (item.text.len * 5 + 20) / 21 + 20;
+}
+
 /// factKeys: the ` [event 2023-03-03, ...]` tag on a raw line. Dates
 /// tokenize at about 3 bytes per token. Zero for items without event dates.
 fn eventTagTokens(item: MessageResult) usize {
@@ -5311,6 +6186,9 @@ fn renderPrompt(
 }
 
 /// Derived items: `[qid] (state, from A to B) text`, oldest validity first.
+/// A claim (`options.facts`) is listed under the qid of the message it was
+/// drawn from, which is shorter and is what a reader should cite, and a
+/// section holding claims opens with `facts_legend`.
 fn writePromptSection(arena: std.mem.Allocator, out: *std.Io.Writer, name: []const u8, items: []const MessageResult) !void {
     if (items.len == 0) return;
     const order = try arena.alloc(usize, items.len);
@@ -5318,9 +6196,15 @@ fn writePromptSection(arena: std.mem.Allocator, out: *std.Io.Writer, name: []con
     std.mem.sort(usize, order, items, derivedRendersBefore);
 
     try out.print("\n<{s}>", .{name});
+    for (items) |item| {
+        if (!std.mem.startsWith(u8, item.qid, assertion_qid_prefix)) continue;
+        try out.writeAll("\n" ++ facts_legend);
+        break;
+    }
     for (order) |index| {
         const item = items[index];
-        try out.print("\n[{s}] ({s}", .{ item.qid, item.state });
+        const shown_qid = if (std.mem.startsWith(u8, item.qid, assertion_qid_prefix) and item.evidence.len > 0) item.evidence[0].qid else item.qid;
+        try out.print("\n[{s}] ({s}", .{ shown_qid, item.state });
         if (item.validFrom) |from| {
             if (item.validTo) |to| {
                 try out.print(", {s} to {s}", .{ dateKey(from), dateKey(to) });
@@ -9138,5 +10022,344 @@ test "background work keeps jobs retryable when the provider is down or the daem
     try std.testing.expectEqual(@as(usize, 2), recovered.succeededCount);
     try std.testing.expectEqual(@as(usize, 4), recovered.assertionsWritten);
     try std.testing.expectEqual(@as(usize, 0), try countJobs(store, "leased"));
+}
+
+/// Chat model for the consolidation tests: extracts one claim per follower
+/// count; asked to compare claims, says the first new claim replaces the
+/// earlier fact that holds `old_value`; asked to verify a pair, confirms it
+/// unless `replaced` is off. Its counters are safe to read from worker
+/// threads.
+const UpdateTestModel = struct {
+    extract_calls: std.atomic.Value(usize) = .init(0),
+    consolidate_calls: std.atomic.Value(usize) = .init(0),
+    verify_calls: std.atomic.Value(usize) = .init(0),
+    /// The last comparison request; only kept when `record` is set, for
+    /// tests that call from one thread.
+    record: bool = false,
+    last_comparison: ?[]u8 = null,
+    /// The value the model says was replaced, and its verdict on the pair.
+    old_value: []const u8 = "1250",
+    replaced: bool = true,
+
+    const extract_replies = [_][2][]const u8{
+        .{ "1250", "{\"assertions\":[{\"text\":\"The user has 1250 followers on Instagram.\",\"messageIndex\":0,\"quote\":\"I've got 1250 followers on Instagram now\"}]}" },
+        .{ "1300", "{\"assertions\":[{\"text\":\"The user is close to 1300 followers on Instagram.\",\"messageIndex\":0,\"quote\":\"close to 1300 followers on Instagram\"}]}" },
+    };
+
+    fn endpoint(self: *UpdateTestModel) providers.ProviderEndpoint {
+        return .{
+            .kind = .callback,
+            .name = "test-extractor",
+            .model = "test-extract-model",
+            .callback = .{ .context = self, .respond = respond },
+        };
+    }
+
+    fn respond(context: ?*anyopaque, allocator: std.mem.Allocator, turn: providers.ChatTurn) anyerror![]u8 {
+        const self: *UpdateTestModel = @ptrCast(@alignCast(context.?));
+        if (std.mem.startsWith(u8, turn.system_prompt, fact_updates.verify_prompt)) {
+            _ = self.verify_calls.fetchAdd(1, .monotonic);
+            return std.fmt.allocPrint(
+                allocator,
+                "{{\"earlierThing\":\"Instagram follower count\",\"laterThing\":\"Instagram follower count\",\"sameThing\":true,\"earlierValue\":\"{s}\",\"laterValue\":\"1300\",\"replaced\":{}}}",
+                .{ self.old_value, self.replaced },
+            );
+        }
+        if (std.mem.startsWith(u8, turn.system_prompt, fact_updates.system_prompt)) {
+            _ = self.consolidate_calls.fetchAdd(1, .monotonic);
+            if (self.record) {
+                if (self.last_comparison) |previous| std.testing.allocator.free(previous);
+                self.last_comparison = try std.testing.allocator.dupe(u8, turn.user_content);
+            }
+            // Point at the earlier fact that holds the old value, or at the
+            // first one when none does.
+            var earlier_index: usize = 0;
+            if (std.mem.indexOf(u8, turn.user_content, "\"earlier\":")) |list_start| {
+                if (std.mem.indexOfPos(u8, turn.user_content, list_start, self.old_value)) |value_at| {
+                    earlier_index = std.mem.count(u8, turn.user_content[list_start..value_at], "{\"id\":\"E") - 1;
+                }
+            }
+            return std.fmt.allocPrint(allocator, "{{\"updates\":[{{\"new\":\"N0\",\"old\":\"E{d}\",\"oldValue\":\"{s}\",\"newValue\":\"1300\"}}]}}", .{ earlier_index, self.old_value });
+        }
+        _ = self.extract_calls.fetchAdd(1, .monotonic);
+        for (extract_replies) |pair| {
+            if (std.mem.indexOf(u8, turn.user_content, pair[0]) != null) return allocator.dupe(u8, pair[1]);
+        }
+        return allocator.dupe(u8, "{\"assertions\":[]}");
+    }
+
+    fn deinit(self: *UpdateTestModel) void {
+        if (self.last_comparison) |value| std.testing.allocator.free(value);
+    }
+};
+
+const FollowerSessions = struct {
+    may_message: []u8,
+    june_message: []u8,
+
+    fn deinit(self: FollowerSessions) void {
+        std.testing.allocator.free(self.may_message);
+        std.testing.allocator.free(self.june_message);
+    }
+};
+
+/// Two conversations: 1250 followers in May, close to 1300 in June.
+fn rememberFollowerSessions(runtime: *Runtime) !FollowerSessions {
+    const allocator = std.testing.allocator;
+    const may = try runtime.dispatch(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r1\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:facts\"},\"sessionId\":\"s-may\",\"messages\":[{\"role\":\"user\",\"content\":\"By the way, I've got 1250 followers on Instagram now, so tips are welcome.\",\"createdAt\":\"2023-05-25T10:00:00Z\"}]}}",
+    );
+    defer allocator.free(may);
+    const june = try runtime.dispatch(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:facts\"},\"sessionId\":\"s-june\",\"messages\":[{\"role\":\"user\",\"content\":\"I think I'm close to 1300 followers on Instagram at this point.\",\"createdAt\":\"2023-06-10T09:00:00Z\"}]}}",
+    );
+    defer allocator.free(june);
+    const may_message = try resultArrayFirst(allocator, may, "messageQids");
+    errdefer allocator.free(may_message);
+    return .{ .may_message = may_message, .june_message = try resultArrayFirst(allocator, june, "messageQids") };
+}
+
+fn followerPrompt(runtime: *Runtime, options_json: []const u8) ![]u8 {
+    return followerPromptAt(runtime, options_json, "2023-07-01T09:00:00Z");
+}
+
+fn followerPromptAt(runtime: *Runtime, options_json: []const u8, valid_at: []const u8) ![]u8 {
+    const allocator = std.testing.allocator;
+    const request = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"q\",\"method\":\"memory.retrieve\",\"params\":{{\"query\":\"How many followers do I have on Instagram now?\",\"scope\":{{\"projectId\":\"repo:facts\"}},\"time\":{{\"validAt\":\"{s}\"}},\"options\":{{\"logRetrieval\":false,\"logAudit\":false{s}}}}}}}",
+        .{ valid_at, options_json },
+    );
+    defer allocator.free(request);
+    const response = try runtime.dispatch(allocator, request);
+    defer allocator.free(response);
+    return resultStringField(allocator, response, "prompt");
+}
+
+fn countLiveUpdates(store: storage.Adapter, evidence_qid: []const u8) !usize {
+    const allocator = std.testing.allocator;
+    const edges = try store.findEdges(allocator, .{ .to_qid = evidence_qid, .edge_type = "EVIDENCED_BY", .limit = storage.unlimited });
+    defer store.freeEdges(allocator, edges);
+    var count: usize = 0;
+    for (edges) |edge| {
+        if (!std.mem.startsWith(u8, edge.from_qid, update_qid_prefix)) continue;
+        const node = (try store.getNode(allocator, edge.from_qid)) orelse continue;
+        defer store.freeNode(allocator, node);
+        if (!try propertyBool(allocator, node.properties_json, "deleted")) count += 1;
+    }
+    return count;
+}
+
+const superseded_fact = "(superseded, 2023-05-25 to 2023-06-10) The user has 1250 followers on Instagram.";
+const current_fact = "(current, from 2023-06-10) The user is close to 1300 followers on Instagram.";
+
+test "consolidation records the fact a new claim replaces and options.facts shows both" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+    var model = UpdateTestModel{ .record = true };
+    defer model.deinit();
+    var runtime = Runtime.initWithOptions(store, harness.health(), .{ .extract_provider = model.endpoint(), .consolidate_updates = true });
+    defer runtime.deinit();
+    const health = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
+    defer allocator.free(health);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"consolidator\":\"stopped\"") != null);
+    const sessions = try rememberFollowerSessions(&runtime);
+    defer sessions.deinit();
+
+    // Extraction queues one consolidate job per conversation with a claim.
+    const extracted = try runtime.runExtractJobs(allocator, "test", 10, 1);
+    try std.testing.expectEqual(@as(usize, 2), extracted.assertionsWritten);
+    try std.testing.expectEqual(@as(usize, 2), try countJobs(store, "pending"));
+
+    // May has nothing before it, so only June's job asks the model: once to
+    // propose and once to verify the pair.
+    const run = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"method\":\"memory.consolidate.run\",\"params\":{\"owner\":\"test\"}}");
+    defer allocator.free(run);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"leasedCount\":2,\"succeededCount\":2,\"failedCount\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"promptVersion\":\"quipu.updates.v2\",\"calls\":2,\"claims\":1,\"earlier\":1,\"updatesWritten\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run, "\"proposed\":1,\"accepted\":1") != null);
+    try std.testing.expectEqual(@as(usize, 1), model.consolidate_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), model.verify_calls.load(.monotonic));
+    try std.testing.expectEqualStrings(
+        "{\"new\":[{\"id\":\"N0\",\"date\":\"2023-06-10\",\"fact\":\"The user is close to 1300 followers on Instagram.\"}]," ++
+            "\"earlier\":[{\"id\":\"E0\",\"date\":\"2023-05-25\",\"fact\":\"The user has 1250 followers on Instagram.\"}]}",
+        model.last_comparison.?,
+    );
+    try std.testing.expectEqual(@as(usize, 1), try countLiveUpdates(store, sessions.may_message));
+
+    // The facts appear only when asked for. Each is listed under the message
+    // it was drawn from, the May one as superseded on the day June replaced
+    // it. The raw text of both messages is untouched.
+    const plain = try followerPrompt(&runtime, "");
+    defer allocator.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "<facts>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "I've got 1250 followers on Instagram now") != null);
+    const with_facts = try followerPrompt(&runtime, ",\"facts\":true");
+    defer allocator.free(with_facts);
+    const section = try std.fmt.allocPrint(
+        allocator,
+        "<memory>\n<facts>\n" ++ facts_legend ++ "\n[{s}] " ++ superseded_fact ++ "\n[{s}] " ++ current_fact ++ "\n</facts>\n<sessions>",
+        .{ sessions.may_message, sessions.june_message },
+    );
+    defer allocator.free(section);
+    try std.testing.expect(std.mem.indexOf(u8, with_facts, section) != null);
+    try std.testing.expect(std.mem.indexOf(u8, with_facts, "I've got 1250 followers on Instagram now") != null);
+    try std.testing.expect(std.mem.indexOf(u8, with_facts, "I think I'm close to 1300 followers") != null);
+    try std.testing.expect(std.mem.indexOf(u8, with_facts, assertion_qid_prefix) == null);
+
+    // Asked as of a day before June, nothing has replaced the May fact yet,
+    // so there is no fact with a history to list.
+    const earlier = try followerPromptAt(&runtime, ",\"facts\":true", "2023-06-01T09:00:00Z");
+    defer allocator.free(earlier);
+    try std.testing.expect(std.mem.indexOf(u8, earlier, "<facts>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, earlier, "I've got 1250 followers on Instagram now") != null);
+    try std.testing.expect(std.mem.indexOf(u8, earlier, "1300") == null);
+
+    // The update is not a search result of its own.
+    const search = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"s\",\"method\":\"memory.search\",\"params\":{\"query\":\"close to 1300 followers Instagram\",\"mode\":\"fts\",\"scope\":{\"projectId\":\"repo:facts\"},\"limit\":20}}");
+    defer allocator.free(search);
+    try std.testing.expect(std.mem.indexOf(u8, search, update_qid_prefix) == null);
+
+    // Forgetting the newer message removes the update and its claim, so
+    // the May fact has no history left and the section goes with it.
+    const forget_request = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"f1\",\"method\":\"memory.forget\",\"params\":{{\"mode\":\"hard_delete\",\"selector\":{{\"qids\":[\"{s}\"]}},\"dryRun\":false,\"reason\":\"test\"}}}}",
+        .{sessions.june_message},
+    );
+    defer allocator.free(forget_request);
+    const forgotten = try runtime.dispatch(allocator, forget_request);
+    defer allocator.free(forgotten);
+    try std.testing.expectEqual(@as(usize, 0), try countLiveUpdates(store, sessions.may_message));
+    const after = try followerPrompt(&runtime, ",\"facts\":true");
+    defer allocator.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "<facts>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, after, "I've got 1250 followers on Instagram now") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, "1300") == null);
+}
+
+test "consolidation stores nothing the verify call rejects and forgets with the replaced message" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+
+    // The second look says the earlier value still holds: nothing is stored.
+    var doubting = UpdateTestModel{ .replaced = false };
+    defer doubting.deinit();
+    var runtime = Runtime.initWithOptions(store, harness.health(), .{ .extract_provider = doubting.endpoint(), .consolidate_updates = true });
+    defer runtime.deinit();
+    const sessions = try rememberFollowerSessions(&runtime);
+    defer sessions.deinit();
+    _ = try runtime.runExtractJobs(allocator, "test", 10, 1);
+    const rejected = try runtime.runConsolidateJobs(allocator, "test", 10, 1);
+    try std.testing.expectEqual(@as(usize, 2), rejected.succeededCount);
+    try std.testing.expectEqual(@as(usize, 0), rejected.updatesWritten);
+    try std.testing.expectEqual(@as(usize, 1), rejected.counts.proposed);
+    try std.testing.expectEqual(@as(usize, 1), rejected.counts.unverified);
+    try std.testing.expectEqual(@as(usize, 0), try countLiveUpdates(store, sessions.may_message));
+    const unmarked = try followerPrompt(&runtime, ",\"facts\":true");
+    defer allocator.free(unmarked);
+    try std.testing.expect(std.mem.indexOf(u8, unmarked, "<facts>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, unmarked, "I've got 1250 followers on Instagram now") != null);
+
+    // A value the earlier fact does not state never reaches the verify call.
+    var inventing_harness = try RuntimeTestHarness.init(allocator);
+    defer inventing_harness.deinit();
+    var inventing = UpdateTestModel{ .old_value = "1200" };
+    defer inventing.deinit();
+    var invented = Runtime.initWithOptions(inventing_harness.adapter(), inventing_harness.health(), .{ .extract_provider = inventing.endpoint(), .consolidate_updates = true });
+    defer invented.deinit();
+    const invented_sessions = try rememberFollowerSessions(&invented);
+    defer invented_sessions.deinit();
+    _ = try invented.runExtractJobs(allocator, "test", 10, 1);
+    const mismatched = try invented.runConsolidateJobs(allocator, "test", 10, 1);
+    try std.testing.expectEqual(@as(usize, 0), mismatched.updatesWritten);
+    try std.testing.expectEqual(@as(usize, 1), mismatched.counts.valueMismatch);
+    try std.testing.expectEqual(@as(usize, 0), inventing.verify_calls.load(.monotonic));
+
+    // Without the switch, extraction queues no consolidation at all.
+    var plain_harness = try RuntimeTestHarness.init(allocator);
+    defer plain_harness.deinit();
+    var honest = UpdateTestModel{};
+    defer honest.deinit();
+    var plain = Runtime.initWithOptions(plain_harness.adapter(), plain_harness.health(), .{ .extract_provider = honest.endpoint() });
+    defer plain.deinit();
+    const plain_sessions = try rememberFollowerSessions(&plain);
+    defer plain_sessions.deinit();
+    _ = try plain.runExtractJobs(allocator, "test", 10, 1);
+    try std.testing.expectEqual(@as(usize, 0), try countJobs(plain_harness.adapter(), "pending"));
+    const none = try plain.runConsolidateJobs(allocator, "test", 10, 1);
+    try std.testing.expectEqual(@as(usize, 0), none.leasedCount);
+
+    // Turned on, the same store consolidates what comes next against the
+    // claims it already holds, and forgetting the replaced message takes
+    // the update along.
+    plain.options.consolidate_updates = true;
+    const later = try plain.dispatch(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r3\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"projectId\":\"repo:facts\"},\"sessionId\":\"s-july\",\"messages\":[{\"role\":\"user\",\"content\":\"Quick update: close to 1300 followers on Instagram became real this week.\",\"createdAt\":\"2023-07-02T09:00:00Z\"}]}}",
+    );
+    defer allocator.free(later);
+    _ = try plain.runExtractJobs(allocator, "test", 10, 1);
+    const written = try plain.runConsolidateJobs(allocator, "test", 10, 1);
+    try std.testing.expectEqual(@as(usize, 1), written.updatesWritten);
+    try std.testing.expectEqual(@as(usize, 1), try countLiveUpdates(plain_harness.adapter(), plain_sessions.may_message));
+    const forget_request = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"f1\",\"method\":\"memory.forget\",\"params\":{{\"mode\":\"hard_delete\",\"selector\":{{\"qids\":[\"{s}\"]}},\"dryRun\":false,\"reason\":\"test\"}}}}",
+        .{plain_sessions.may_message},
+    );
+    defer allocator.free(forget_request);
+    const forgotten = try plain.dispatch(allocator, forget_request);
+    defer allocator.free(forgotten);
+    try std.testing.expectEqual(@as(usize, 0), try countLiveUpdates(plain_harness.adapter(), plain_sessions.may_message));
+    const dump = try plain.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"s\",\"method\":\"memory.search\",\"params\":{\"query\":\"1250 followers\",\"mode\":\"fts\",\"scope\":{\"projectId\":\"repo:facts\"},\"limit\":20}}");
+    defer allocator.free(dump);
+    try std.testing.expect(std.mem.indexOf(u8, dump, "1250") == null);
+}
+
+test "background work consolidates once extraction has caught up" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+    var model = UpdateTestModel{};
+    defer model.deinit();
+    var runtime = Runtime.initWithOptions(store, harness.health(), .{
+        .io = std.testing.io,
+        .extract_provider = model.endpoint(),
+        .background_workers = true,
+        .consolidate_updates = true,
+    });
+    defer runtime.deinit();
+    const health = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
+    defer allocator.free(health);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"consolidator\":\"running\"") != null);
+    const sessions = try rememberFollowerSessions(&runtime);
+    defer sessions.deinit();
+
+    try std.testing.expect(try runtime.startBackgroundWork(allocator));
+    const extracted = (try runtime.finishBackgroundWork(allocator)).?.extract;
+    try std.testing.expectEqual(@as(usize, 2), extracted.assertionsWritten);
+    try std.testing.expectEqual(@as(usize, 0), try countLiveUpdates(store, sessions.may_message));
+
+    try std.testing.expect(try runtime.startBackgroundWork(allocator));
+    const consolidated = (try runtime.finishBackgroundWork(allocator)).?.consolidate;
+    try std.testing.expectEqual(@as(usize, 2), consolidated.leasedCount);
+    try std.testing.expectEqual(@as(usize, 2), consolidated.succeededCount);
+    try std.testing.expectEqual(@as(usize, 1), consolidated.updatesWritten);
+    try std.testing.expectEqual(@as(usize, 1), try countLiveUpdates(store, sessions.may_message));
+
+    try std.testing.expect(!try runtime.startBackgroundWork(allocator));
+    try std.testing.expectEqual(@as(usize, 0), try countJobs(store, "pending"));
+    const with_facts = try followerPrompt(&runtime, ",\"facts\":true");
+    defer allocator.free(with_facts);
+    try std.testing.expect(std.mem.indexOf(u8, with_facts, superseded_fact) != null);
+    try std.testing.expect(std.mem.indexOf(u8, with_facts, current_fact) != null);
 }
 

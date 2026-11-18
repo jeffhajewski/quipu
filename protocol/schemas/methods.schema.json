@@ -157,7 +157,8 @@
         },
         "rerank": { "$ref": "#/$defs/rerankTrace" },
         "factKeys": { "$ref": "#/$defs/factKeysTrace" },
-        "queryExpansion": { "$ref": "#/$defs/queryExpansionTrace" }
+        "queryExpansion": { "$ref": "#/$defs/queryExpansionTrace" },
+        "facts": { "$ref": "#/$defs/factsTrace" }
       }
     },
     "queryExpansionMode": {
@@ -200,6 +201,39 @@
           }
         },
         "error": { "type": ["string", "null"] }
+      }
+    },
+    "factsTrace": {
+      "type": "object",
+      "description": "Present only when options.facts was true.",
+      "required": ["candidates", "kept", "superseded", "linked", "tokens"],
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Claims among the search hits for the query."
+        },
+        "kept": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Facts in the context."
+        },
+        "superseded": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Of kept, those a later claim replaced as of time.validAt."
+        },
+        "linked": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Of kept, those added because a matching fact replaces them or is replaced by them."
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Estimated tokens of the facts section, taken out of the raw evidence budget."
+        }
       }
     },
     "factKeysTrace": {
@@ -387,6 +421,10 @@
               "type": "boolean",
               "description": "memory.retrieve and memory.answer accept options.factKeys."
             },
+            "facts": {
+              "type": "boolean",
+              "description": "memory.retrieve and memory.answer accept options.facts."
+            },
             "queryExpansion": {
               "type": "object",
               "required": ["modes", "llmConfigured", "model"],
@@ -529,6 +567,10 @@
               "type": "boolean",
               "description": "Let extracted claims (Assertion nodes) act as extra search keys: an assertion hit is returned as its source chunk or message, never as itself, and raw lines show the claims' event dates as [event YYYY-MM-DD]. Default false: assertions take no part in retrieval."
             },
+            "facts": {
+              "type": "boolean",
+              "description": "Put the matching claims that consolidation found replaced, each with the claim that replaced it, ahead of the raw evidence, as a facts section of dated lines: (superseded, YYYY-MM-DD to YYYY-MM-DD) and (current, from YYYY-MM-DD). A claim with no replacement is not listed. The section uses at most 30% of the token budget, taken from the raw evidence; each fact is listed under the qid of the message it was drawn from. Default false: claims and updates take no part in the context."
+            },
             "queryExpansion": { "$ref": "#/$defs/queryExpansionMode" },
             "format": { "type": "string", "enum": ["prompt", "json"] }
           }
@@ -646,6 +688,10 @@
             "factKeys": {
               "type": "boolean",
               "description": "Let extracted claims (Assertion nodes) act as extra search keys: an assertion hit is returned as its source chunk or message, never as itself, and raw lines show the claims' event dates as [event YYYY-MM-DD]. Default false: assertions take no part in retrieval."
+            },
+            "facts": {
+              "type": "boolean",
+              "description": "Put the matching claims that consolidation found replaced, each with the claim that replaced it, ahead of the raw evidence, as a facts section of dated lines: (superseded, YYYY-MM-DD to YYYY-MM-DD) and (current, from YYYY-MM-DD). A claim with no replacement is not listed. The section uses at most 30% of the token budget, taken from the raw evidence; each fact is listed under the qid of the message it was drawn from. Default false: claims and updates take no part in the context."
             },
             "queryExpansion": { "$ref": "#/$defs/queryExpansionMode" },
             "format": { "type": "string", "enum": ["prompt", "json"] }

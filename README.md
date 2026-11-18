@@ -356,7 +356,11 @@ Still in progress:
 - Release artifacts for Quipu itself.
 - Full migration runner and compatibility checks.
 - Learned scoring beyond deterministic RRF/graph boosts and the optional reranker.
-- LLM-backed extraction and consolidation workers.
+- LLM-backed consolidation beyond knowledge updates (summaries, reflections,
+  procedures). Extraction and the opt-in update consolidation
+  (`--consolidate on`, read back with `options.facts`) run as a background
+  worker when the daemon is started with `--background on`; entity resolution
+  still runs only on request.
 - Judge scoring for LoCoMo publication.
 - MemoryAgentBench adapter.
 - Richer host integrations.

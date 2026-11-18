@@ -1,0 +1,279 @@
+{
+  "name": "memory.retrieve with facts",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_facts",
+    "method": "memory.retrieve",
+    "params": {
+      "query": "How many followers do I have on Instagram now?",
+      "scope": {
+        "userId": "user-local"
+      },
+      "needs": [
+        "current_facts",
+        "raw"
+      ],
+      "time": {
+        "validAt": "2023-07-01T09:00:00Z"
+      },
+      "options": {
+        "includeDebug": true,
+        "logRetrieval": false,
+        "facts": true
+      }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_facts",
+    "result": {
+      "retrievalId": "q_retr_11",
+      "prompt": "Current date: 2023-07-01 (Saturday)\n<memory>\n<facts>\n(What people said about themselves, with the date said. A superseded fact was replaced by a later one; the current fact holds now.)\n[q_msg_4] (superseded, 2023-05-25 to 2023-06-10) The user has 1250 followers on Instagram.\n[q_msg_9] (current, from 2023-06-10) The user is close to 1300 followers on Instagram.\n</facts>\n<sessions>\n## session s-may 2023-05-25 (Thu)\n[q_msg_4] user: By the way, I've got 1250 followers on Instagram now, so tips are welcome.\n## session s-june 2023-06-10 (Sat)\n[q_msg_9] user: I think I'm close to 1300 followers on Instagram at this point.\n</sessions>\n</memory>",
+      "context": {
+        "core": [],
+        "currentFacts": [
+          {
+            "qid": "q_asrt_5209567a8fba617e",
+            "type": "fact",
+            "text": "The user has 1250 followers on Instagram.",
+            "score": 0.2406882494688034,
+            "confidence": 1,
+            "state": "superseded",
+            "validFrom": "2023-05-25T10:00:00Z",
+            "validTo": "2023-06-10T09:00:00Z",
+            "evidence": [
+              {
+                "qid": "q_msg_4",
+                "quote": "I've got 1250 followers on Instagram now",
+                "timestamp": null
+              }
+            ]
+          },
+          {
+            "qid": "q_asrt_2359c342c6f0fa4d",
+            "type": "fact",
+            "text": "The user is close to 1300 followers on Instagram.",
+            "score": 0.2406882494688034,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2023-06-10T09:00:00Z",
+            "validTo": null,
+            "evidence": [
+              {
+                "qid": "q_msg_9",
+                "quote": "close to 1300 followers on Instagram",
+                "timestamp": null
+              }
+            ]
+          }
+        ],
+        "preferences": [],
+        "procedural": [],
+        "episodes": [
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "text": "By the way, I've got 1250 followers on Instagram now, so tips are welcome.",
+            "score": 1.2194805145263672,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2023-05-25T10:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_9",
+            "type": "message",
+            "text": "I think I'm close to 1300 followers on Instagram at this point.",
+            "score": 0.20703861117362976,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2023-06-10T09:00:00Z",
+            "validTo": null,
+            "evidence": []
+          }
+        ],
+        "warnings": [
+          "historical_memory"
+        ]
+      },
+      "items": [
+        {
+          "qid": "q_msg_4",
+          "type": "message",
+          "text": "By the way, I've got 1250 followers on Instagram now, so tips are welcome.",
+          "score": 1.2194805145263672,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2023-05-25T10:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_9",
+          "type": "message",
+          "text": "I think I'm close to 1300 followers on Instagram at this point.",
+          "score": 0.20703861117362976,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2023-06-10T09:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_asrt_5209567a8fba617e",
+          "type": "fact",
+          "text": "The user has 1250 followers on Instagram.",
+          "score": 0.2406882494688034,
+          "confidence": 1,
+          "state": "superseded",
+          "validFrom": "2023-05-25T10:00:00Z",
+          "validTo": "2023-06-10T09:00:00Z",
+          "evidence": [
+            {
+              "qid": "q_msg_4",
+              "quote": "I've got 1250 followers on Instagram now",
+              "timestamp": null
+            }
+          ]
+        },
+        {
+          "qid": "q_asrt_2359c342c6f0fa4d",
+          "type": "fact",
+          "text": "The user is close to 1300 followers on Instagram.",
+          "score": 0.2406882494688034,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2023-06-10T09:00:00Z",
+          "validTo": null,
+          "evidence": [
+            {
+              "qid": "q_msg_9",
+              "quote": "close to 1300 followers on Instagram",
+              "timestamp": null
+            }
+          ]
+        }
+      ],
+      "tokenEstimate": 154,
+      "confidence": 0.7200000286102295,
+      "warnings": [
+        "historical_memory"
+      ],
+      "trace": {
+        "query": "How many followers do I have on Instagram now?",
+        "requestedNeedsCount": 2,
+        "budgetTokens": 4096,
+        "candidateSources": {
+          "fts": 2,
+          "vector": 0,
+          "hybrid": 0,
+          "graph": 0,
+          "core": 0
+        },
+        "candidateCount": 2,
+        "keptCount": 4,
+        "droppedForNeeds": 0,
+        "droppedForBudget": 0,
+        "tokenEstimate": 154,
+        "validAt": "2023-07-01T09:00:00Z",
+        "scoreBreakdowns": [
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "score": 1.2194805145263672,
+            "lexical": 0.5494441390037537,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_9",
+            "type": "message",
+            "score": 0.20703861117362976,
+            "lexical": 0.17152608931064606,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_asrt_5209567a8fba617e",
+            "type": "fact",
+            "score": 0.2406882494688034,
+            "lexical": 0.19399575889110565,
+            "temporal": 0.5,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_asrt_2359c342c6f0fa4d",
+            "type": "fact",
+            "score": 0.2406882494688034,
+            "lexical": 0.19399575889110565,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          }
+        ],
+        "scoringDetails": [
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "finalScore": 1.2194805145263672,
+            "lexical": 0.5494441390037537,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_msg_9",
+            "type": "message",
+            "finalScore": 0.20703861117362976,
+            "lexical": 0.17152608931064606,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_asrt_5209567a8fba617e",
+            "type": "fact",
+            "finalScore": 0.2406882494688034,
+            "lexical": 0.19399575889110565,
+            "temporal": 0.5,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_asrt_2359c342c6f0fa4d",
+            "type": "fact",
+            "finalScore": 0.2406882494688034,
+            "lexical": 0.19399575889110565,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          }
+        ],
+        "droppedItemReasons": [],
+        "facts": {
+          "candidates": 2,
+          "kept": 2,
+          "superseded": 1,
+          "linked": 1,
+          "tokens": 102
+        }
+      }
+    }
+  }
+}

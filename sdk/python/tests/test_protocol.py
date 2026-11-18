@@ -189,6 +189,32 @@ class ProtocolFixtureTests(unittest.TestCase):
         default = json.loads((FIXTURE_DIR / "memory.retrieve.success.json").read_text())
         self.assertNotIn("factKeys", default["response"]["result"]["trace"])
 
+    def test_facts_option_and_fixture(self):
+        defs = json.loads((SCHEMA_DIR / "methods.schema.json").read_text())["$defs"]
+        for method in ("memoryRetrieveParams", "memoryAnswerParams"):
+            self.assertEqual(defs[method]["properties"]["options"]["properties"]["facts"]["type"], "boolean")
+        capabilities = defs["systemHealthResult"]["properties"]["capabilities"]["properties"]
+        self.assertEqual(capabilities["facts"]["type"], "boolean")
+
+        for method in ("memory.retrieve", "memory.answer"):
+            with self.subTest(method=method):
+                validate_rpc_params(method, {"query": "q", "options": {"facts": True}})
+                with self.assertRaises(QuipuProtocolError):
+                    validate_rpc_params(method, {"query": "q", "options": {"facts": "yes"}})
+
+        fixture = json.loads((FIXTURE_DIR / "memory.retrieve.facts.json").read_text())
+        self.assertTrue(fixture["request"]["params"]["options"]["facts"])
+        result = fixture["response"]["result"]
+        self.assertIn("<facts>", result["prompt"])
+        self.assertIn("(superseded, 2023-05-25 to 2023-06-10) The user has 1250 followers", result["prompt"])
+        self.assertIn("(current, from 2023-06-10) The user is close to 1300 followers", result["prompt"])
+        facts = result["context"]["currentFacts"]
+        self.assertEqual([(fact["type"], fact["state"]) for fact in facts], [("fact", "superseded"), ("fact", "current")])
+        self.assertEqual(facts[0]["validTo"], facts[1]["validFrom"])
+        self.assertEqual(result["trace"]["facts"]["superseded"], 1)
+        default = json.loads((FIXTURE_DIR / "memory.retrieve.success.json").read_text())
+        self.assertNotIn("facts", default["response"]["result"]["trace"])
+
     def test_query_expansion_is_part_of_the_retrieve_and_answer_contract(self):
         defs = json.loads((SCHEMA_DIR / "methods.schema.json").read_text())["$defs"]
         self.assertEqual(defs["queryExpansionMode"]["enum"], ["off", "rules", "llm"])

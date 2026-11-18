@@ -585,8 +585,10 @@ vectors. The closure finds them through their `EVIDENCED_BY` edges, so a store
 larger than the node-scan cap cannot hide them.
 
 E1 found that assertions must never replace raw evidence: assertion-only
-reading lost 21 to 31 points. Assertions therefore reach the reader only as
-[fact keys](#fact-keys) that resolve to raw text.
+reading lost 21 to 31 points. Assertions therefore reach the reader in two
+ways, both next to the raw text and never instead of it: as
+[fact keys](#fact-keys) that resolve to raw text, and as the dated
+[facts section](#the-facts-section) that `options.facts` puts ahead of it.
 
 ### Background worker
 
@@ -631,6 +633,122 @@ Known limits: the batch's claim embeddings are computed in the write step, so
 an HTTP embedding provider delays the next request by one embedding call per
 batch; entity resolution still runs only on request.
 
+### Consolidation: knowledge updates
+
+Extraction leaves one claim per statement. It does not say that "close to 1300
+followers" in June replaces "1250 followers" in May, so a reader given both
+lines has to work out which is current, and a small reader often picks the
+old one. Consolidation records that link, claim to claim.
+
+It is off by default. `--consolidate on` (or `QUIPU_CONSOLIDATE=on`) makes each
+finished `extract` job publish `quipu.consolidate.requested` and queue a
+`consolidate` job for the claims it wrote. The jobs run after extraction has
+caught up: in the background worker, or on request with
+`quipu jobs run consolidate` and the operational RPC `memory.consolidate.run`.
+They use the extract provider.
+
+One job handles one conversation:
+
+1. Load its live claims (at most 32) and embed them in one batched request.
+2. For each claim, run a hybrid search (full-text only on a store without
+   vectors) with the claim text and keep the best three *claims* the same
+   author stated in an earlier conversation: the same role, a different
+   session, an earlier timestamp. A claim with no such candidate is left out,
+   and at most 30 earlier claims go into one request. A job with nothing to
+   compare succeeds without a model call.
+3. **Propose.** One chat turn in JSON mode. The user turn is
+   `{"new": [{"id": "N0", "date", "fact"}], "earlier": [{"id": "E0", "date",
+   "fact"}]}` with dates cut to the day; qids, scope and labels never enter
+   it. The system prompt (`quipu.updates.v2`) asks which earlier facts a new
+   fact makes out of date, as `{"updates": [{"new", "old", "oldValue",
+   "newValue"}]}`. A malformed reply gets one retry.
+4. Drop proposals that cannot be right before spending a call on them: ids out
+   of range (`malformed`), `oldValue` not in the earlier fact or `newValue` not
+   in the new one (`valueMismatch`), a pair that is not earlier-then-later
+   (`notEarlier`), and repeats (`duplicates`).
+5. **Verify.** One chat turn per remaining pair, given only the two facts. The
+   model names what each fact is about, says whether that is one and the same
+   thing, gives each fact's value, and only then says whether the earlier
+   value was replaced. Asking for the thing and the values first is what makes
+   a small model's verdict checkable.
+6. Accept a pair only when the verdict says same thing and replaced, both
+   values are at most six words, each is written in its own fact, and the new
+   value is not also in the old fact. Two values with digits in them (counts,
+   amounts, times, dates) are then enough. Without digits, the words around
+   the two values must also agree (Jaccard at least 0.6): "keeps old sneakers
+   under the bed" against "keeps old sneakers in a shoe rack" passes, "wants
+   to organize the coffee table" against "is considering buying a new coffee
+   table" does not. Everything else is counted as `unverified`.
+7. Store each accepted pair as an `Update` node holding both claim texts, both
+   values and both dates. It is `DERIVED_FROM` both claims and `EVIDENCED_BY`
+   both messages. It is not searchable and never appears as an item.
+
+Nothing is rewritten. Both messages and both claims keep their text and stay
+retrievable; the `Update` only says that one replaced the other, and when.
+Forgetting either message, or either claim, tombstones the `Update`, and the
+earlier claim is current again. An unanswered verify call fails the job, so it
+is retried rather than half-applied.
+
+On the 70-question LongMemEval-S slice the propose call suggested 713 pairs in
+the prototype and the checks kept 31; see
+[sota-sprint-results.md](sota-sprint-results.md) for what that does to
+accuracy.
+
+Known limits: only earlier statements are checked, so a conversation ingested
+out of order is not compared with later ones already stored; the rule in
+step 6 mostly admits numeric and time changes, so a changed name or place with
+a reworded sentence is missed; and a job's embedding and search run on the
+request thread.
+
+### The facts section
+
+`options.facts` (on `memory.retrieve` and `memory.answer`, default `false`)
+puts the matching claims that have been replaced, each with the claim that
+replaced it, ahead of the raw evidence:
+
+```text
+<memory>
+<facts>
+(What people said about themselves, with the date said. A superseded fact was replaced by a later one; the current fact holds now.)
+[q_msg_4] (superseded, 2023-05-25 to 2023-06-10) The user has 1250 followers on Instagram.
+[q_msg_9] (current, from 2023-06-10) The user is close to 1300 followers on Instagram.
+</facts>
+<sessions>
+## session s-may 2023-05-25 (Thu)
+[q_msg_4] user: By the way, I've got 1250 followers on Instagram now, so tips are welcome.
+## session s-june 2023-06-10 (Sat)
+[q_msg_9] user: I think I'm close to 1300 followers on Instagram at this point.
+</sessions>
+</memory>
+```
+
+- The query is searched in the request's mode with a limit of 200, and the
+  claims among the hits are taken best first. Claims drawn from assistant
+  replies (extraction up to v3) are skipped.
+- Only a claim with a live `Update` on either side is listed: one that was
+  replaced, or one that replaced another. A claim with no replacement is left
+  to the raw evidence, which already carries it; labeling it `current` would
+  claim a check that nothing has made. Listing every matching claim was tried
+  and did not hold up on held-out questions (see
+  [sota-sprint-results.md](sota-sprint-results.md)).
+- A claim that a live `Update` replaced, as of `time.validAt`, is listed as
+  `superseded` with the day it was stated and the day it was replaced. Its
+  item has `state: "superseded"` and `validTo` set. An update dated after
+  `time.validAt` has not happened yet for that question.
+- Both sides of a replacement come along, whichever one matched the query, so
+  the reader never sees an old value without the current one.
+- The section may use at most 30% of the token budget. What it uses is taken
+  from the raw evidence budget, so the whole context still fits the budget.
+- Each fact is listed under the qid of the message it was drawn from, which is
+  what an answer cites. The item itself is the claim (`type: "fact"`, in
+  `context.currentFacts`), with that message as its evidence.
+- With `needs` given, facts appear only when `current_facts` is among them.
+  `trace.facts` reports `candidates`, `kept`, `superseded`, `linked` and
+  `tokens`.
+
+With the option off the prompt is byte-for-byte what it was. With it on, a
+question that touches no replaced fact gets no facts section, so without
+consolidation the option adds nothing.
 
 ## Forgetting V0
 

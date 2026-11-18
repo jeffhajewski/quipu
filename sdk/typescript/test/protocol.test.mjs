@@ -131,6 +131,27 @@ test("factKeys is a retrieve and answer option with its own trace", () => {
   assert.equal(fixture.response.result.trace.factKeys.assertionHits, 1);
 });
 
+test("facts is a retrieve and answer option that lists dated current and superseded facts", () => {
+  const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
+  for (const def of ["memoryRetrieveParams", "memoryAnswerParams"]) {
+    assert.equal(schema.$defs[def].properties.options.properties.facts.type, "boolean");
+  }
+  assert.equal(schema.$defs.systemHealthResult.properties.capabilities.properties.facts.type, "boolean");
+
+  for (const method of ["memory.retrieve", "memory.answer"]) {
+    validateRpcParams(method, { query: "q", options: { facts: true } });
+    assert.throws(() => validateRpcParams(method, { query: "q", options: { facts: "yes" } }), QuipuProtocolError);
+  }
+
+  const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.retrieve.facts.json"), "utf8"));
+  assert.equal(fixture.request.params.options.facts, true);
+  const result = fixture.response.result;
+  assert.ok(result.prompt.includes("(superseded, 2023-05-25 to 2023-06-10) The user has 1250 followers"));
+  assert.ok(result.prompt.includes("(current, from 2023-06-10) The user is close to 1300 followers"));
+  assert.deepEqual(result.context.currentFacts.map((fact) => [fact.type, fact.state]), [["fact", "superseded"], ["fact", "current"]]);
+  assert.equal(result.context.currentFacts[0].validTo, result.context.currentFacts[1].validFrom);
+  assert.equal(result.trace.facts.superseded, 1);
+});
 test("method schema accepts slot metadata, support validity, and answer prompt", () => {
   const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
   assert.ok(schema.$defs.memoryItem.properties.slotKey);

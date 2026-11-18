@@ -100,7 +100,7 @@ pub fn parseReply(allocator: std.mem.Allocator, reply: []const u8) !std.json.Par
     return parsed;
 }
 
-fn stripCodeFence(reply: []const u8) []const u8 {
+pub fn stripCodeFence(reply: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, reply, " \t\r\n");
     if (!std.mem.startsWith(u8, trimmed, "```")) return trimmed;
     const body_start = (std.mem.indexOfScalar(u8, trimmed, '\n') orelse return trimmed) + 1;

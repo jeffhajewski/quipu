@@ -90,6 +90,8 @@ export type RetrieveRequest = {
     temporalHints?: boolean;
     /** Let extracted claims act as search keys that return their source evidence. */
     factKeys?: boolean;
+    /** Put matching extracted claims ahead of the raw evidence as dated current/superseded facts. */
+    facts?: boolean;
     format?: "prompt" | "json";
     /** Set false to bypass a configured reranker for this request. */
     rerank?: boolean;
@@ -343,6 +345,7 @@ function validateRetrieve(params: Record<string, unknown>): void {
         "rerankCandidates",
         "temporalHints",
         "factKeys",
+        "facts",
         "queryExpansion",
       ]),
       "options",
@@ -356,6 +359,7 @@ function validateRetrieve(params: Record<string, unknown>): void {
       "rerank",
       "temporalHints",
       "factKeys",
+      "facts",
     ]) {
       optionalBoolean(params.options, key, "options");
     }
@@ -409,6 +413,7 @@ function validateAnswer(params: Record<string, unknown>): void {
         "readerReasoning",
         "temporalHints",
         "factKeys",
+        "facts",
         "queryExpansion",
       ]),
       "options",
@@ -423,6 +428,7 @@ function validateAnswer(params: Record<string, unknown>): void {
       "readerReasoning",
       "temporalHints",
       "factKeys",
+      "facts",
     ]) {
       optionalBoolean(params.options, key, "options");
     }

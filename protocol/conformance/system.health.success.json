@@ -42,6 +42,7 @@
           "promptVersion": "quipu.extract.e1-eventdate.v3"
         },
         "factKeys": true,
+        "facts": true,
         "queryExpansion": {
           "modes": [
             "off",

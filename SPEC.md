@@ -2049,6 +2049,38 @@ Rules:
 - Summary generation is allowed to be LLM-based, but writes are deterministic and evidence-linked.
 - A summary cannot be the only evidence for a fact unless explicitly marked as inferred.
 
+#### 10.7.1 Implemented first: claim-level knowledge updates
+
+The first consolidation output that exists is narrower than the list above,
+and it applies §10.5 to LLM-extracted claims rather than to slot-keyed `Fact`
+nodes. `docs/algorithms.md` is the detailed reference; the contract is:
+
+- Extraction (§10.3) writes one `:Assertion` node per grounded claim that a
+  person states about themselves, linked `EVIDENCED_BY` to its message. The
+  assistant's replies are not sent to the extract model.
+- A `consolidate` job, queued per conversation after its `extract` job
+  succeeds and only when the daemon runs with `--consolidate on`, compares the
+  new claims with earlier claims by the same author. A replacement is written
+  as an `:Update` node, `DERIVED_FROM` both claims and `EVIDENCED_BY` both
+  messages. It is accepted only after a second model call and a deterministic
+  check of both values against the stored claim texts (invariant: validate
+  LLM output).
+- Supersession is recorded, not applied: neither claim and neither message is
+  rewritten (invariants 1 and 4). The earlier claim is `superseded`, with
+  `validTo` set to the time of the replacing claim, only while a live `Update`
+  says so and only as of a `time.validAt` on or after it (invariant 3).
+  Forgetting either message or either claim tombstones the `Update`
+  (invariant 5), and the earlier claim is current again.
+- Unlike the state rule in §10.5, a superseded claim is not hidden from
+  current queries. `options.facts` on `memory.retrieve` and `memory.answer`
+  lists it, labeled with its validity interval, next to the claim that
+  replaced it, because a reader shown only the raw messages often answers with
+  the old value. A claim with no replacement on either side is not listed: the
+  raw evidence carries it, and nothing has checked that it still holds.
+  Without `options.facts`, claims and updates take no part in the context.
+- Both jobs are asynchronous. `memory.remember` only queues them; they run in
+  the background worker (`--background on`) or on request.
+
 ### 10.8 Retrieval planner
 
 Retrieval is the core product behavior.

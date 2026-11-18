@@ -50,6 +50,8 @@ const RuntimeConfig = struct {
     extract_model: ?[]const u8 = null,
     /// `--background on|off`: whether `serve` drains long-term jobs itself.
     background: ?[]const u8 = null,
+    /// `--consolidate on|off`: whether extraction queues consolidation jobs.
+    consolidate: ?[]const u8 = null,
     reranker_url: ?[]const u8 = null,
     reranker_model: ?[]const u8 = null,
     reranker_api_key: ?[]const u8 = null,
@@ -206,6 +208,7 @@ pub fn main(init: std.process.Init) !void {
         const lattice_options = try latticeOptionsFromConfig(init.io, init.environ_map, config, file_config);
         var runtime_options = runtimeOptionsFromConfig(init.io, allocator, init.environ_map, config, file_config);
         runtime_options.background_workers = backgroundWorkersFromConfig(args, config, init.environ_map);
+        runtime_options.consolidate_updates = consolidateFromConfig(config, init.environ_map);
         var adapter_state = try lattice_storage.LatticeAdapter.open(allocator, config.db_path.?, lattice_options);
         defer adapter_state.deinit();
         try schema.ensure(allocator, adapter_state.adapter());
@@ -222,6 +225,7 @@ pub fn main(init: std.process.Init) !void {
     defer adapter_state.deinit();
     var runtime_options = runtimeOptionsFromConfig(init.io, allocator, init.environ_map, config, file_config);
     runtime_options.background_workers = backgroundWorkersFromConfig(args, config, init.environ_map);
+    runtime_options.consolidate_updates = consolidateFromConfig(config, init.environ_map);
     var runtime = runtime_mod.Runtime.initWithOptions(adapter_state.adapter(), protocol.Health.default(), runtime_options);
     defer runtime.deinit();
     try runCommand(init.io, allocator, args, config.command_index, &runtime, adapter_state.adapter());
@@ -449,6 +453,15 @@ fn parseRuntimeConfig(args: []const [:0]const u8) RuntimeConfig {
         if (std.mem.eql(u8, arg, "--extract-url")) {
             if (config.command_index + 1 < args.len) {
                 config.extract_url = args[config.command_index + 1];
+                config.command_index += 2;
+                continue;
+            }
+            config.command_index += 1;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--consolidate")) {
+            if (config.command_index + 1 < args.len) {
+                config.consolidate = args[config.command_index + 1];
                 config.command_index += 2;
                 continue;
             }
@@ -1026,6 +1039,13 @@ fn backgroundWorkersFromConfig(args: []const [:0]const u8, config: RuntimeConfig
     return switchIsOn(config.background orelse environ_map.get("QUIPU_BACKGROUND"));
 }
 
+/// `--consolidate on` or `QUIPU_CONSOLIDATE=on`: extraction queues a
+/// `consolidate` job for each conversation's claims. Off by default; the
+/// jobs cost one more model call per conversation.
+fn consolidateFromConfig(config: RuntimeConfig, environ_map: *std.process.Environ.Map) bool {
+    return switchIsOn(config.consolidate orelse environ_map.get("QUIPU_CONSOLIDATE"));
+}
+
 fn switchIsOn(setting: ?[]const u8) bool {
     const value = setting orelse return false;
     return std.ascii.eqlIgnoreCase(value, "on") or
@@ -1236,6 +1256,33 @@ fn runCommand(
             };
             const status = try jobs.failJob(allocator, store, parsed.qid, parsed.error_json, wallClockMs(io));
             const response = try stringifyAlloc(allocator, .{ .status = status, .jobQid = parsed.qid });
+            defer allocator.free(response);
+            try stdout.print("{s}\n", .{response});
+            return;
+        }
+        if (std.mem.eql(u8, args[command_index + 1], "run") and args.len > command_index + 2 and std.mem.eql(u8, args[command_index + 2], "consolidate")) {
+            const parsed = parseExtractRunArgs(args[command_index + 3 ..]) catch {
+                return printCliError(stdout, allocator, "invalid jobs run consolidate arguments");
+            };
+            const result = runtime.runConsolidateJobs(allocator, parsed.owner, parsed.limit, parsed.concurrency) catch |err| {
+                if (err == error.ProviderUnavailable) {
+                    return printCliError(stdout, allocator, "no extract provider configured; set --extract-provider or --llm-provider");
+                }
+                return err;
+            };
+            const response = try stringifyAlloc(allocator, .{
+                .status = "ok",
+                .worker = "consolidate",
+                .leasedCount = result.leasedCount,
+                .succeededCount = result.succeededCount,
+                .failedCount = result.failedCount,
+                .lastError = result.lastError,
+                .calls = result.calls,
+                .claims = result.claims,
+                .earlier = result.earlier,
+                .updatesWritten = result.updatesWritten,
+                .counts = result.counts,
+            });
             defer allocator.free(response);
             try stdout.print("{s}\n", .{response});
             return;
@@ -1462,7 +1509,7 @@ fn runCommand(
         return serveInline(io, allocator, runtime, stdout);
     }
 
-    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--expand-provider PROVIDER] [--expand-url URL] [--expand-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--extract-provider openrouter|openai|anthropic|google|ollama|custom] [--extract-url URL] [--extract-model MODEL] [--background on|off] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams|leaks]... [--leaks] | jobs materialize|lease|complete|fail|run entity-resolve|extract ... | rpc-stdin | serve\n", .{});
+    try stdout.print("quipu core scaffold\nusage: quipu [--config PATH] [--db PATH] [--llm-provider openai|anthropic|google|openrouter|azure|groq|ollama|together|mistral|deepseek|kimi|cohere|custom] [--llm-model MODEL] [--llm-base-url URL] [--llm-api-key KEY] [--llm-temperature N] [--llm-max-tokens N] [--vector-dimensions N] [--page-size BYTES] [--embedding-provider hash|openrouter|openai] [--embedding-url URL] [--embedding-model MODEL] [--answer-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--answer-model MODEL] [--expand-provider PROVIDER] [--expand-url URL] [--expand-model MODEL] [--entity-provider deterministic|openrouter|openai|anthropic|google|ollama|custom] [--entity-model MODEL] [--extract-provider openrouter|openai|anthropic|google|ollama|custom] [--extract-url URL] [--extract-model MODEL] [--background on|off] [--consolidate on|off] [--reranker-url URL] [--reranker-model MODEL] [--reranker-api-key KEY] [--reranker-timeout-ms N] init | quickstart | status | health | llm-check | remember --text TEXT [--project ID] | retrieve --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | answer --query TEXT [--mode fts|vector|hybrid|graph] [--need NEED] | inspect ID | forget --id ID|--query TEXT [--yes] | feedback --retrieval ID --rating RATING | consolidate [--project ID] | compile-core --project ID|--user ID | proxy --port 7337 | dashboard --port 7338 | verify [all|schema|provenance|temporal|forgetting|streams|leaks]... [--leaks] | jobs materialize|lease|complete|fail|run entity-resolve|extract|consolidate ... | rpc-stdin | serve\n", .{});
 }
 
 /// What the serve loop waits on: the next request, or word that background

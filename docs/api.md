@@ -79,6 +79,18 @@ never as the claim, and raw lines show the claims' event dates as
 assertions take no part in retrieval. See
 [algorithms.md](algorithms.md#fact-keys).
 
+`options.facts` (on `memory.retrieve` and `memory.answer`, default `false`)
+puts the matching claims that consolidation (`--consolidate on`) found
+replaced, each with the claim that replaced it, ahead of the raw evidence, as
+a `<facts>` section of dated lines: `(superseded, YYYY-MM-DD to YYYY-MM-DD)`
+and `(current, from YYYY-MM-DD)`. A claim with no replacement is not listed,
+so there is no section when the question touches no replaced fact. The section
+uses at most 30% of the token budget, taken from the raw evidence. The facts
+are returned in `context.currentFacts` as items of type `fact` whose evidence
+is the message they were drawn from; a superseded one has
+`state: "superseded"` and `validTo` set. The trace gains a `facts` block. `Update` nodes are never returned as
+items. See [algorithms.md](algorithms.md#the-facts-section).
+
 ## Search V0
 
 `memory.search` supports `mode: "fts"`, `"vector"`, `"hybrid"`, and `"graph"`.

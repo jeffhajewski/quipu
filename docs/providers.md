@@ -242,6 +242,18 @@ these jobs itself between requests (see
 because the extract provider can be auto-detected from an API key in the
 environment and the worker would then send stored messages to it unprompted.
 
+`--consolidate on` (or `QUIPU_CONSOLIDATE=on`) adds a second pass with the same
+model: after a conversation's claims are extracted, a `consolidate` job looks
+for earlier claims they replace (see
+[algorithms.md](algorithms.md#consolidation-knowledge-updates)). Per
+conversation it makes one call that proposes pairs and one short call for each
+pair that survives the text checks, sending claim texts and their dates, not
+the messages. It also embeds the conversation's claims, in one request to the
+embedding provider. It runs in the background worker, with
+`quipu jobs run consolidate`, or with `memory.consolidate.run`.
+`workers.consolidator` reports `running`, `stopped` or `unavailable` the same
+way as the extractor.
+
 `system.health` reports `workers.extractor` and
 `capabilities.extractor: {"configured", "model", "promptVersion"}`. The worker
 is `running` when the daemon drains jobs in the background, `stopped` when an

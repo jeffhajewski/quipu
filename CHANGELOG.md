@@ -34,6 +34,24 @@
   wording is kept as `statedText` and remains what search indexes, and the
   extract job result counts
   `timesResolved`, `eventDatesDerived` and `eventDatesCorrected`.
+- Consolidation of knowledge updates, off by default: with `--consolidate on`
+  (or `QUIPU_CONSOLIDATE=on`) each extracted conversation queues a
+  `consolidate` job. It asks the extract model which earlier claims of the same
+  author the new claims replace, then verifies each proposed pair with a second
+  call and a deterministic check of both values against the claim texts. A
+  pair that passes is stored as an `Update` node, derived from both claims and
+  evidenced by both messages, so forgetting either removes it. No message or
+  claim is rewritten. Run the jobs with `quipu jobs run consolidate`,
+  `memory.consolidate.run`, or the background worker.
+- `options.facts` on `memory.retrieve` and `memory.answer` (default `false`)
+  puts the matching claims that consolidation found replaced, each with the
+  claim that replaced it, ahead of the raw evidence as dated lines:
+  `(superseded, DATE to DATE)` and `(current, from DATE)`, using at most 30%
+  of the token budget. A claim with no replacement is not listed, so a
+  question that touches no replaced fact gets no facts section. The facts are
+  items of type `fact` in
+  `context.currentFacts`, and `trace.facts` counts them. `system.health`
+  reports `capabilities.facts` and a real `workers.consolidator` state.
 - Job leases use wall-clock time (they used 0), and an expired lease returns
   its job to `pending`, or dead-letters it once its attempts run out.
   `quipu jobs lease|complete|fail` record real times too.
