@@ -682,9 +682,11 @@ frozen half, since there is no gain to confirm.
 
 ## Iteration 7 (November 17): nodes built above the facts, a prototype
 
-This iteration is a prototype outside the daemon. Its scripts, journals and
-results are in `artifacts/experiments/pattern-benchmark/` (not in git).
-Nothing in `core/` changed.
+This iteration began as a prototype outside the daemon. Its scripts, journals
+and results are in `artifacts/experiments/pattern-benchmark/` (not in git).
+The part that held, pattern nodes, was then moved into the daemon; see
+[Pattern nodes in the daemon](#pattern-nodes-in-the-daemon-november-18).
+Cause-and-effect links are still prototype only.
 
 ### The question
 
@@ -1246,6 +1248,166 @@ following the evidence links upward from the retrieved leaves, and include
 it only when it owns most of them. That makes derived nodes free for
 questions they are not about, and no option is needed to turn them off.
 
+### Pattern nodes in the daemon (November 18)
+
+The pipeline above is now daemon behaviour, with no flag and no request
+option: a `pattern` job is queued after each extracted conversation, the
+background worker (or `quipu jobs run patterns`) builds the nodes, and
+`memory.retrieve` shows a node to the question that owns it. The algorithm is
+in [algorithms.md](algorithms.md#pattern-nodes). It differs from the prototype
+in a few places, all measured below rather than assumed:
+
+- Nodes are built from the sentences of raw messages, not from extracted
+  claims. The daemon's own extraction (GPT-4o-mini) kept the outcome sentence
+  of only 5 of 10 bread occasions and 6 of 10 call occasions on journal x0,
+  so claims cannot carry a count.
+- One occasion is one conversation on one day, not one journal entry.
+- One model, the extract provider, does all three steps. The prototype used
+  GPT-4o to name and propose and GPT-4o-mini to count.
+- Sentence vectors are stored as 256 signed bytes each.
+- A node keeps its first generalisations; later occasions are only counted.
+
+**The fresh set, end to end in the daemon.** The eight hand-written journals
+x0–x7 (80 entries each, one planted pattern, one topic with no pattern, one
+lookup) were ingested into the built daemon one entry per conversation
+(LatticeDB backend, `text-embedding-3-small`), extracted with GPT-4o-mini,
+and the pattern jobs were run with GPT-4o. This set had already been used to
+confirm the prototype, so it confirms the port, not the method.
+
+What was stored, over the eight journals: 173 nodes for groups of six or
+more occasions, of which 52 routine, 86 with too few testable occasions, 26
+"compared, nothing found" and 9 regularities.
+
+| | Prototype | Daemon |
+| --- | ---: | ---: |
+| Planted pattern stored as a regularity (of 8) | 6 | 6 |
+| No-pattern topic stored as "nothing found" (of 8) | 6 | 6 |
+| No-pattern topic stored as a regularity | 1 | 1 |
+| Regularities on background chores | 0 | 2 |
+
+The two misses are film on x2, whose outcome is reported in a later entry
+(the known gap), and sketches on x5. On x5 the model proposed exactly the
+planted generalisation, but only 8 of the 10 occasions were gathered and one
+entry of the journal contradicts its own plan (the prose model wrote "from a
+photo" for a sketch planned as drawn from life). The count was 5 of 5
+against 1 of 3, p = 0.11, so the node says nothing held. The false
+regularity on x2 is the journal's unplanted coincidence found earlier (rides
+to one destination). The two chore regularities are true of the text and
+worthless: "disposes of the recycling when they also tidy the hallway" is
+one background sentence that mentions both. The proposal prompt asks for a
+circumstance and an outcome and the model gave two activities of the same
+day; nothing checks that yet.
+
+What `memory.retrieve` did with the 24 questions, asked without naming the
+pattern, at 1,200 tokens:
+
+| Question | Pattern node shown | It was the topic's own node |
+| --- | ---: | ---: |
+| Pattern (8) | 7 | 7 |
+| No pattern (8) | 7 | 7 |
+| Lookup (8) | 0 | – |
+
+The eighth of each is film, where no node has anything to show. No lookup
+was given a node: the most any node owned of a lookup's ten nearest
+sentences was 4.
+
+Answers, GPT-4o reading the daemon's prompt and GPT-4o grading with the
+prototype's reader and judge prompts. The arm without nodes is the same
+retrieval with `needs: ["raw"]`. Every graded answer on the pattern and
+no-pattern questions was read by hand and no grade was changed.
+
+| Context | Pattern (8) | No pattern (8) | Lookup (8) |
+| --- | ---: | ---: | ---: |
+| Raw evidence, 1,200 tokens | 1 | 3 | 8 |
+| With pattern nodes, 1,200 tokens | 6 | 6 | 8 |
+| Raw evidence, 300 tokens | 1 | 3 | 8 |
+| With pattern nodes, 300 tokens | 2 | 3 | 8 |
+
+The prototype scored 5, 8 and 8 with nodes at 1,200 tokens and 2, 0 and 8
+without. At 300 tokens a node may use 120, and only 3 of the 14 nodes are
+that short, so the small budget mostly gets raw evidence. The two no-pattern
+answers still wrong at 1,200 are film on x1 (nothing shown, and the reader
+blames light leaks) and the destination coincidence on x2.
+
+**Cost and time.** One 80-entry journal took 73 to 137 chat calls for the
+pattern pass (853 over the eight) and 30 to 63 seconds, after about 100
+seconds of extraction. A second pass over the same journal made no call.
+The daemon does not record token counts for these calls. From the prompt
+sizes (a few hundred tokens per counting call, 2,000 to 4,000 for a
+proposal) a journal is roughly $0.30 with GPT-4o; that is an estimate, not a
+measurement.
+
+**Latency and scale.** With no network (hash embeddings and a local endpoint
+that answers the three prompts with canned JSON), on an M-series laptop:
+
+| Messages (sentences) | First build | Pass after one new message | Retrieve, scope with a node | Retrieve, other scope |
+| --- | ---: | ---: | ---: | ---: |
+| 300 (1,750) | 0.2 s | 0.06 s | 3–6 ms | under 1 ms |
+| 2,000 (11,950) | 3.8 s | 2.8 s | 30–35 ms | 2 ms |
+
+Grouping compares every pair of sentences on every pass, and retrieval reads
+every sentence index of the scope when the scope has a node to show. Both
+grow with the store and neither is cached yet. With `--background on` and
+600 messages, the node appeared half a second after the last
+`memory.remember` and the slowest retrieve meanwhile took 52 ms.
+
+**One small model for everything.** Without a pattern model the jobs use the
+extract model, so the same eight journals were run with GPT-4o-mini doing
+the pattern jobs as well
+(443 calls, 20 to 45 seconds a journal).
+
+| | GPT-4o | GPT-4o-mini |
+| --- | ---: | ---: |
+| Planted pattern stored as a regularity (of 8) | 6 | 4 |
+| No-pattern topic stored as "nothing found" (of 8) | 6 | 6 |
+| No-pattern topic stored as a regularity | 1 | 0 |
+| Regularities on background chores | 2 | 0 |
+| Pattern questions right at 1,200 tokens (of 8; 1 from raw evidence) | 6 | 3 |
+| No-pattern questions right at 1,200 tokens (of 8; 3 from raw evidence) | 6 | 7 |
+| Lookups right at 1,200 tokens (of 8; 8 from raw evidence) | 8 | 8 |
+
+The small model calls most groups a routine (16 to 21 of about 21 per
+journal, against 4 to 10 for GPT-4o), so it proposes little: fewer false
+findings and half the true ones. One of its four regularities is empty
+("ends conversations with Marcus feeling frustrated when they argue", 6 of 6
+against 0 of 2), and on x7 it stored "nothing found" for the planted
+sneezing pattern, which the reader then repeated. It still beats raw
+evidence on both kinds of question and costs lookups nothing, but the
+proposal step is where a stronger model pays. Pattern jobs can therefore
+name their own model (`--pattern-model`), as the answer, entity and
+expansion steps can; without one they use the extract model.
+
+A review of the port then found that counts going firmly against a proposal
+were reported as "found nothing". They are now a finding, worded as the
+reverse of the proposal. No GPT-4o node had such counts. Two GPT-4o-mini
+nodes did, both for "dinners go poorly when the food is late" (1 of 7
+against 3 of 3 on x5, 0 of 6 against 4 of 4 on x6); on x5 that is the
+no-pattern topic, so under the corrected rule its stored "nothing found"
+would be a regularity and the small model's column would read 5 and 1 in
+the second and third rows. The answers were not rerun.
+
+**Does it disturb what already worked?** The temporal-reasoning tuning half
+of LongMemEval-S (55 questions) was rerun on the build with pattern nodes, in
+the configuration of iteration 6 (background extraction and consolidation
+with GPT-4o-mini, `factKeys`, `facts`, `timeAnchors`, GPT-4o reader), with the
+harness now running the pattern jobs a serving daemon would run.
+
+| | Without pattern jobs | With pattern jobs |
+| --- | ---: | ---: |
+| Correct at 1,024 tokens (of 55) | 42 | 42 |
+| Correct at 4,096 tokens (of 55) | 43 | 43 |
+| Contexts identical to the run without (of 110) | – | 110 |
+| Questions given a pattern node | – | 0 |
+
+Per question history (about 47 conversations, 244 messages from the user,
+660 sentences) the pattern jobs took 11 seconds and $0.0004: the sentence
+embeddings and, on average, 1.4 chat calls. Over the 55 histories 631
+groups formed, 46 had six or more occasions, the model called 2 of them
+recurring, and no regularity was stored. These histories are a few weeks of
+unrelated chats, so there is little to find; the run shows that the jobs are
+cheap and inert there, not that they help.
+
+
 ### Limits
 
 - The benchmark and the pipeline have the same author, and every planted
@@ -1268,6 +1430,14 @@ questions they are not about, and no option is needed to turn them off.
   gathering splits in two (outcomes reported in a later entry).
 - One step needs GPT-4o. Sixteen questions per set is a small sample; the
   pooled difference at 1,200 tokens (22 of 32 against 8 of 32) is not.
+- A daemon that leaves pattern jobs on a small extract model finds fewer of
+  the patterns (four of eight against six). The daemon run reused the
+  x set, which the prototype had already been confirmed on.
+- "Nothing held" is said whenever no generalisation passes the test, also
+  when one leans strongly on few occasions (5 of 5 against 1 of 3 on x5). The
+  counts are in the text, but the sentence in front of them is too firm.
+- A proposed outcome is not checked to be an outcome. Two regularities in
+  eight journals were two chores mentioned in one sentence.
 
 ## What we learned
 
@@ -1330,6 +1500,13 @@ over model-written chains that was stopped at its cap, $2.00 on the fresh
 pattern set end to end, and $7.60 on the two hand-written cause-and-effect
 journals ($3.90 building links, $3.70 on answers and grading).
 
+Porting pattern nodes to the daemon and measuring them cost about $4 by
+estimate (the daemon does not record token counts): roughly $3 on the GPT-4o
+pattern jobs over the eight journals, run once in full and once in part,
+$0.31 on answers and grading, and well under $1 on the GPT-4o-mini run and
+on the LongMemEval rerun, whose extraction and reader calls came from the
+cache ($0.02 of new spend on pattern jobs).
+
 Embeddings cost about $0.13 per uncached full slice. A GPT-4o-mini reader with
 the GPT-4o judge costs about $0.05–0.15 per arm.
 
@@ -1360,16 +1537,17 @@ the GPT-4o judge costs about $0.05–0.15 per arm.
   explains it. What is missing is anything built above the claims: nodes that
   connect related claims and say how they relate. Iteration 7 prototyped
   this outside the daemon and it held on unseen journals, including a set
-  written by hand after the pipeline was frozen. Before porting: check it on
-  a benchmark we did not write; run average-link grouping end to end on the
-  long journals and stop compound claims passing on one test; make the
-  benchmark generator reject journals with unplanted regularities; decide
-  when a node with no finding gets
-  new generalisations proposed, given that keeping the early ones and
-  updating counts found as many patterns as rebuilding with fewer false
-  ones; and decide what a node stores (the generalisations, each occasion's
-  two answers, the links to what followed) so that forgetting an entry
-  recomputes the findings built on it.
+  written by hand after the pipeline was frozen. Pattern nodes are now in the
+  daemon and reproduce the prototype there. Still open: check them on a
+  benchmark we did not write; gather occasions whose outcome arrives in a
+  later conversation; run average-link grouping end to end on the long
+  journals and stop compound claims passing on one test; reject proposals
+  whose outcome is only another activity of the same day; say "leans, too
+  few occasions" instead of "nothing held" where that is the case; make the
+  benchmark generator reject journals with unplanted regularities and check
+  the prose against its plan; and make grouping incremental and
+  cache sentence vectors for retrieval before stores of tens of thousands of
+  sentences.
 - Cause-and-effect links reach evidence that similarity retrieval does not
   (the root of a chain in context 11 times in 16 against once), but building
   them asks a question of every sentence. Cut the cost (one-off events only,

@@ -141,6 +141,14 @@ Current external benchmark status:
   and `options.timeAnchors`. With a GPT-4o-mini reader the default is 68.4%
   and the background jobs did not help. One category, not a benchmark score;
   same document.
+- Pattern questions on eight hand-written journals (24 questions, GPT-4o for
+  the pattern jobs, the reader and the judge, 1,200 tokens): 6 of 8 planted
+  patterns answered with pattern nodes against 1 of 8 from raw evidence, 6 of
+  8 "nothing explains it" questions against 3 of 8, and 8 of 8 lookups either
+  way. The journals and the pipeline have the same author; this is a check
+  that the daemon reproduces the prototype, not a benchmark score. On 55
+  LongMemEval-S temporal questions the pattern jobs changed no context and
+  no answer. Same document.
 - Full LoCoMo local raw-retrieval run: 1,986 questions, LatticeDB `0.6.0`,
   core Lattice answer-containment exact match 28.55%, evidence recall 58.27%,
   with reports under `artifacts/benchmarks/locomo-core-lattice-raw-fast-full/`.
