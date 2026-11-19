@@ -90,6 +90,13 @@
   before pattern jobs, with `quipu jobs run summaries`, or with
   `memory.summaries.run`. `system.health` reports `capabilities.summaries`
   and `workers.summaries`.
+- Extraction reads twice. The messages of a turn that the first reading drew
+  no claim from, when they are 60 bytes or longer, are sent to the extract
+  model again on their own with a prompt for facts stated inside a request
+  (`quipu.extract.recall.v1`). Its claims are grounded and written like any
+  others. The extract job result gains `recallMessages` and
+  `recallAssertions`. There is no option; it adds about one call per
+  conversation.
 - Retrieval reads the summary nodes first. When a scope has them,
   `memory.retrieve` and `memory.answer` compare the question with every
   topic summary, session summary and claim, and show the nearest topics in

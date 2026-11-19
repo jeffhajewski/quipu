@@ -310,6 +310,15 @@ On LongMemEval-S with `openai/gpt-4o-mini-2024-07-18` (about 48 sessions and
 520 messages per question), extraction made one call per session, about
 $0.028 per question, and took 50 to 80 seconds at concurrency 8.
 
+Since the second reading (see
+[algorithms.md](algorithms.md#llm-fact-extraction)) a session whose first
+reading leaves a message of 60 bytes or more without a claim gets a second
+call over those messages. On 55 LongMemEval-S histories with the v4 prompt
+that was 87 calls per history, 48 first readings and 39 second ones, for
+about $0.015 per history, of which the second reading is $0.004. About half
+of what people wrote was read again (6,496 of 13,422 messages) and 235 of
+the 9,138 claims came from it.
+
 ## Reranker
 
 An optional cross-encoder reranker reorders retrieval candidates before budget

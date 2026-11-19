@@ -1428,6 +1428,8 @@ fn runCommand(
                 .jsonRetries = result.jsonRetries,
                 .sourceMessages = result.sourceMessages,
                 .assertionsWritten = result.assertionsWritten,
+                .recallMessages = result.recallMessages,
+                .recallAssertions = result.recallAssertions,
                 .counts = result.counts,
             });
             defer allocator.free(response);

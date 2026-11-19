@@ -495,7 +495,18 @@ pub const ExtractJobRunResult = struct {
     jsonRetries: usize = 0,
     sourceMessages: usize = 0,
     assertionsWritten: usize = 0,
+    /// Messages the first reading drew no claim from, read a second time,
+    /// and the claims that reading added (included in `assertionsWritten`).
+    recallMessages: usize = 0,
+    recallAssertions: usize = 0,
     counts: fact_extraction.Counts = .{},
+};
+
+/// Claims one extract job wrote.
+const ExtractWritten = struct {
+    total: usize = 0,
+    /// Of those, from the second reading.
+    recalled: usize = 0,
 };
 
 /// Outcome of one `memory.consolidate.run` / `quipu jobs run consolidate` pass.
@@ -1117,6 +1128,8 @@ pub const Runtime = struct {
                 .jsonRetries = result.jsonRetries,
                 .sourceMessages = result.sourceMessages,
                 .assertionsWritten = result.assertionsWritten,
+                .recallMessages = result.recallMessages,
+                .recallAssertions = result.recallAssertions,
                 .counts = result.counts,
             },
         };
@@ -4567,22 +4580,17 @@ pub const Runtime = struct {
         defer texts.deinit(allocator);
         for (tasks) |*task| {
             if (task.failure != null) continue;
-            const parsed = task.parsed orelse continue;
-            const messages = try task.sourceMessages(allocator);
-            defer allocator.free(messages);
-            task.grounding = fact_extraction.ground(allocator, parsed.value, messages) catch |err| {
-                if (err == error.OutOfMemory) return err;
-                task.failure = err;
-                continue;
-            };
-            for (task.grounding.?.claims) |claim| try texts.append(allocator, claim.stated_text orelse claim.text);
+            for ([_]?fact_extraction.Grounding{ task.grounding, task.recall_grounding }) |reading| {
+                const grounding = reading orelse continue;
+                for (grounding.claims) |claim| try texts.append(allocator, claim.stated_text orelse claim.text);
+            }
         }
         self.store.prefetchEmbeddings(texts.items) catch {};
         defer self.store.clearPrefetchedEmbeddings();
 
         for (tasks) |*task| {
             result.calls += task.calls;
-            if (task.calls > 1) result.jsonRetries += task.calls - 1;
+            result.jsonRetries += task.json_retries;
             if (task.failure) |err| {
                 result.failedCount += 1;
                 result.lastError = @errorName(err);
@@ -4594,8 +4602,11 @@ pub const Runtime = struct {
             const written = try self.writeExtractTask(allocator, task);
             result.succeededCount += 1;
             result.sourceMessages += task.sources.items.len;
-            result.assertionsWritten += written;
+            result.assertionsWritten += written.total;
+            result.recallMessages += task.recall_messages;
+            result.recallAssertions += written.recalled;
             if (task.grounding) |grounding| result.counts.add(grounding.counts);
+            if (task.recall_grounding) |grounding| result.counts.add(grounding.counts);
         }
     }
 
@@ -4695,23 +4706,35 @@ pub const Runtime = struct {
         group.await(io) catch {};
     }
 
-    /// Writes one job's grounded claims and completes the job with its counts.
-    fn writeExtractTask(self: *Runtime, allocator: std.mem.Allocator, task: *ExtractTask) !usize {
-        var written: usize = 0;
+    /// Writes one job's grounded claims, those of the first reading and
+    /// those of the second, and completes the job with its counts.
+    fn writeExtractTask(self: *Runtime, allocator: std.mem.Allocator, task: *ExtractTask) !ExtractWritten {
+        var written = ExtractWritten{};
+        var counts = fact_extraction.Counts{};
         if (task.grounding) |grounding| {
+            counts.add(grounding.counts);
             for (grounding.claims) |claim| {
-                if (try self.writeAssertion(allocator, task, claim)) written += 1;
+                if (try self.writeAssertion(allocator, task, claim, fact_extraction.prompt_version)) written.total += 1;
             }
         }
-        const counts = if (task.grounding) |grounding| grounding.counts else fact_extraction.Counts{};
+        if (task.recall_grounding) |grounding| {
+            counts.add(grounding.counts);
+            for (grounding.claims) |claim| {
+                if (!try self.writeAssertion(allocator, task, claim, fact_extraction.recall_prompt_version)) continue;
+                written.total += 1;
+                written.recalled += 1;
+            }
+        }
         const summary = .{
             .promptVersion = fact_extraction.prompt_version,
             .provider = self.options.extract_provider.name,
             .model = self.options.extract_provider.model,
             .calls = task.calls,
-            .jsonRetries = if (task.calls > 1) task.calls - 1 else 0,
+            .jsonRetries = task.json_retries,
             .sourceMessages = task.sources.items.len,
-            .assertionsWritten = written,
+            .assertionsWritten = written.total,
+            .recallMessages = task.recall_messages,
+            .recallAssertions = written.recalled,
             .counts = counts,
         };
         const result_json = try stringifyAlloc(allocator, summary);
@@ -4742,7 +4765,7 @@ pub const Runtime = struct {
     /// EVIDENCED_BY edges lead to the source message and to every chunk the
     /// quote overlaps. Qids are content-derived, so rerunning a job rewrites
     /// the same nodes. Returns false when the source is gone.
-    fn writeAssertion(self: *Runtime, allocator: std.mem.Allocator, task: *ExtractTask, claim: fact_extraction.Claim) !bool {
+    fn writeAssertion(self: *Runtime, allocator: std.mem.Allocator, task: *ExtractTask, claim: fact_extraction.Claim, prompt_version: []const u8) !bool {
         const source = task.sources.items[claim.message_index];
         // The message may have been forgotten while the provider call ran.
         const message = (try self.store.getNode(allocator, source.message_qid)) orelse return false;
@@ -4811,7 +4834,7 @@ pub const Runtime = struct {
             .projectId = task.scope.project_id,
             .extractorProvider = self.options.extract_provider.name,
             .extractorModel = self.options.extract_provider.model,
-            .promptVersion = fact_extraction.prompt_version,
+            .promptVersion = prompt_version,
             .groundingRepaired = claim.repaired,
             .jobQid = task.lease.qid,
             .state = "current",
@@ -6476,7 +6499,15 @@ const ExtractTask = struct {
     user_content: ?[]u8 = null,
     parsed: ?std.json.Parsed(Value) = null,
     grounding: ?fact_extraction.Grounding = null,
+    /// The second reading: the reply about the messages the first reading
+    /// drew no claim from, and its claims, indexed like `grounding`'s.
+    recall_parsed: ?std.json.Parsed(Value) = null,
+    recall_grounding: ?fact_extraction.Grounding = null,
+    /// Messages read a second time.
+    recall_messages: usize = 0,
     calls: usize = 0,
+    /// Calls made again because a reply was not valid JSON.
+    json_retries: usize = 0,
     failure: ?anyerror = null,
     /// The failure came from the provider call itself: no reply to judge.
     unanswered: bool = false,
@@ -6492,6 +6523,8 @@ const ExtractTask = struct {
     }
 
     fn deinit(self: *ExtractTask, allocator: std.mem.Allocator) void {
+        if (self.recall_grounding) |grounding| grounding.deinit(allocator);
+        if (self.recall_parsed) |parsed| parsed.deinit();
         if (self.grounding) |grounding| grounding.deinit(allocator);
         if (self.parsed) |parsed| parsed.deinit();
         if (self.user_content) |content| allocator.free(content);
@@ -7703,11 +7736,31 @@ fn backgroundConsolidateCall(batch: *BackgroundBatch, task: *ConsolidateTask, al
 /// The provider half of an extract job; touches no storage, so it may run on
 /// another thread. Malformed replies get E1's two bounded retries, each with
 /// its own prompt suffix.
+/// The provider half of one extract job: the first reading of the turn, its
+/// grounding, and a second reading of the messages no claim came from.
+/// Touches no storage, so it can run on a worker thread.
 fn callExtractTask(task: *ExtractTask, allocator: std.mem.Allocator, io: ?std.Io, endpoint: providers.ProviderEndpoint) void {
     const user_content = task.user_content orelse return;
     if (task.failure != null) return;
-    for (fact_extraction.attempt_prompts) |prompt| {
+    task.parsed = extractReply(task, allocator, io, endpoint, &fact_extraction.attempt_prompts, user_content) orelse return;
+    recallExtractTask(task, allocator, io, endpoint) catch |err| {
+        task.failure = err;
+    };
+}
+
+/// One reading: the call, and E1's bounded retries after a reply that is not
+/// valid extraction JSON. Null with `task.failure` set when none parses.
+fn extractReply(
+    task: *ExtractTask,
+    allocator: std.mem.Allocator,
+    io: ?std.Io,
+    endpoint: providers.ProviderEndpoint,
+    prompts: []const []const u8,
+    user_content: []const u8,
+) ?std.json.Parsed(Value) {
+    for (prompts, 0..) |prompt, attempt| {
         task.calls += 1;
+        if (attempt > 0) task.json_retries += 1;
         const reply = providers.completeChat(allocator, io, endpoint, .{
             .system_prompt = prompt,
             .user_content = user_content,
@@ -7715,19 +7768,48 @@ fn callExtractTask(task: *ExtractTask, allocator: std.mem.Allocator, io: ?std.Io
         }) catch |err| {
             task.failure = err;
             task.unanswered = true;
-            return;
+            return null;
         };
         defer allocator.free(reply);
-        task.parsed = fact_extraction.parseReply(allocator, reply) catch |err| {
+        return fact_extraction.parseReply(allocator, reply) catch |err| {
             if (err == error.OutOfMemory) {
                 task.failure = err;
-                return;
+                return null;
             }
             continue;
         };
-        return;
     }
     task.failure = error.MalformedExtraction;
+    return null;
+}
+
+/// Grounds the first reading and reads again, on their own, the messages it
+/// drew no claim from (`fact_extraction.recall_prompt`). A turn is not
+/// extracted until both readings have answered: when the second fails, the
+/// job fails and is run again.
+fn recallExtractTask(task: *ExtractTask, allocator: std.mem.Allocator, io: ?std.Io, endpoint: providers.ProviderEndpoint) !void {
+    const messages = try task.sourceMessages(allocator);
+    defer allocator.free(messages);
+    task.grounding = try fact_extraction.ground(allocator, task.parsed.?.value, messages);
+
+    const again = try fact_extraction.unclaimed(allocator, messages, task.grounding.?.claims);
+    defer allocator.free(again);
+    if (again.len == 0) return;
+    const reread = try allocator.alloc(fact_extraction.SourceMessage, again.len);
+    defer allocator.free(reread);
+    for (again, reread) |index, *message| {
+        message.* = messages[index];
+        message.content = fact_extraction.clipForRecall(message.content);
+    }
+    const user_content = try fact_extraction.buildUserContent(allocator, task.sources.items[0].created_at, reread);
+    defer allocator.free(user_content);
+    task.recall_messages = again.len;
+    task.recall_parsed = extractReply(task, allocator, io, endpoint, &fact_extraction.recall_attempt_prompts, user_content) orelse return;
+    const recalled = try fact_extraction.ground(allocator, task.recall_parsed.?.value, reread);
+    // The reply numbers the messages it was given; claims are kept by the
+    // turn's own numbering.
+    for (recalled.claims) |*claim| claim.message_index = again[claim.message_index];
+    task.recall_grounding = recalled;
 }
 
 /// One provider call of a background batch, on a worker thread. The last
@@ -13006,6 +13088,8 @@ const TestExtractor = struct {
     calls: usize = 0,
     replies: []const [2][]const u8 = &.{},
     malformed_first: usize = 0,
+    /// The second reading never returns valid JSON.
+    malformed_recall: bool = false,
     last_system: ?[]u8 = null,
     /// Every user turn, in call order.
     users: std.ArrayList([]u8) = .empty,
@@ -13028,6 +13112,9 @@ const TestExtractor = struct {
         try self.users.append(std.testing.allocator, try std.testing.allocator.dupe(u8, turn.user_content));
         self.last_json_mode = turn.json_mode;
         if (self.calls <= self.malformed_first) return allocator.dupe(u8, "{\"assertions\":[{\"text\":");
+        if (self.malformed_recall and std.mem.startsWith(u8, turn.system_prompt, fact_extraction.recall_prompt)) {
+            return allocator.dupe(u8, "{\"assertions\":[{\"text\":");
+        }
         for (self.replies) |pair| {
             if (std.mem.indexOf(u8, turn.user_content, pair[0]) != null) return allocator.dupe(u8, pair[1]);
         }
@@ -13335,6 +13422,142 @@ test "a claim is from a time the question names when its event span overlaps it"
     try std.testing.expect(try claim(dated, "2023-05-08", "2023-05-08"));
     const undated = "{\"createdAt\":\"2023-05-09T10:00:00Z\",\"planned\":false}";
     try std.testing.expect(try claim(undated, "2023-05-09", "2023-05-09"));
+}
+
+/// The Assertion nodes whose source is `message_qid`, as (text, prompt version) pairs.
+fn assertionsFrom(store: storage.Adapter, message_qid: []const u8) ![][2][]u8 {
+    const allocator = std.testing.allocator;
+    var found = std.ArrayList([2][]u8).empty;
+    errdefer {
+        for (found.items) |pair| for (pair) |string| allocator.free(string);
+        found.deinit(allocator);
+    }
+    var iterator = store.iterateNodes(allocator, .{ .label = "Assertion", .where = &.{.{ .name = "sourceMessageQid", .value = message_qid }} });
+    defer iterator.deinit();
+    while (try iterator.next()) |qid| {
+        const node = (try store.getNode(allocator, qid)).?;
+        defer store.freeNode(allocator, node);
+        const claim_text = try readPropertyString(allocator, node.properties_json, "text");
+        errdefer allocator.free(claim_text);
+        const version = try readPropertyString(allocator, node.properties_json, "promptVersion");
+        errdefer allocator.free(version);
+        try std.testing.expect(try edgeExists(store, qid, message_qid, "EVIDENCED_BY"));
+        try found.append(allocator, .{ claim_text, version });
+    }
+    return found.toOwnedSlice(allocator);
+}
+
+fn freeAssertionsFrom(found: [][2][]u8) void {
+    for (found) |pair| for (pair) |string| std.testing.allocator.free(string);
+    std.testing.allocator.free(found);
+}
+
+test "the extract job reads again the messages its first reading drew no claim from" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+
+    // The first reading attends to the cat and returns nothing for the
+    // tandem, which is said inside a request.
+    const tandem = "I picked up the tandem from the workshop yesterday, can you suggest a route along the coast for Sunday?";
+    const replies = [_][2][]const u8{
+        .{ "Miso", "{\"assertions\":[{\"text\":\"The user adopted a cat named Miso.\",\"messageIndex\":0,\"quote\":\"I adopted a cat named Miso\"}]}" },
+        .{ "tandem", "{\"assertions\":[{\"text\":\"The user picked up the tandem from the workshop yesterday.\",\"messageIndex\":0,\"quote\":\"I picked up the tandem from the workshop yesterday\"}]}" },
+    };
+    var failing = TestExtractor{ .replies = &replies, .malformed_recall = true };
+    defer failing.deinit();
+    var runtime = Runtime.initWithOptions(store, harness.health(), .{ .extract_provider = failing.endpoint() });
+    defer runtime.deinit();
+
+    const request = try stringifyAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = "r1",
+        .method = "memory.remember",
+        .params = .{
+            .scope = .{ .userId = "rider" },
+            .sessionId = "s-ride",
+            .messages = &[_]struct { role: []const u8, content: []const u8, createdAt: []const u8 }{
+                .{ .role = "user", .content = "I adopted a cat named Miso last month and she already sleeps on the radiator.", .createdAt = "2023-05-22T10:00:00Z" },
+                .{ .role = "assistant", .content = "Radiators are a favourite. Does she have a bed of her own nearby, somewhere warm and out of the way?", .createdAt = "2023-05-22T10:00:10Z" },
+                .{ .role = "user", .content = "Not yet.", .createdAt = "2023-05-22T10:01:00Z" },
+                .{ .role = "user", .content = tandem, .createdAt = "2023-05-22T10:02:00Z" },
+            },
+        },
+    });
+    defer allocator.free(request);
+    const remembered = try runtime.dispatch(allocator, request);
+    defer allocator.free(remembered);
+    var parsed = try std.json.parseFromSlice(Value, allocator, remembered, .{});
+    defer parsed.deinit();
+    const message_qids = parsed.value.object.get("result").?.object.get("messageQids").?.array.items;
+    const cat_message = message_qids[0].string;
+    const tandem_message = message_qids[3].string;
+
+    // A second reading that does not answer fails the job: the turn is not
+    // extracted, and nothing of it is written.
+    const failed = try runtime.runExtractJobs(allocator, "test", 10, 1);
+    try std.testing.expectEqual(@as(usize, 1), failed.failedCount);
+    try std.testing.expectEqual(@as(usize, 0), failed.succeededCount);
+    try std.testing.expectEqualStrings("MalformedExtraction", failed.lastError.?);
+    try std.testing.expectEqual(@as(usize, 4), failed.calls);
+    try std.testing.expectEqual(@as(usize, 2), failed.jsonRetries);
+    try std.testing.expectEqual(@as(usize, 0), failed.assertionsWritten);
+    {
+        const none = try assertionsFrom(store, cat_message);
+        defer freeAssertionsFrom(none);
+        try std.testing.expectEqual(@as(usize, 0), none.len);
+    }
+
+    var model = TestExtractor{ .replies = &replies };
+    defer model.deinit();
+    runtime.options.extract_provider = model.endpoint();
+    const run = try runtime.runExtractJobs(allocator, "test", 10, 1);
+    try std.testing.expectEqual(@as(usize, 1), run.succeededCount);
+    try std.testing.expectEqual(@as(usize, 2), run.calls);
+    try std.testing.expectEqual(@as(usize, 0), run.jsonRetries);
+    try std.testing.expectEqual(@as(usize, 3), run.sourceMessages);
+    try std.testing.expectEqual(@as(usize, 2), run.assertionsWritten);
+    try std.testing.expectEqual(@as(usize, 1), run.recallMessages);
+    try std.testing.expectEqual(@as(usize, 1), run.recallAssertions);
+    try std.testing.expectEqual(@as(usize, 2), run.counts.accepted);
+
+    // The second call: the recall prompt, and only the message that is long
+    // enough to state something and has no claim. "Not yet." is not sent,
+    // nor the message about the cat, nor the reply.
+    try std.testing.expectEqualStrings(fact_extraction.recall_prompt, model.last_system.?);
+    try std.testing.expectEqual(@as(usize, 2), model.users.items.len);
+    const expected_user = try std.fmt.allocPrint(
+        allocator,
+        "{{\"conversationTime\":\"2023-05-22T10:00:00Z\",\"messages\":[{{\"role\":\"user\",\"content\":\"{s}\"}}]}}",
+        .{tandem},
+    );
+    defer allocator.free(expected_user);
+    try std.testing.expectEqualStrings(expected_user, model.users.items[1]);
+
+    // Its claim is evidenced by the message it was drawn from, which is the
+    // turn's third and the second reading's first, and says which reading
+    // wrote it. Its time is written out like any claim's.
+    const recalled = try assertionsFrom(store, tandem_message);
+    defer freeAssertionsFrom(recalled);
+    try std.testing.expectEqual(@as(usize, 1), recalled.len);
+    try std.testing.expectEqualStrings("The user picked up the tandem from the workshop on Sunday, May 21, 2023.", recalled[0][0]);
+    try std.testing.expectEqualStrings("quipu.extract.recall.v1", recalled[0][1]);
+    const first = try assertionsFrom(store, cat_message);
+    defer freeAssertionsFrom(first);
+    try std.testing.expectEqual(@as(usize, 1), first.len);
+    try std.testing.expectEqualStrings(fact_extraction.prompt_version, first[0][1]);
+
+    // A turn whose every long message has a claim is read once.
+    const again = try runtime.dispatch(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":\"r2\",\"method\":\"memory.remember\",\"params\":{\"scope\":{\"userId\":\"rider\"},\"sessionId\":\"s-cat\",\"messages\":[{\"role\":\"user\",\"content\":\"I adopted a cat named Miso from the shelter on Elm Street, and this morning she knocked the fern off the shelf.\"}]}}",
+    );
+    defer allocator.free(again);
+    const once = try runtime.runExtractJobs(allocator, "test", 10, 1);
+    try std.testing.expectEqual(@as(usize, 1), once.succeededCount);
+    try std.testing.expectEqual(@as(usize, 1), once.calls);
+    try std.testing.expectEqual(@as(usize, 0), once.recallMessages);
 }
 
 test "extract worker retries malformed JSON a bounded number of times" {

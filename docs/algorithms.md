@@ -485,7 +485,7 @@ Either way a job is processed like this:
    `{"conversationTime": <first message's createdAt>, "messages": [{"role",
    "content"}, ...]}`. Scope, ids and labels never enter it. The system prompt
    asks for the facts each author states about themselves. Its version,
-   `quipu.extract.speaker-facts.v4`, is recorded on every claim:
+   `quipu.extract.speaker-facts.v4`, is recorded on every claim it yields:
 
    ```text
    You keep long-term memory about the people in a conversation. The input is
@@ -617,6 +617,23 @@ Either way a job is processed like this:
    Claim embeddings are fetched in batched requests before the writes.
 8. Complete the job with its counts in `resultJson` and publish
    `quipu.extract.completed`.
+
+**The second reading.** One call over a whole turn attends to the messages
+that say the most, and a message whose only fact is a clause of a request
+("I picked up a second-hand kayak on Saturday, how do I patch a crack in the
+hull?") can come back with nothing. So once the first reading is grounded
+(steps 4 to 6) the job looks at which messages no accepted claim came from. Those of 60 bytes or more are sent
+again on their own, each cut to its first 1,500 bytes, with a prompt that
+says a first reading wrote down nothing from them, what a fact inside a
+request looks like, and that a message which only asks for something states
+none (`quipu.extract.recall.v1`; the reply contract is the first reading's).
+The reply is parsed, retried and grounded exactly as above, against the same
+messages, and its claims are written with that prompt version. There is no
+option. A turn is extracted when both readings have answered: if the second
+fails, the job fails and is run again, and nothing of the turn is written
+until then. The job result counts `recallMessages` (messages read again) and
+`recallAssertions` (claims that reading added, included in
+`assertionsWritten`).
 
 Up to `--concurrency` jobs (default 8) have their provider calls in flight at
 once. Storage reads and writes stay on the calling thread. Forgetting a message
