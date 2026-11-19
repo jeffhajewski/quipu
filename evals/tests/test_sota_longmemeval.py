@@ -204,7 +204,7 @@ class RerankerTests(unittest.TestCase):
 class ExtractionTests(unittest.TestCase):
     CONFIG = {"daemonBinary": "/bin/quipu", "readerModel": "reader", "embeddingModel": "embed"}
     RESULT = {"leasedCount": 2, "succeededCount": 2, "failedCount": 0, "calls": 3, "jsonRetries": 1,
-              "assertionsWritten": 9, "counts": {"candidates": 12, "accepted": 9, "repaired": 2, "quarantined": 3,
+              "assertionsWritten": 9, "recallMessages": 4, "recallAssertions": 2, "counts": {"candidates": 12, "accepted": 9, "repaired": 2, "quarantined": 3,
                                                  "eventDates": 4}}
 
     class Proxy:
@@ -292,6 +292,7 @@ class ExtractionTests(unittest.TestCase):
         self.assertAlmostEqual(summary["acceptedRate"], 0.75)
         self.assertAlmostEqual(summary["quarantinedRate"], 0.25)
         self.assertEqual(summary["jsonRetries"], 1)
+        self.assertEqual((summary["recallMessages"], summary["recallAssertions"]), (4, 2))
         self.assertIsNone(summarize_extraction([{"questionId": "q"}]))
 
 

@@ -771,6 +771,8 @@ def summarize_extraction(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         "nominalCostUsd": sum(run["calls"]["nominalCostUsd"] for run in runs),
         "costUsdPerQuestion": sum(run["calls"]["nominalCostUsd"] for run in runs) / len(runs),
         "assertionsWritten": sum(run["result"].get("assertionsWritten", 0) for run in ok),
+        "recallMessages": sum(run["result"].get("recallMessages", 0) for run in ok),
+        "recallAssertions": sum(run["result"].get("recallAssertions", 0) for run in ok),
         "counts": dict(counts),
         "acceptedRate": counts.get("accepted", 0) / candidates if candidates else None,
         "quarantinedRate": counts.get("quarantined", 0) / candidates if candidates else None,
@@ -966,7 +968,9 @@ def markdown(report: Mapping[str, Any]) -> str:
                   f"({fmt(e['costUsdPerQuestion'], 'usd')} per question), new spend {fmt(e['costUsd'], 'usd')}. "
                   f"Claims {e['counts'].get('candidates', 0)}: accepted {fmt(e['acceptedRate'], 'pct')} "
                   f"(repaired {e['counts'].get('repaired', 0)}), quarantined {fmt(e['quarantinedRate'], 'pct')}, "
-                  f"with event dates {e['counts'].get('eventDates', 0)}."]
+                  f"with event dates {e['counts'].get('eventDates', 0)}. "
+                  f"Second reading: {e.get('recallMessages', 0)} messages read again, "
+                  f"{e.get('recallAssertions', 0)} of {e.get('assertionsWritten', 0)} claims written came from it."]
     if report.get("spend"):
         lines += ["", "## Spend", "", "```json", json.dumps(report["spend"], indent=2, sort_keys=True), "```"]
     if report.get("errors"):
