@@ -285,6 +285,18 @@ call. `workers.patterns` is `running`, `stopped` or
 `unavailable` the same way as the extractor, and `unavailable` on such a
 store.
 
+A `summary` job is queued for the scope after each extracted conversation, on
+a store that embeds text. It sends the extract model each conversation that
+has no summary yet or has changed (messages cut to 700 bytes from a person
+and 220 from the assistant), and each group of related claims that is new or
+has changed; it sends the embedding provider the claims that have no stored
+vector yet and the text of each new summary. It runs in the background
+worker, with `quipu jobs run summaries`, or with `memory.summaries.run`, so
+nothing is sent until extraction itself has been asked for. `system.health`
+reports `capabilities.summaries: {"available", "promptVersion", "model"}` and
+`workers.summaries` the way it does for patterns. See
+[algorithms.md](algorithms.md#summary-nodes).
+
 `system.health` reports `workers.extractor` and
 `capabilities.extractor: {"configured", "model", "promptVersion"}`. The worker
 is `running` when the daemon drains jobs in the background, `stopped` when an

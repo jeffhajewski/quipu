@@ -8,6 +8,8 @@ pub const consolidate_requested = "quipu.consolidate.requested";
 pub const consolidate_completed = "quipu.consolidate.completed";
 pub const pattern_requested = "quipu.pattern.requested";
 pub const pattern_completed = "quipu.pattern.completed";
+pub const summary_requested = "quipu.summary.requested";
+pub const summary_completed = "quipu.summary.completed";
 pub const forget_requested = "quipu.forget.requested";
 pub const forget_completed = "quipu.forget.completed";
 pub const retrieval_logged = "quipu.retrieval.logged";
@@ -31,6 +33,8 @@ pub const materialized_streams = [_]StreamSpec{
     .{ .name = consolidate_completed, .worker_kind = "consolidate_completed" },
     .{ .name = pattern_requested, .worker_kind = "pattern" },
     .{ .name = pattern_completed, .worker_kind = "pattern_completed" },
+    .{ .name = summary_requested, .worker_kind = "summary" },
+    .{ .name = summary_completed, .worker_kind = "summary_completed" },
     .{ .name = forget_requested, .worker_kind = "forget" },
     .{ .name = forget_completed, .worker_kind = "forget_completed" },
     .{ .name = retrieval_logged, .worker_kind = "retrieval_log" },

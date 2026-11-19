@@ -9,6 +9,7 @@ const in_memory_storage = if (build_options.enable_lattice) struct {} else @impo
 const jobs = @import("jobs.zig");
 const lattice_storage = if (build_options.enable_lattice) @import("lattice_storage.zig") else struct {};
 const patterns = @import("patterns.zig");
+const summaries = @import("summaries.zig");
 const protocol = @import("protocol.zig");
 const providers = @import("providers.zig");
 const query_expansion = @import("query_expansion.zig");
@@ -73,6 +74,14 @@ const max_pattern_sentences: usize = 20_000;
 /// between requests, so a store with a backlog is indexed over several
 /// passes, and nothing is grouped until it all is.
 const pattern_index_limit: usize = 64;
+/// Summary jobs: how many are leased at once (jobs for one scope are settled
+/// by one pass), how long a pass may hold them, and how many claims one pass
+/// may embed. Embedding is a provider call made between requests, so a store
+/// with a backlog of claims is indexed over several passes, and no topic is
+/// formed until it all is.
+const summary_lease_limit: usize = 256;
+const summary_lease_ttl_ms: i64 = 30 * 60 * 1000;
+const summary_index_limit: usize = 2048;
 /// Share of the token budget a pattern node may use, out of the raw
 /// evidence's share.
 const pattern_budget_percent: usize = 40;
@@ -537,11 +546,58 @@ pub const PatternJobRunResult = struct {
     continued: bool = false,
 };
 
+/// What summary passes did, summed over scopes.
+pub const SummaryCounts = struct {
+    /// Sessions with messages, and those whose summary was missing or stale.
+    sessions: usize = 0,
+    sessionsAsked: usize = 0,
+    sessionsWritten: usize = 0,
+    /// Claims compared, and claims whose vector this pass stored.
+    claims: usize = 0,
+    claimsIndexed: usize = 0,
+    /// Groups of two or more claims.
+    groups: usize = 0,
+    topicsAsked: usize = 0,
+    topicsWritten: usize = 0,
+    /// Groups the model said were not about one thing.
+    topicsDeclined: usize = 0,
+    /// Summaries that already say what their sources say.
+    unchanged: usize = 0,
+    /// Nodes that nothing stands behind any more.
+    retired: usize = 0,
+    /// Summaries no reply could be read for after a retry.
+    malformed: usize = 0,
+
+    fn add(self: *SummaryCounts, other: SummaryCounts) void {
+        inline for (std.meta.fields(SummaryCounts)) |field| {
+            @field(self, field.name) += @field(other, field.name);
+        }
+    }
+};
+
+/// Outcome of one `memory.summaries.run` / `quipu jobs run summaries` pass.
+pub const SummaryJobRunResult = struct {
+    leasedCount: usize = 0,
+    succeededCount: usize = 0,
+    failedCount: usize = 0,
+    lastError: ?[]const u8 = null,
+    calls: usize = 0,
+    /// Scopes rebuilt; the jobs of one scope are settled by one pass.
+    scopes: usize = 0,
+    counts: SummaryCounts = .{},
+    /// A pass left part of a backlog for the next one.
+    continued: bool = false,
+    /// The embedding provider did not answer for a scope's new summaries;
+    /// its jobs went back to pending with their attempts intact.
+    unembedded: bool = false,
+};
+
 /// What a finished background batch did.
 pub const BackgroundResult = union(enum) {
     extract: ExtractJobRunResult,
     consolidate: ConsolidateJobRunResult,
     patterns: PatternJobRunResult,
+    summaries: SummaryJobRunResult,
 };
 
 pub const RuntimeOptions = struct {
@@ -581,6 +637,7 @@ const BackgroundBatch = struct {
     tasks: []ExtractTask = &.{},
     consolidate_tasks: []ConsolidateTask = &.{},
     pattern_tasks: []PatternTask = &.{},
+    summary_tasks: []SummaryTask = &.{},
     group: std.Io.Group = .init,
     /// Provider calls that have not returned yet.
     remaining: std.atomic.Value(usize),
@@ -593,6 +650,7 @@ const BackgroundBatch = struct {
         for (self.consolidate_tasks) |*task| task.deinit(allocator);
         allocator.free(self.consolidate_tasks);
         freePatternTasks(allocator, self.pattern_tasks);
+        freeSummaryTasks(allocator, self.summary_tasks);
         jobs.freeLeaseResults(allocator, self.leases);
         allocator.destroy(self);
     }
@@ -693,6 +751,8 @@ pub const Runtime = struct {
             // Consolidation follows extraction: its jobs run once no extract
             // job is waiting.
             if (self.options.consolidate_updates and try self.startBackgroundConsolidation(allocator, io)) return true;
+            // Summaries are brought up to date once the claims are written.
+            if (try self.startBackgroundSummaries(allocator, io)) return true;
             // Pattern nodes are rebuilt last, from everything read so far.
             if (try self.startBackgroundPatterns(allocator, io)) return true;
             self.background_dirty = false;
@@ -794,6 +854,7 @@ pub const Runtime = struct {
         if (self.options.io) |io| batch.group.await(io) catch {};
         const consolidating = batch.consolidate_tasks.len > 0;
         const patterning = batch.pattern_tasks.len > 0;
+        const summarising = batch.summary_tasks.len > 0;
 
         var calls: usize = 0;
         var called: usize = 0;
@@ -825,17 +886,25 @@ pub const Runtime = struct {
             unanswered += 1;
             last_error = @errorName(task.failure.?);
         }
+        for (batch.summary_tasks) |task| {
+            // A summary task also asks the embedding provider, before any
+            // chat call; no answer there is no answer.
+            if (task.calls == 0 and !task.unanswered) continue;
+            called += 1;
+            calls += task.calls;
+            if (!task.unanswered) continue;
+            unanswered += 1;
+            last_error = @errorName(task.failure.?);
+        }
         if (called > 0 and unanswered == called) {
             for (batch.leases) |lease| try jobs.releaseLease(allocator, self.store, lease.qid);
-            self.background_backoff_ms = if (self.background_backoff_ms == 0)
-                background_backoff_initial_ms
-            else
-                @min(self.background_backoff_ms * 2, background_backoff_max_ms);
-            self.background_retry_at_ms = self.nowMs() + self.background_backoff_ms;
+            self.backOffBackground(self.background_backoff_ms);
             if (consolidating) return .{ .consolidate = .{ .leasedCount = batch.leases.len, .failedCount = unanswered, .calls = calls, .lastError = last_error } };
             if (patterning) return .{ .patterns = .{ .leasedCount = batch.leases.len, .failedCount = unanswered, .calls = calls, .lastError = last_error } };
+            if (summarising) return .{ .summaries = .{ .leasedCount = batch.leases.len, .failedCount = unanswered, .calls = calls, .lastError = last_error } };
             return .{ .extract = .{ .leasedCount = batch.leases.len, .failedCount = unanswered, .calls = calls, .lastError = last_error } };
         }
+        const waited_ms = self.background_backoff_ms;
         self.background_backoff_ms = 0;
         self.background_retry_at_ms = 0;
         // Jobs the failed write did not settle go back to pending.
@@ -850,9 +919,27 @@ pub const Runtime = struct {
             try self.applyPatternTasks(allocator, batch.pattern_tasks, &result);
             return .{ .patterns = result };
         }
+        if (summarising) {
+            var result = SummaryJobRunResult{ .leasedCount = batch.leases.len };
+            try self.applySummaryTasks(allocator, batch.summary_tasks, &result);
+            // The chat model answered and the embedding provider did not:
+            // the worker waits, as after a batch nothing answered.
+            if (result.unembedded) self.backOffBackground(waited_ms);
+            return .{ .summaries = result };
+        }
         var result = ExtractJobRunResult{ .leasedCount = batch.leases.len };
         try self.applyExtractTasks(allocator, batch.tasks, &result);
         return .{ .extract = result };
+    }
+
+    /// No batch starts for a while: `waited_ms` doubled, from the initial
+    /// wait up to the maximum.
+    fn backOffBackground(self: *Runtime, waited_ms: i64) void {
+        self.background_backoff_ms = if (waited_ms == 0)
+            background_backoff_initial_ms
+        else
+            @min(waited_ms * 2, background_backoff_max_ms);
+        self.background_retry_at_ms = self.nowMs() + self.background_backoff_ms;
     }
 
     /// Stops the batch in flight and gives its jobs back unrun.
@@ -901,6 +988,7 @@ pub const Runtime = struct {
         if (std.mem.eql(u8, method, "memory.extract.run")) return self.memoryExtractRun(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.consolidate.run")) return self.memoryConsolidateRun(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.patterns.run")) return self.memoryPatternsRun(allocator, id, &params);
+        if (std.mem.eql(u8, method, "memory.summaries.run")) return self.memorySummariesRun(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.get")) return self.memoryCoreGet(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.update")) return self.memoryCoreUpdate(allocator, id, &params);
         if (std.mem.eql(u8, method, "memory.core.consolidate")) return self.memoryCoreConsolidate(allocator, id, &params);
@@ -925,6 +1013,7 @@ pub const Runtime = struct {
                 .workers = .{
                     .extractor = if (self.backgroundEnabled()) "running" else if (extractProviderUsable(self.options.extract_provider)) "stopped" else "unavailable",
                     .consolidator = if (!self.options.consolidate_updates or !extractProviderUsable(self.options.extract_provider)) "unavailable" else if (self.backgroundEnabled()) "running" else "stopped",
+                    .summaries = if (!self.store.capabilities().vector or !extractProviderUsable(self.options.extract_provider)) "unavailable" else if (self.backgroundEnabled()) "running" else "stopped",
                     .patterns = if (!self.store.capabilities().vector or !extractProviderUsable(self.patternProvider())) "unavailable" else if (self.backgroundEnabled()) "running" else "stopped",
                     .entityResolver = if (self.options.entity_provider.kind == .none) "unavailable" else "stopped",
                     .answerer = if (self.options.answer_provider.kind == .none) "unavailable" else "running",
@@ -942,6 +1031,13 @@ pub const Runtime = struct {
                     .factKeys = true,
                     .facts = true,
                     .timeAnchors = true,
+                    // Summary nodes group claims by their vectors and are
+                    // found by their own, so they need a store that embeds.
+                    .summaries = .{
+                        .available = self.store.capabilities().vector,
+                        .promptVersion = summaries.prompt_version,
+                        .model = if (extractProviderUsable(self.options.extract_provider)) self.options.extract_provider.model else null,
+                    },
                     // Pattern nodes compare sentence vectors, so they need
                     // a store that embeds.
                     .patterns = .{
@@ -1819,6 +1915,35 @@ pub const Runtime = struct {
         return stringifyAlloc(allocator, response);
     }
 
+    fn memorySummariesRun(self: *Runtime, allocator: std.mem.Allocator, id: ?[]const u8, params: *const ObjectMap) ![]u8 {
+        const owner = stringField(params, "owner") orelse "summary-runner";
+        const requested_limit = integerField(params, "limit") orelse 100000;
+        if (requested_limit < 1) {
+            return errorResponse(allocator, id, "invalid_request", "limit must be positive");
+        }
+        if (!extractProviderUsable(self.options.extract_provider)) {
+            return errorResponse(allocator, id, "provider_error", "no extract provider configured; set --extract-provider or --llm-provider");
+        }
+        const result = try self.runSummaryJobs(allocator, owner, @intCast(requested_limit));
+        const response = .{
+            .jsonrpc = "2.0",
+            .id = id,
+            .result = .{
+                .leasedCount = result.leasedCount,
+                .succeededCount = result.succeededCount,
+                .failedCount = result.failedCount,
+                .lastError = result.lastError,
+                .provider = self.options.extract_provider.name,
+                .model = self.options.extract_provider.model,
+                .promptVersion = summaries.prompt_version,
+                .calls = result.calls,
+                .scopes = result.scopes,
+                .counts = result.counts,
+            },
+        };
+        return stringifyAlloc(allocator, response);
+    }
+
     fn memoryInspect(self: *Runtime, allocator: std.mem.Allocator, id: ?[]const u8, params: *const ObjectMap) ![]u8 {
         const qid = stringField(params, "qid") orelse {
             return errorResponse(allocator, id, "invalid_request", "qid is required");
@@ -1895,6 +2020,7 @@ pub const Runtime = struct {
         defer pattern_arena_state.deinit();
         const pattern_arena = pattern_arena_state.allocator();
         var pattern_scopes: std.StringArrayHashMapUnmanaged(Scope) = .empty;
+        var summary_scopes: std.StringArrayHashMapUnmanaged(Scope) = .empty;
 
         const root_action: []const u8 = if (dry_run)
             if (std.mem.eql(u8, mode, "redact")) "would_redact" else "would_delete"
@@ -1953,11 +2079,18 @@ pub const Runtime = struct {
                             try pattern_scopes.put(pattern_arena, try scopeKey(pattern_arena, pattern_scope), pattern_scope);
                         }
                     }
+                    if (std.mem.eql(u8, dependent.type, "summary")) {
+                        if (try self.store.getNode(pattern_arena, dependent.qid)) |summary_node| {
+                            const summary_scope = try scopeOfNode(pattern_arena, summary_node);
+                            try summary_scopes.put(pattern_arena, try scopeKey(pattern_arena, summary_scope), summary_scope);
+                        }
+                    }
                     try self.tombstoneQid(allocator, dependent.qid, reason, "hard_delete");
                 }
             }
         }
         for (pattern_scopes.values()) |pattern_scope| try self.queuePatternJob(allocator, pattern_scope);
+        for (summary_scopes.values()) |summary_scope| try self.queueSummaryJob(allocator, summary_scope);
         summaries_contaminated = contaminated_core_qids.items.items.len;
         if (!dry_run and propagate) {
             for (contaminated_core_qids.items.items) |core_qid| {
@@ -3962,7 +4095,7 @@ pub const Runtime = struct {
         var result = ExtractJobRunResult{};
         if (try self.finishBackgroundWork(allocator)) |finished| switch (finished) {
             .extract => |extracted| result = extracted,
-            .consolidate, .patterns => {},
+            .consolidate, .patterns, .summaries => {},
         };
         const worker_kind = streams.workerKindForStream(streams.extract_requested);
         const materialized = try jobs.materializeStream(allocator, self.store, streams.extract_requested, worker_kind, .{ .limit = limit });
@@ -4182,6 +4315,9 @@ pub const Runtime = struct {
         // Pattern nodes are built from what was written, not from the claims
         // drawn from it, so new messages are reason enough.
         if (task.sources.items.len > 0) try self.queuePatternJob(allocator, task.scope);
+        // Summaries rest on the claims and on the messages themselves: a
+        // session with nothing to extract still has something to say.
+        if (task.sources.items.len > 0) try self.queueSummaryJob(allocator, task.scope);
         return written;
     }
 
@@ -4309,7 +4445,7 @@ pub const Runtime = struct {
         var result = ConsolidateJobRunResult{};
         if (try self.finishBackgroundWork(allocator)) |finished| switch (finished) {
             .consolidate => |consolidated| result = consolidated,
-            .extract, .patterns => {},
+            .extract, .patterns, .summaries => {},
         };
         _ = try jobs.reclaimExpiredLeases(allocator, self.store, self.nowMs());
         const leases = try jobs.leasePendingJobs(allocator, self.store, .{
@@ -4637,7 +4773,7 @@ pub const Runtime = struct {
         var result = PatternJobRunResult{};
         if (try self.finishBackgroundWork(allocator)) |finished| switch (finished) {
             .patterns => |built| result = built,
-            .extract, .consolidate => {},
+            .extract, .consolidate, .summaries => {},
         };
         _ = try jobs.reclaimExpiredLeases(allocator, self.store, self.nowMs());
         // A pass that only indexed part of a backlog queues the next one;
@@ -5133,6 +5269,601 @@ pub const Runtime = struct {
             else => return false,
         }
         try self.store.putNode(.{ .qid = qid, .label = "Pattern", .properties_json = try stringifyAlloc(arena, value) });
+        return true;
+    }
+
+    /// Queues a rebuild of the summaries of `scope`: after extraction wrote
+    /// claims from new messages, and after a forget removed some. Jobs for
+    /// one scope are settled together, and a rebuild that finds every summary
+    /// up to date makes no provider call. Nothing is queued on a store
+    /// without embeddings, which cannot compare claims.
+    fn queueSummaryJob(self: *Runtime, allocator: std.mem.Allocator, scope: Scope) !void {
+        if (!self.store.capabilities().vector) return;
+        const payload = try stringifyAlloc(allocator, .{
+            .method = "memory.summary.requested",
+            .scope = scope.json(),
+        });
+        defer allocator.free(payload);
+        const event = try self.publishEvent(streams.summary_requested, payload);
+        _ = try jobs.materializeStream(allocator, self.store, streams.summary_requested, streams.workerKindForStream(streams.summary_requested), .{
+            .after_sequence = if (event.sequence > 0) event.sequence - 1 else 0,
+            .limit = 1,
+        });
+        self.background_dirty = true;
+    }
+
+    /// Runs pending `summary` jobs. Each brings the `Summary` nodes of one
+    /// scope up to date (see `summaries.zig`): one per session, saying what
+    /// the conversation was about, and one per topic, a group of claims
+    /// about the same thing with a title and what happened over time.
+    /// Retrieval reads these first and descends from them to claims and raw
+    /// messages. A summary is asked for only when what it rests on changed.
+    /// Every node is evidenced by the messages it was built from, so
+    /// forgetting one of them removes it and queues a rebuild from what is
+    /// left.
+    pub fn runSummaryJobs(self: *Runtime, allocator: std.mem.Allocator, owner: []const u8, limit: usize) !SummaryJobRunResult {
+        if (!extractProviderUsable(self.options.extract_provider)) return error.ProviderUnavailable;
+        var result = SummaryJobRunResult{};
+        if (try self.finishBackgroundWork(allocator)) |finished| switch (finished) {
+            .summaries => |built| result = built,
+            .extract, .consolidate, .patterns => {},
+        };
+        _ = try jobs.reclaimExpiredLeases(allocator, self.store, self.nowMs());
+        // A pass that only embedded part of a backlog of claims queues the
+        // next one; the caller asked for the work to be done, so run those.
+        result.continued = true;
+        while (result.continued) try self.runSummaryPass(allocator, owner, limit, &result);
+        return result;
+    }
+
+    /// Leases the pending summary jobs and settles them. `result.continued`
+    /// says whether the pass queued another.
+    fn runSummaryPass(self: *Runtime, allocator: std.mem.Allocator, owner: []const u8, limit: usize, result: *SummaryJobRunResult) !void {
+        result.continued = false;
+        const leases = try jobs.leasePendingJobs(allocator, self.store, .{
+            .worker_kind = streams.workerKindForStream(streams.summary_requested),
+            .owner = owner,
+            .now_ms = self.nowMs(),
+            .ttl_ms = summary_lease_ttl_ms,
+            .limit = limit,
+        });
+        defer jobs.freeLeaseResults(allocator, leases);
+        result.leasedCount += leases.len;
+        if (leases.len == 0) return;
+        // Jobs a failed write did not settle go back to pending.
+        errdefer for (leases) |lease| jobs.releaseLease(allocator, self.store, lease.qid) catch {};
+
+        const tasks = try self.prepareSummaryTasks(allocator, leases);
+        defer freeSummaryTasks(allocator, tasks);
+        for (tasks) |*task| callSummaryTask(task, self.options.io, self.options.extract_provider);
+        try self.applySummaryTasks(allocator, tasks, result);
+    }
+
+    fn startBackgroundSummaries(self: *Runtime, allocator: std.mem.Allocator, io: std.Io) !bool {
+        const leases = try jobs.leasePendingJobs(allocator, self.store, .{
+            .worker_kind = streams.workerKindForStream(streams.summary_requested),
+            .owner = background_owner,
+            .now_ms = self.nowMs(),
+            .ttl_ms = summary_lease_ttl_ms,
+            .limit = summary_lease_limit,
+        });
+        if (leases.len == 0) {
+            jobs.freeLeaseResults(allocator, leases);
+            return false;
+        }
+        errdefer {
+            for (leases) |lease| jobs.releaseLease(allocator, self.store, lease.qid) catch {};
+            jobs.freeLeaseResults(allocator, leases);
+        }
+        const tasks = try self.prepareSummaryTasks(allocator, leases);
+        errdefer freeSummaryTasks(allocator, tasks);
+
+        const batch = try allocator.create(BackgroundBatch);
+        batch.* = .{
+            .allocator = allocator,
+            .leases = leases,
+            .summary_tasks = tasks,
+            .remaining = .init(tasks.len),
+            .notify = self.background_notify,
+        };
+        self.background = batch;
+        const endpoint = self.options.extract_provider;
+        for (tasks) |*task| {
+            batch.group.concurrent(io, backgroundSummaryCall, .{ batch, task, io, endpoint }) catch
+                backgroundSummaryCall(batch, task, io, endpoint);
+        }
+        return true;
+    }
+
+    /// One task per scope the leased jobs ask for, each loaded with what its
+    /// stale summaries are asked from. A task that cannot be prepared
+    /// carries its failure and makes no provider call.
+    fn prepareSummaryTasks(self: *Runtime, allocator: std.mem.Allocator, leases: []const jobs.LeaseResult) ![]SummaryTask {
+        var tasks = std.ArrayList(SummaryTask).empty;
+        errdefer {
+            for (tasks.items) |*task| task.deinit();
+            tasks.deinit(allocator);
+        }
+        var scratch_state = std.heap.ArenaAllocator.init(allocator);
+        defer scratch_state.deinit();
+        const scratch = scratch_state.allocator();
+        for (leases) |lease| {
+            var failure: ?anyerror = null;
+            const scope = self.patternJobScope(scratch, lease) catch |err| blk: {
+                if (err == error.OutOfMemory) return err;
+                failure = err;
+                break :blk Scope{};
+            };
+            const key = try scopeKey(scratch, scope);
+            var existing: ?*SummaryTask = null;
+            if (failure == null) {
+                for (tasks.items) |*task| {
+                    if (task.failure == null and std.mem.eql(u8, task.scope_key, key)) existing = task;
+                }
+            }
+            const task = existing orelse blk: {
+                try tasks.append(allocator, SummaryTask.init(allocator));
+                const created = &tasks.items[tasks.items.len - 1];
+                const arena = created.arena_state.allocator();
+                created.scope_key = try arena.dupe(u8, key);
+                created.scope = try dupeScope(arena, scope);
+                created.failure = failure;
+                break :blk created;
+            };
+            try task.leases.append(task.arena_state.allocator(), lease);
+        }
+        const owned = try tasks.toOwnedSlice(allocator);
+        errdefer freeSummaryTasks(allocator, owned);
+        for (owned) |*task| {
+            if (task.failure != null) continue;
+            self.prepareSummaryTask(task) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                task.failure = err;
+            };
+        }
+        return owned;
+    }
+
+    fn prepareSummaryTask(self: *Runtime, task: *SummaryTask) !void {
+        if (!self.store.capabilities().vector) {
+            task.skipped = "no_embeddings";
+            return;
+        }
+        const arena = task.arena_state.allocator();
+        var stored = std.ArrayList(SummaryNodeState).empty;
+        {
+            var iterator = self.store.iterateNodes(arena, .{
+                .label = "Summary",
+                .where = try scopeWhere(arena, task.scope, &.{.{ .name = "state", .value = "current" }}),
+            });
+            defer iterator.deinit();
+            while (try iterator.next()) |qid| {
+                const node = (try self.store.getNode(arena, qid)) orelse continue;
+                const state = (try parseSummaryNode(arena, node)) orelse continue;
+                if (std.mem.eql(u8, state.scope_key, task.scope_key)) try stored.append(arena, state);
+            }
+        }
+        var works = std.ArrayList(SummaryWork).empty;
+        errdefer for (works.items) |*work| work.arena_state.deinit();
+        var retired = std.ArrayList([]const u8).empty;
+        try self.planSessionSummaries(task, stored.items, &works, &retired);
+        try self.planTopicSummaries(task, stored.items, &works, &retired);
+        task.works = works.items;
+        task.retired = retired.items;
+    }
+
+    /// Lines up every session of the scope with its stored summary and asks
+    /// for the ones that are missing or rest on other messages than the
+    /// session has now.
+    fn planSessionSummaries(
+        self: *Runtime,
+        task: *SummaryTask,
+        stored: []SummaryNodeState,
+        works: *std.ArrayList(SummaryWork),
+        retired: *std.ArrayList([]const u8),
+    ) !void {
+        const arena = task.arena_state.allocator();
+        var sessions: std.StringArrayHashMapUnmanaged(std.ArrayList(SummaryMessage)) = .empty;
+        {
+            var iterator = self.store.iterateNodes(arena, .{ .label = "Message", .where = try scopeWhere(arena, task.scope, &.{}) });
+            defer iterator.deinit();
+            while (try iterator.next()) |qid| {
+                const source = (try self.loadExtractSource(arena, qid)) orelse continue;
+                const session_qid = source.session_qid orelse continue;
+                const slot = try sessions.getOrPut(arena, session_qid);
+                if (!slot.found_existing) slot.value_ptr.* = .empty;
+                try slot.value_ptr.append(arena, .{
+                    .qid = source.message_qid,
+                    .role = source.role,
+                    .content = source.content,
+                    .created_at = source.created_at,
+                    .index = source.message_index orelse 0,
+                    .session_id = source.session_id,
+                });
+            }
+        }
+        task.counts.sessions = sessions.count();
+        for (sessions.keys(), sessions.values()) |session_qid, *list| {
+            const messages = list.items;
+            std.mem.sort(SummaryMessage, messages, {}, SummaryMessage.before);
+            const qids = try arena.alloc([]const u8, messages.len);
+            for (messages, qids) |message, *slot| slot.* = message.qid;
+            const source_key = try summaries.memberKey(arena, qids);
+            var node: ?*SummaryNodeState = null;
+            for (stored) |*state| {
+                if (state.kind != .session or state.taken) continue;
+                if (std.mem.eql(u8, state.session_qid orelse "", session_qid)) node = state;
+            }
+            if (node) |found| {
+                found.taken = true;
+                if (std.mem.eql(u8, found.source_key, source_key)) {
+                    task.counts.unchanged += 1;
+                    continue;
+                }
+            }
+            const lines = try arena.alloc(summaries.SessionLine, messages.len);
+            for (messages, lines) |message, *line| {
+                line.* = .{ .role = message.role, .content = message.content, .speaker = isSpeakerRole(message.role) };
+            }
+            try works.ensureUnusedCapacity(arena, 1);
+            works.appendAssumeCapacity(.{
+                .arena_state = std.heap.ArenaAllocator.init(task.arena_state.child_allocator),
+                .kind = .session,
+                .qid = if (node) |found| found.qid else null,
+                .content = try summaries.buildSessionContent(arena, lines),
+                .source_key = source_key,
+                .sources = qids,
+                .messages = qids,
+                .session_qid = session_qid,
+                .session_id = messages[0].session_id,
+                .first_said = messages[0].created_at,
+                .last_said = messages[messages.len - 1].created_at,
+            });
+            task.counts.sessionsAsked += 1;
+        }
+        // A session with no message left has nothing to summarise.
+        for (stored) |state| {
+            if (state.kind == .session and !state.taken) try retired.append(arena, state.qid);
+        }
+    }
+
+    /// Groups the scope's claims and asks for a topic summary of every group
+    /// that has none saying what it holds now. Claims without a stored
+    /// vector are embedded first, `summary_index_limit` a pass; until all
+    /// are, nothing is grouped.
+    fn planTopicSummaries(
+        self: *Runtime,
+        task: *SummaryTask,
+        stored: []SummaryNodeState,
+        works: *std.ArrayList(SummaryWork),
+        retired: *std.ArrayList([]const u8),
+    ) !void {
+        const arena = task.arena_state.allocator();
+        const embedding_model = self.store.capabilities().embedding_model;
+        var claims = std.ArrayList(SummaryClaim).empty;
+        var pending = std.ArrayList(usize).empty;
+        {
+            var iterator = self.store.iterateNodes(arena, .{ .label = "Assertion", .where = try scopeWhere(arena, task.scope, &.{}) });
+            defer iterator.deinit();
+            while (try iterator.next()) |qid| {
+                const node = (try self.store.getNode(arena, qid)) orelse continue;
+                var claim = (try parseSummaryClaim(arena, node)) orelse continue;
+                if (claim.vector.len > 0 and !sameEmbeddingModel(claim.vector_model, embedding_model)) claim.vector = &.{};
+                if (claim.vector.len == 0) try pending.append(arena, claims.items.len);
+                try claims.append(arena, claim);
+            }
+        }
+        if (pending.items.len > 0) {
+            const now = pending.items[0..@min(pending.items.len, summary_index_limit)];
+            if (!try self.indexSummaryClaims(task, claims.items, now)) return;
+            if (now.len < pending.items.len) {
+                task.unindexed = pending.items.len - now.len;
+                return;
+            }
+        }
+        std.mem.sort(SummaryClaim, claims.items, {}, SummaryClaim.before);
+        // With more claims than can be compared, the newest are kept. The
+        // newest claim also says which vector size is current.
+        const all = claims.items;
+        if (all.len == 0) {
+            for (stored) |state| {
+                if (state.kind == .topic) try retired.append(arena, state.qid);
+            }
+            return;
+        }
+        const dims = all[all.len - 1].vector.len;
+        var kept = std.ArrayList(SummaryClaim).empty;
+        var first: usize = all.len;
+        while (first > 0 and kept.items.len < summaries.max_claims) : (first -= 1) {
+            if (all[first - 1].vector.len == dims) try kept.append(arena, all[first - 1]);
+        }
+        std.mem.reverse(SummaryClaim, kept.items);
+        const compared = kept.items;
+        task.counts.claims = compared.len;
+        const vectors = try arena.alloc(i8, dims * compared.len);
+        for (compared, 0..) |claim, index| @memcpy(vectors[index * dims ..][0..dims], claim.vector);
+
+        const groups = try summaries.gather(arena, vectors, dims, compared.len, summaries.link_threshold);
+        for (groups) |group| {
+            if (group.len < summaries.min_topic_claims) continue;
+            task.counts.groups += 1;
+            const qids = try arena.alloc([]const u8, group.len);
+            var message_qids = std.ArrayList([]const u8).empty;
+            const lines = try arena.alloc(summaries.TopicLine, group.len);
+            for (group, qids, lines) |member, *qid, *line| {
+                const claim = compared[member];
+                qid.* = claim.qid;
+                line.* = .{ .said = fact_updates.dayOf(claim.created_at), .text = claim.text };
+                const seen = for (message_qids.items) |message_qid| {
+                    if (std.mem.eql(u8, message_qid, claim.message_qid)) break true;
+                } else false;
+                if (!seen) try message_qids.append(arena, claim.message_qid);
+            }
+            const source_key = try summaries.memberKey(arena, qids);
+            const node = matchTopicNode(stored, qids);
+            if (node) |found| {
+                found.taken = true;
+                if (std.mem.eql(u8, found.source_key, source_key)) {
+                    task.counts.unchanged += 1;
+                    continue;
+                }
+            }
+            try works.ensureUnusedCapacity(arena, 1);
+            works.appendAssumeCapacity(.{
+                .arena_state = std.heap.ArenaAllocator.init(task.arena_state.child_allocator),
+                .kind = .topic,
+                .qid = if (node) |found| found.qid else null,
+                .content = try summaries.buildTopicContent(arena, lines),
+                .source_key = source_key,
+                .sources = qids,
+                .messages = message_qids.items,
+                .first_said = compared[group[0]].created_at,
+                .last_said = compared[group[group.len - 1]].created_at,
+            });
+            task.counts.topicsAsked += 1;
+        }
+        for (stored) |state| {
+            if (state.kind == .topic and !state.taken) try retired.append(arena, state.qid);
+        }
+    }
+
+    /// Embeds the listed claims in batched requests and stores each vector
+    /// on its `Assertion` node, cut and scaled as sentence vectors are
+    /// (`patterns.quantize`). The text embedded is the one the store indexes
+    /// the claim by, so rewriting the node costs no second request. Returns
+    /// false when the store cannot embed.
+    fn indexSummaryClaims(self: *Runtime, task: *SummaryTask, claims: []SummaryClaim, indexes: []const usize) !bool {
+        const arena = task.arena_state.allocator();
+        const scratch = task.arena_state.child_allocator;
+        const texts = try arena.alloc([]const u8, indexes.len);
+        for (indexes, texts) |index, *text| text.* = claims[index].index_text;
+        self.store.prefetchEmbeddings(texts) catch {};
+        defer self.store.clearPrefetchedEmbeddings();
+        const model = self.store.capabilities().embedding_model;
+        for (indexes) |index| {
+            const claim = &claims[index];
+            const vector = self.store.embedText(scratch, claim.index_text) catch |err| switch (err) {
+                error.Unsupported => {
+                    task.skipped = "no_embeddings";
+                    return false;
+                },
+                error.OutOfMemory => return err,
+                else => {
+                    task.unanswered = true;
+                    return err;
+                },
+            };
+            defer scratch.free(vector);
+            const dims = patterns.storedDims(vector.len);
+            if (dims == 0) return error.EmbeddingDimensionMismatch;
+            const quantized = try arena.alloc(i8, dims);
+            patterns.quantize(vector, quantized);
+            claim.vector = quantized;
+
+            var value = try std.json.parseFromSliceLeaky(Value, arena, claim.properties_json, .{ .allocate = .alloc_always });
+            switch (value) {
+                .object => |*object| {
+                    try object.put(arena, "vector", .{ .string = try patterns.encodeVectors(arena, quantized) });
+                    try object.put(arena, "vectorModel", if (model) |name| .{ .string = name } else .null);
+                },
+                else => continue,
+            }
+            try self.store.putNode(.{ .qid = claim.qid, .label = "Assertion", .properties_json = try stringifyAlloc(arena, value) });
+            task.counts.claimsIndexed += 1;
+        }
+        return true;
+    }
+
+    /// The storage half of a summary batch: writes every summary the model
+    /// answered for, retires the topic nodes whose group is gone, and
+    /// settles the jobs. A summary whose call failed is asked for again by
+    /// the job that carries the failure.
+    fn applySummaryTasks(self: *Runtime, allocator: std.mem.Allocator, tasks: []SummaryTask, result: *SummaryJobRunResult) !void {
+        for (tasks) |*task| {
+            const arena = task.arena_state.allocator();
+            result.calls += task.calls;
+            var failure: ?anyerror = task.failure;
+            if (task.failure == null and task.skipped == null) {
+                // A summary is found by its vector, so none is stored
+                // without one. When the embedding provider does not answer,
+                // the jobs go back unspent and are run again later.
+                self.embedSummaryTexts(task) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                    for (task.leases.items) |lease| try jobs.releaseLease(allocator, self.store, lease.qid);
+                    result.failedCount += 1;
+                    result.lastError = @errorName(err);
+                    result.unembedded = true;
+                    result.scopes += 1;
+                    continue;
+                };
+                for (task.works) |*work| {
+                    if (work.failure) |err| failure = err;
+                    if (work.malformed) task.counts.malformed += 1;
+                    if (work.named == null) continue;
+                    if (!try self.writeSummaryNode(task, work)) continue;
+                    const declined = work.named.?.title == null;
+                    switch (work.kind) {
+                        .session => task.counts.sessionsWritten += 1,
+                        .topic => if (declined) {
+                            task.counts.topicsDeclined += 1;
+                        } else {
+                            task.counts.topicsWritten += 1;
+                        },
+                    }
+                }
+                for (task.retired) |qid| {
+                    if (try self.retireSummary(arena, qid)) task.counts.retired += 1;
+                }
+            }
+
+            const summary = .{
+                .promptVersion = summaries.prompt_version,
+                .provider = self.options.extract_provider.name,
+                .model = self.options.extract_provider.model,
+                .calls = task.calls,
+                .skipped = task.skipped,
+                .coalescedJobs = task.leases.items.len,
+                .counts = task.counts,
+            };
+            const result_json = try stringifyAlloc(arena, summary);
+            for (task.leases.items, 0..) |lease, position| {
+                // One job carries a failure back to pending; the others
+                // asked for the same rebuild and are done with it.
+                if (failure != null and position == 0) {
+                    const error_json = try stringifyAlloc(arena, .{ .@"error" = @errorName(failure.?), .calls = task.calls });
+                    _ = jobs.failJob(allocator, self.store, lease.qid, error_json, self.nowMs()) catch {};
+                    continue;
+                }
+                try jobs.completeJobWithResult(allocator, self.store, lease.qid, self.nowMs(), result_json);
+            }
+            if (failure) |err| {
+                result.failedCount += 1;
+                result.succeededCount += task.leases.items.len - 1;
+                result.lastError = @errorName(err);
+            } else {
+                result.succeededCount += task.leases.items.len;
+            }
+            // The rest of a backlog of claims is embedded by the next pass.
+            if (failure == null and task.unindexed > 0) {
+                try self.queueSummaryJob(allocator, task.scope);
+                result.continued = true;
+            }
+            const event_payload = try stringifyAlloc(arena, .{
+                .method = "memory.summary.completed",
+                .jobQid = task.leases.items[0].qid,
+                .scope = task.scope.json(),
+                .failed = failure != null,
+                .result = summary,
+            });
+            _ = try self.publishEvent(streams.summary_completed, event_payload);
+            result.scopes += 1;
+            result.counts.add(task.counts);
+        }
+    }
+
+    /// Embeds what every answered summary of the task says, in one batched
+    /// request, and keeps each vector on its work, cut and scaled as
+    /// sentence vectors are (`patterns.quantize`).
+    fn embedSummaryTexts(self: *Runtime, task: *SummaryTask) !void {
+        const arena = task.arena_state.allocator();
+        const scratch = task.arena_state.child_allocator;
+        var texts = std.ArrayList([]const u8).empty;
+        for (task.works) |*work| {
+            const named = work.named orelse continue;
+            if (named.title == null) continue;
+            work.text = try summaries.textOf(arena, named);
+            try texts.append(arena, work.text);
+        }
+        if (texts.items.len == 0) return;
+        self.store.prefetchEmbeddings(texts.items) catch {};
+        defer self.store.clearPrefetchedEmbeddings();
+        for (task.works) |*work| {
+            if (work.text.len == 0) continue;
+            const embedded = try self.store.embedText(scratch, work.text);
+            defer scratch.free(embedded);
+            const quantized = try arena.alloc(i8, patterns.storedDims(embedded.len));
+            patterns.quantize(embedded, quantized);
+            work.vector = quantized;
+        }
+    }
+
+    /// Stores one summary node and its edges. Returns false, and writes
+    /// nothing, when something it rests on was forgotten while the provider
+    /// calls ran: the forget queued a rebuild.
+    fn writeSummaryNode(self: *Runtime, task: *SummaryTask, work: *const SummaryWork) !bool {
+        const arena = task.arena_state.allocator();
+        for (work.sources) |qid| {
+            if (!try self.nodeIsLive(arena, qid)) return false;
+        }
+        for (work.messages) |qid| {
+            if (!try self.nodeIsLive(arena, qid)) return false;
+        }
+        // The node may have been forgotten while the calls were out. Its
+        // tombstone stays; the forget queued the rebuild.
+        if (work.qid) |qid| {
+            if (!try self.nodeIsLive(arena, qid)) return false;
+        }
+        const named = work.named.?;
+        const declined = named.title == null;
+        const vector: ?[]const u8 = if (work.vector.len > 0) try patterns.encodeVectors(arena, work.vector) else null;
+        const qid = work.qid orelse try self.nextQid(arena, "sum");
+        const props = try stringifyAlloc(arena, .{
+            .kind = "summary",
+            .qtype = "summary",
+            .summaryType = @tagName(work.kind),
+            .text = work.text,
+            .title = named.title,
+            .summary = named.summary,
+            // The model found nothing to name; kept so it is not asked again.
+            .declined = declined,
+            .sourceKey = work.source_key,
+            .sourceCount = work.sources.len,
+            .members = if (work.kind == .topic) work.sources else null,
+            .sessionQid = work.session_qid,
+            .sessionId = work.session_id,
+            .firstSaid = work.first_said,
+            .lastSaid = work.last_said,
+            .createdAt = work.first_said,
+            .vector = vector,
+            .vectorModel = self.store.capabilities().embedding_model,
+            .dims = work.vector.len,
+            .evidenceQid = work.messages[0],
+            .scopeKey = task.scope_key,
+            .tenantId = task.scope.tenant_id,
+            .userId = task.scope.user_id,
+            .agentId = task.scope.agent_id,
+            .projectId = task.scope.project_id,
+            .summarizerProvider = self.options.extract_provider.name,
+            .summarizerModel = self.options.extract_provider.model,
+            .promptVersion = summaries.prompt_version,
+            .jobQid = task.leases.items[0].qid,
+            .state = "current",
+            .searchable = false,
+            .deleted = false,
+        });
+        try self.store.putNode(.{ .qid = qid, .label = "Summary", .properties_json = props });
+        switch (work.kind) {
+            .session => try self.putDeterministicEdge(arena, qid, work.session_qid.?, "SUMMARIZES"),
+            .topic => for (work.sources) |claim_qid| try self.putDeterministicEdge(arena, qid, claim_qid, "DERIVED_FROM"),
+        }
+        for (work.messages) |message_qid| try self.putDeterministicEdge(arena, qid, message_qid, "EVIDENCED_BY");
+        return true;
+    }
+
+    /// Retires a summary node that nothing stands behind any more: a topic
+    /// whose claims now belong to other groups, or a session left without
+    /// messages.
+    fn retireSummary(self: *Runtime, arena: std.mem.Allocator, qid: []const u8) !bool {
+        const node = (try self.store.getNode(arena, qid)) orelse return false;
+        var value = try std.json.parseFromSliceLeaky(Value, arena, node.properties_json, .{ .allocate = .alloc_always });
+        switch (value) {
+            .object => |*object| {
+                if (boolField(object, "deleted") orelse false) return false;
+                try object.put(arena, "state", .{ .string = "superseded" });
+            },
+            else => return false,
+        }
+        try self.store.putNode(.{ .qid = qid, .label = "Summary", .properties_json = try stringifyAlloc(arena, value) });
         return true;
     }
 
@@ -5814,6 +6545,299 @@ const PatternEntry = struct {
 /// Where a sentence of the pass sits: its message, its place among that
 /// message's sentences, and its place among its occasion's.
 const PatternSentenceRef = struct { message: u32, index: u32, at: u32 };
+
+const SummaryKind = enum { session, topic };
+
+/// A stored, current summary node: what a pass needs to tell whether it
+/// still says what its sources say.
+const SummaryNodeState = struct {
+    qid: []const u8,
+    kind: SummaryKind,
+    scope_key: []const u8 = "",
+    source_key: []const u8 = "",
+    session_qid: ?[]const u8 = null,
+    /// A topic's claims.
+    members: []const []const u8 = &.{},
+    /// A group or session of this pass has claimed the node.
+    taken: bool = false,
+};
+
+/// Reads a live, current summary node; null for anything else.
+fn parseSummaryNode(arena: std.mem.Allocator, node: storage.Node) !?SummaryNodeState {
+    if (!std.mem.eql(u8, node.label, "Summary")) return null;
+    const value = std.json.parseFromSliceLeaky(Value, arena, node.properties_json, .{}) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return null;
+    };
+    const props = objectValue(value) orelse return null;
+    if (boolField(&props, "deleted") orelse false) return null;
+    if (!std.mem.eql(u8, stringField(&props, "state") orelse "", "current")) return null;
+    const kind = std.meta.stringToEnum(SummaryKind, stringField(&props, "summaryType") orelse "") orelse return null;
+    var members = std.ArrayList([]const u8).empty;
+    if (arrayValue(props.get("members"))) |wire| {
+        for (wire.items) |member| try members.append(arena, stringValue(member) orelse return null);
+    }
+    return .{
+        .qid = node.qid,
+        .kind = kind,
+        .scope_key = stringField(&props, "scopeKey") orelse "",
+        .source_key = stringField(&props, "sourceKey") orelse "",
+        .session_qid = optionalStringField(&props, "sessionQid"),
+        .members = members.items,
+    };
+}
+
+/// The stored topic node most of whose claims are in the group, if any is
+/// still free: at least half of them, so a node follows its group as the
+/// group grows or absorbs another.
+fn matchTopicNode(nodes: []SummaryNodeState, group: []const []const u8) ?*SummaryNodeState {
+    var best: ?*SummaryNodeState = null;
+    var best_common: usize = 0;
+    for (nodes) |*node| {
+        if (node.kind != .topic or node.taken or node.members.len == 0) continue;
+        var common: usize = 0;
+        for (node.members) |member| {
+            for (group) |qid| {
+                if (std.mem.eql(u8, member, qid)) {
+                    common += 1;
+                    break;
+                }
+            }
+        }
+        if (common * 2 < node.members.len or common <= best_common) continue;
+        best = node;
+        best_common = common;
+    }
+    return best;
+}
+
+/// One message of a session, for its summary.
+const SummaryMessage = struct {
+    qid: []const u8,
+    role: []const u8,
+    content: []const u8,
+    created_at: ?[]const u8,
+    index: i64,
+    session_id: ?[]const u8,
+
+    fn before(_: void, left: SummaryMessage, right: SummaryMessage) bool {
+        switch (std.mem.order(u8, left.created_at orelse "", right.created_at orelse "")) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+        if (left.index != right.index) return left.index < right.index;
+        return std.mem.order(u8, left.qid, right.qid) == .lt;
+    }
+};
+
+/// One claim as the summary job sees it.
+const SummaryClaim = struct {
+    qid: []const u8,
+    text: []const u8,
+    /// What the store indexes the claim by: the words it was said in.
+    index_text: []const u8,
+    created_at: ?[]const u8,
+    message_qid: []const u8,
+    /// Empty until the claim has been embedded.
+    vector: []const i8 = &.{},
+    vector_model: ?[]const u8 = null,
+    properties_json: []const u8,
+
+    fn before(_: void, left: SummaryClaim, right: SummaryClaim) bool {
+        switch (std.mem.order(u8, left.created_at orelse "", right.created_at orelse "")) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+        switch (std.mem.order(u8, left.message_qid, right.message_qid)) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+        return std.mem.order(u8, left.qid, right.qid) == .lt;
+    }
+};
+
+/// Reads a live claim; null for anything else or a claim with no text.
+fn parseSummaryClaim(arena: std.mem.Allocator, node: storage.Node) !?SummaryClaim {
+    if (!std.mem.eql(u8, node.label, "Assertion")) return null;
+    const value = std.json.parseFromSliceLeaky(Value, arena, node.properties_json, .{}) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return null;
+    };
+    const props = objectValue(value) orelse return null;
+    if (boolField(&props, "deleted") orelse false) return null;
+    const text = stringField(&props, "text") orelse return null;
+    if (std.mem.trim(u8, text, " \t\r\n").len == 0) return null;
+    const message_qid = stringField(&props, "sourceMessageQid") orelse return null;
+    const index_text = blk: {
+        const search_text = stringField(&props, "searchText") orelse break :blk text;
+        break :blk if (std.mem.trim(u8, search_text, " \t\r\n").len == 0) text else search_text;
+    };
+    var claim = SummaryClaim{
+        .qid = node.qid,
+        .text = text,
+        .index_text = index_text,
+        .created_at = optionalStringField(&props, "createdAt"),
+        .message_qid = message_qid,
+        .vector_model = optionalStringField(&props, "vectorModel"),
+        .properties_json = node.properties_json,
+    };
+    if (stringField(&props, "vector")) |encoded| {
+        const vector = patterns.decodeVectors(arena, encoded) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return claim;
+        };
+        if (vector.len > 0 and vector.len <= patterns.dims) claim.vector = vector;
+    }
+    return claim;
+}
+
+/// One summary a pass may write: what the model is asked, then what it
+/// said. The provider half allocates from the work's own arena.
+const SummaryWork = struct {
+    arena_state: std.heap.ArenaAllocator,
+    kind: SummaryKind,
+    /// The stored node to rewrite; null when there is none yet.
+    qid: ?[]const u8,
+    content: []const u8,
+    /// Names what the summary rests on (`summaries.memberKey`).
+    source_key: []const u8,
+    /// A session's messages, or a topic's claims.
+    sources: []const []const u8,
+    /// The messages behind it: a session's own, or those a topic's claims
+    /// were drawn from.
+    messages: []const []const u8,
+    session_qid: ?[]const u8 = null,
+    session_id: ?[]const u8 = null,
+    first_said: ?[]const u8 = null,
+    last_said: ?[]const u8 = null,
+    named: ?summaries.Named = null,
+    /// `Title: summary` and its vector, set before the node is written.
+    text: []const u8 = "",
+    vector: []const i8 = &.{},
+    calls: usize = 0,
+    /// Calls the provider replied to.
+    replies: usize = 0,
+    /// No reply could be read after a retry.
+    malformed: bool = false,
+    failure: ?anyerror = null,
+};
+
+/// One pass over the summaries of one scope, through prepare, call and
+/// write. `leases` are the jobs that asked for it.
+const SummaryTask = struct {
+    arena_state: std.heap.ArenaAllocator,
+    leases: std.ArrayList(jobs.LeaseResult) = .empty,
+    scope_key: []const u8 = "",
+    scope: Scope = .{},
+    works: []SummaryWork = &.{},
+    /// Qids of stored nodes that nothing stands behind any more.
+    retired: []const []const u8 = &.{},
+    counts: SummaryCounts = .{},
+    calls: usize = 0,
+    failure: ?anyerror = null,
+    /// No provider call of the task got a reply.
+    unanswered: bool = false,
+    /// Why the pass did nothing, when it could not run at all.
+    skipped: ?[]const u8 = null,
+    /// Claims still waiting for a vector after this pass.
+    unindexed: usize = 0,
+
+    fn init(allocator: std.mem.Allocator) SummaryTask {
+        return .{ .arena_state = std.heap.ArenaAllocator.init(allocator) };
+    }
+
+    fn deinit(self: *SummaryTask) void {
+        for (self.works) |*work| work.arena_state.deinit();
+        self.arena_state.deinit();
+    }
+};
+
+fn freeSummaryTasks(allocator: std.mem.Allocator, tasks: []SummaryTask) void {
+    for (tasks) |*task| task.deinit();
+    allocator.free(tasks);
+}
+
+/// The provider half of a summary task; touches no storage, so it may run on
+/// another thread. Up to `default_extract_concurrency` summaries are asked
+/// for at once.
+fn callSummaryTask(task: *SummaryTask, io: ?std.Io, endpoint: providers.ProviderEndpoint) void {
+    if (task.failure != null or task.skipped != null) return;
+    var start: usize = 0;
+    while (start < task.works.len) : (start += default_extract_concurrency) {
+        const part = task.works[start..@min(start + default_extract_concurrency, task.works.len)];
+        const threads = io orelse {
+            for (part) |*work| runSummaryWork(work, null, endpoint);
+            continue;
+        };
+        var group: std.Io.Group = .init;
+        for (part) |*work| {
+            if (part.len == 1) {
+                runSummaryWork(work, io, endpoint);
+                continue;
+            }
+            group.concurrent(threads, runSummaryWork, .{ work, io, endpoint }) catch runSummaryWork(work, io, endpoint);
+        }
+        group.await(threads) catch {
+            group.cancel(threads);
+            task.failure = error.Canceled;
+            return;
+        };
+    }
+    var replies: usize = 0;
+    var failure: ?anyerror = null;
+    for (task.works) |work| {
+        task.calls += work.calls;
+        replies += work.replies;
+        if (failure == null) failure = work.failure;
+    }
+    if (task.calls > 0 and replies == 0) {
+        task.unanswered = true;
+        task.failure = failure orelse error.ProviderUnavailable;
+    }
+}
+
+/// Asks for one summary: the prompt, then once more when the reply cannot be
+/// read. A call the provider does not answer is kept as the work's failure.
+fn runSummaryWork(work: *SummaryWork, io: ?std.Io, endpoint: providers.ProviderEndpoint) void {
+    const arena = work.arena_state.allocator();
+    const attempts: []const []const u8 = switch (work.kind) {
+        .session => &summaries.session_attempts,
+        .topic => &summaries.topic_attempts,
+    };
+    for (attempts) |prompt| {
+        work.calls += 1;
+        const reply = providers.completeChat(arena, io, endpoint, .{
+            .system_prompt = prompt,
+            .user_content = work.content,
+            .json_mode = true,
+        }) catch |err| {
+            work.failure = err;
+            return;
+        };
+        work.replies += 1;
+        work.named = summaries.parseNamed(arena, reply) catch |err| {
+            if (err == error.OutOfMemory) {
+                work.failure = err;
+                return;
+            }
+            continue;
+        };
+        return;
+    }
+    work.malformed = true;
+}
+
+/// One summary task of a background batch; see `backgroundCall`.
+fn backgroundSummaryCall(batch: *BackgroundBatch, task: *SummaryTask, io: std.Io, endpoint: providers.ProviderEndpoint) void {
+    const notify = batch.notify;
+    callSummaryTask(task, io, endpoint);
+    if (batch.remaining.fetchSub(1, .acq_rel) == 1) {
+        if (notify) |hook| hook.wake(hook.context);
+    }
+}
 
 /// The provider half of a pattern task; touches no storage, so it may run on
 /// another thread. Groups the sentences, then runs the calls of up to
@@ -7433,6 +8457,7 @@ fn labelType(label: []const u8) []const u8 {
     if (std.mem.eql(u8, label, "Assertion")) return "assertion";
     if (std.mem.eql(u8, label, "Update")) return "update";
     if (std.mem.eql(u8, label, "Pattern")) return "pattern";
+    if (std.mem.eql(u8, label, "Summary")) return "summary";
     if (std.mem.eql(u8, label, "Feedback")) return "raw";
     return "raw";
 }
@@ -11686,6 +12711,9 @@ const BackgroundTestExtractor = struct {
 
     fn respond(context: ?*anyopaque, allocator: std.mem.Allocator, turn: providers.ChatTurn) anyerror![]u8 {
         const self: *BackgroundTestExtractor = @ptrCast(@alignCast(context.?));
+        if (!self.down) {
+            if (try testSummaryReply(allocator, turn)) |reply| return reply;
+        }
         _ = self.calls.fetchAdd(1, .monotonic);
         while (!self.open.load(.acquire)) std.atomic.spinLoopHint();
         if (self.down) return error.ProviderHttpError;
@@ -11708,15 +12736,23 @@ const BackgroundTestExtractor = struct {
 /// Extract and consolidate jobs in `status`. Pattern jobs, which a store
 /// that embeds queues after every extraction, are counted by
 /// `countPatternJobs`.
+/// Jobs other than the rebuilds of derived nodes (pattern and summary jobs),
+/// which a store that embeds queues after every extraction.
 fn countJobs(store: storage.Adapter, status: []const u8) !usize {
-    return (try countJobsByKind(store, status, false));
+    return (try countJobsByKind(store, status, .other));
 }
 
 fn countPatternJobs(store: storage.Adapter, status: []const u8) !usize {
-    return (try countJobsByKind(store, status, true));
+    return (try countJobsByKind(store, status, .pattern));
 }
 
-fn countJobsByKind(store: storage.Adapter, status: []const u8, pattern_jobs: bool) !usize {
+fn countSummaryJobs(store: storage.Adapter, status: []const u8) !usize {
+    return (try countJobsByKind(store, status, .summary));
+}
+
+const TestJobKind = enum { other, pattern, summary };
+
+fn countJobsByKind(store: storage.Adapter, status: []const u8, wanted: TestJobKind) !usize {
     const allocator = std.testing.allocator;
     var iterator = store.iterateNodes(allocator, .{ .label = "Job", .where = &.{.{ .name = "status", .value = status }} });
     defer iterator.deinit();
@@ -11724,10 +12760,27 @@ fn countJobsByKind(store: storage.Adapter, status: []const u8, pattern_jobs: boo
     while (try iterator.next()) |qid| {
         const node = (try store.getNode(allocator, qid)).?;
         defer store.freeNode(allocator, node);
-        const is_pattern = try propertyEquals(allocator, node.properties_json, "jobType", streams.workerKindForStream(streams.pattern_requested));
-        if (is_pattern == pattern_jobs) count += 1;
+        const kind: TestJobKind = if (try propertyEquals(allocator, node.properties_json, "jobType", streams.workerKindForStream(streams.pattern_requested)))
+            .pattern
+        else if (try propertyEquals(allocator, node.properties_json, "jobType", streams.workerKindForStream(streams.summary_requested)))
+            .summary
+        else
+            .other;
+        if (kind == wanted) count += 1;
     }
     return count;
+}
+
+/// What the test models say to the summary job: a title and summary for a
+/// session or a topic, null for any other prompt.
+fn testSummaryReply(allocator: std.mem.Allocator, turn: providers.ChatTurn) !?[]u8 {
+    if (std.mem.startsWith(u8, turn.system_prompt, summaries.session_prompt)) {
+        return try allocator.dupe(u8, "{\"title\":\"A conversation\",\"summary\":\"The user told the assistant about their life.\"}");
+    }
+    if (std.mem.startsWith(u8, turn.system_prompt, summaries.topic_prompt)) {
+        return try allocator.dupe(u8, "{\"title\":\"One subject\",\"summary\":\"Facts the user stated about one subject.\"}");
+    }
+    return null;
 }
 
 fn expectExtractorState(runtime: *Runtime, state: []const u8) !void {
@@ -11782,9 +12835,15 @@ test "background work extracts between requests and memory.extract.run flushes i
     defer allocator.free(after);
     try std.testing.expect(std.mem.indexOf(u8, after, "\"type\":\"assertion\"") != null);
 
-    // A store that embeds rebuilds the scope's pattern nodes next. Two
-    // conversations are too few for a group, so the pass makes no call.
+    // A store that embeds brings the scope's summaries up to date next, one
+    // per conversation, and then rebuilds its pattern nodes. Two
+    // conversations are too few for a group, so that pass makes no call.
     if (store.capabilities().vector) {
+        try std.testing.expect(try runtime.startBackgroundWork(allocator));
+        const summarised = (try runtime.finishBackgroundWork(allocator)).?.summaries;
+        try std.testing.expectEqual(@as(usize, 2), summarised.succeededCount);
+        try std.testing.expectEqual(@as(usize, 1), summarised.scopes);
+        try std.testing.expectEqual(@as(usize, 2), summarised.counts.sessionsWritten);
         try std.testing.expect(try runtime.startBackgroundWork(allocator));
         const built = (try runtime.finishBackgroundWork(allocator)).?.patterns;
         try std.testing.expectEqual(@as(usize, 2), built.succeededCount);
@@ -11912,6 +12971,7 @@ const UpdateTestModel = struct {
 
     fn respond(context: ?*anyopaque, allocator: std.mem.Allocator, turn: providers.ChatTurn) anyerror![]u8 {
         const self: *UpdateTestModel = @ptrCast(@alignCast(context.?));
+        if (try testSummaryReply(allocator, turn)) |reply| return reply;
         if (std.mem.startsWith(u8, turn.system_prompt, fact_updates.verify_prompt)) {
             _ = self.verify_calls.fetchAdd(1, .monotonic);
             return std.fmt.allocPrint(
@@ -12210,9 +13270,15 @@ test "background work consolidates once extraction has caught up" {
     try std.testing.expectEqual(@as(usize, 1), consolidated.updatesWritten);
     try std.testing.expectEqual(@as(usize, 1), try countLiveUpdates(store, sessions.may_message));
 
-    // Pattern jobs run last, on a store that embeds. Two conversations are
-    // too few for a group, so the pass makes no call.
+    // Summary jobs and then pattern jobs run last, on a store that embeds.
+    // Two conversations are too few for a pattern group, so that pass makes
+    // no call.
     if (store.capabilities().vector) {
+        try std.testing.expectEqual(@as(usize, 2), try countSummaryJobs(store, "pending"));
+        try std.testing.expect(try runtime.startBackgroundWork(allocator));
+        const summarised = (try runtime.finishBackgroundWork(allocator)).?.summaries;
+        try std.testing.expectEqual(@as(usize, 2), summarised.leasedCount);
+        try std.testing.expectEqual(@as(usize, 2), summarised.counts.sessionsWritten);
         try std.testing.expectEqual(@as(usize, 2), try countPatternJobs(store, "pending"));
         try std.testing.expect(try runtime.startBackgroundWork(allocator));
         const built = (try runtime.finishBackgroundWork(allocator)).?.patterns;
@@ -12225,6 +13291,7 @@ test "background work consolidates once extraction has caught up" {
     try std.testing.expect(!try runtime.startBackgroundWork(allocator));
     try std.testing.expectEqual(@as(usize, 0), try countJobs(store, "pending"));
     try std.testing.expectEqual(@as(usize, 0), try countPatternJobs(store, "pending"));
+    try std.testing.expectEqual(@as(usize, 0), try countSummaryJobs(store, "pending"));
     const with_facts = try followerPrompt(&runtime, ",\"facts\":true");
     defer allocator.free(with_facts);
     try std.testing.expect(std.mem.indexOf(u8, with_facts, superseded_fact) != null);
@@ -12373,6 +13440,7 @@ const PatternTestModel = struct {
 
     fn respond(context: ?*anyopaque, allocator: std.mem.Allocator, turn: providers.ChatTurn) anyerror![]u8 {
         const self: *PatternTestModel = @ptrCast(@alignCast(context.?));
+        if (try testSummaryReply(allocator, turn)) |reply| return reply;
         if (std.mem.startsWith(u8, turn.system_prompt, patterns.gate_prompt)) {
             _ = self.gate_calls.fetchAdd(1, .monotonic);
             return allocator.dupe(u8, "{\"about\":\"Sourdough loaves\",\"type\":\"recurring\"}");
@@ -12490,6 +13558,8 @@ test "pattern jobs build a node from occasions and retrieval gives it to the que
     const health = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"system.health\",\"params\":{}}");
     defer allocator.free(health);
     try std.testing.expect(std.mem.indexOf(u8, health, "\"patterns\":\"stopped\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"summaries\":\"stopped\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, health, "\"summaries\":{\"available\":true,\"promptVersion\":\"quipu.summaries.v1\",\"model\":\"test-extract-model\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, health, "\"patterns\":{\"available\":true,\"promptVersion\":\"quipu.patterns.v1\",\"model\":\"test-extract-model\"}") != null);
 
     const first_loaf = try rememberLoaves(&runtime);
@@ -12708,7 +13778,7 @@ test "a pattern node forgotten while its calls are out is not written back" {
     try std.testing.expect(!try runtime.nodeIsLive(allocator, node_qid));
 }
 
-test "an embedding provider that is down leaves pattern jobs unspent and the worker waiting" {
+test "an embedding provider that is down leaves summary and pattern jobs unspent and the worker waiting" {
     const allocator = std.testing.allocator;
     var harness = try RuntimeTestHarness.init(allocator);
     defer harness.deinit();
@@ -12727,8 +13797,32 @@ test "an embedding provider that is down leaves pattern jobs unspent and the wor
     const queued = try countPatternJobs(runtime.store, "pending");
     try std.testing.expect(queued > 0);
 
+    const queued_summaries = try countSummaryJobs(runtime.store, "pending");
+    try std.testing.expect(queued_summaries > 0);
+
+    // Summaries go first. The chat model answers, but a summary is not
+    // stored without its vector: the jobs go back with their attempts.
     PatternTestStore.down = true;
     defer PatternTestStore.down = false;
+    try std.testing.expect(try runtime.startBackgroundWork(allocator));
+    const unembedded = (try runtime.finishBackgroundWork(allocator)).?.summaries;
+    try std.testing.expectEqual(@as(usize, 1), unembedded.failedCount);
+    try std.testing.expectEqualStrings("ProviderRequestFailed", unembedded.lastError.?);
+    try std.testing.expectEqual(queued_summaries, try countSummaryJobs(runtime.store, "pending"));
+    try std.testing.expectEqual(@as(usize, 0), try countSummaryJobs(runtime.store, "deadlettered"));
+    try std.testing.expectEqual(background_backoff_initial_ms, runtime.background_backoff_ms);
+    try std.testing.expect(!try runtime.startBackgroundWork(allocator));
+
+    // The wait over and the provider still down, the pattern jobs fare the
+    // same once the summaries are out of the way.
+    allocator.free(try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"s\",\"method\":\"memory.summaries.run\",\"params\":{}}"));
+    try std.testing.expectEqual(queued_summaries, try countSummaryJobs(runtime.store, "pending"));
+    PatternTestStore.down = false;
+    allocator.free(try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"s\",\"method\":\"memory.summaries.run\",\"params\":{}}"));
+    try std.testing.expectEqual(@as(usize, 0), try countSummaryJobs(runtime.store, "pending"));
+    PatternTestStore.down = true;
+    runtime.background_retry_at_ms = 0;
+    runtime.background_backoff_ms = 0;
     try std.testing.expect(try runtime.startBackgroundWork(allocator));
     const failed = (try runtime.finishBackgroundWork(allocator)).?.patterns;
     try std.testing.expectEqual(@as(usize, 1), failed.failedCount);
@@ -12776,6 +13870,309 @@ test "sentence indexes made by another embedding model are made again" {
     const fresh = try patternRetrieve(&runtime, "Why do some of my sourdough loaves come out flat?");
     defer allocator.free(fresh);
     try std.testing.expect(std.mem.indexOf(u8, fresh, "from 8 occasions") != null);
+}
+
+/// Extracts one claim from each of the summary tests' messages and answers
+/// the summary job. The claims about the starter share most of their words,
+/// so `PatternTestStore` puts their vectors close together.
+const SummaryTestModel = struct {
+    session_calls: usize = 0,
+    topic_calls: usize = 0,
+    /// The last topic request, and whether the model says its facts do not
+    /// belong together.
+    last_topic: ?[]u8 = null,
+    decline: bool = false,
+
+    const extract_replies = [_][2][]const u8{
+        .{ "I keep a sourdough starter", "{\"assertions\":[{\"text\":\"The user keeps a sourdough starter named Bubbles.\",\"messageIndex\":0,\"quote\":\"I keep a sourdough starter named Bubbles\"}]}" },
+        .{ "I feed", "{\"assertions\":[{\"text\":\"The user feeds the sourdough starter named Bubbles daily.\",\"messageIndex\":0,\"quote\":\"I feed Bubbles\"}]}" },
+        .{ "ferry", "{\"assertions\":[{\"text\":\"The user booked a ferry to Zanzibar for August.\",\"messageIndex\":0,\"quote\":\"I booked a ferry to Zanzibar\"}]}" },
+        .{ "I gave half", "{\"assertions\":[{\"text\":\"The user gave half of the sourdough starter named Bubbles away.\",\"messageIndex\":0,\"quote\":\"I gave half of Bubbles\"}]}" },
+    };
+
+    fn endpoint(self: *SummaryTestModel) providers.ProviderEndpoint {
+        return .{
+            .kind = .callback,
+            .name = "test-extractor",
+            .model = "test-extract-model",
+            .callback = .{ .context = self, .respond = respond },
+        };
+    }
+
+    fn respond(context: ?*anyopaque, allocator: std.mem.Allocator, turn: providers.ChatTurn) anyerror![]u8 {
+        const self: *SummaryTestModel = @ptrCast(@alignCast(context.?));
+        if (std.mem.startsWith(u8, turn.system_prompt, summaries.session_prompt)) {
+            self.session_calls += 1;
+            return allocator.dupe(u8, "{\"title\":\"A chat about the user's day\",\"summary\":\"The user mentioned something they did.\"}");
+        }
+        if (std.mem.startsWith(u8, turn.system_prompt, summaries.topic_prompt)) {
+            self.topic_calls += 1;
+            if (self.last_topic) |previous| std.testing.allocator.free(previous);
+            self.last_topic = try std.testing.allocator.dupe(u8, turn.user_content);
+            if (self.decline) return allocator.dupe(u8, "{\"title\":null,\"summary\":null}");
+            return allocator.dupe(u8, "{\"title\":\"Sourdough starter Bubbles\",\"summary\":\"The user keeps a starter named Bubbles and looks after it.\"}");
+        }
+        for (extract_replies) |pair| {
+            if (std.mem.indexOf(u8, turn.user_content, pair[0]) != null) return allocator.dupe(u8, pair[1]);
+        }
+        return allocator.dupe(u8, "{\"assertions\":[]}");
+    }
+
+    fn deinit(self: *SummaryTestModel) void {
+        if (self.last_topic) |value| std.testing.allocator.free(value);
+    }
+};
+
+/// A current summary node of the tests' scope, owned by the test allocator.
+const TestSummary = struct {
+    qid: []u8,
+    properties: std.json.Parsed(Value),
+
+    fn deinit(self: TestSummary) void {
+        std.testing.allocator.free(self.qid);
+        self.properties.deinit();
+    }
+
+    fn string(self: TestSummary, key: []const u8) []const u8 {
+        return stringValue(self.properties.value.object.get(key)) orelse "";
+    }
+};
+
+/// The current summaries of one kind, in qid order.
+fn currentSummaries(store: storage.Adapter, kind: []const u8) ![]TestSummary {
+    const allocator = std.testing.allocator;
+    var found = std.ArrayList(TestSummary).empty;
+    errdefer {
+        for (found.items) |summary| summary.deinit();
+        found.deinit(allocator);
+    }
+    var iterator = store.iterateNodes(allocator, .{ .label = "Summary", .where = &.{.{ .name = "state", .value = "current" }} });
+    defer iterator.deinit();
+    while (try iterator.next()) |qid| {
+        const node = (try store.getNode(allocator, qid)).?;
+        defer store.freeNode(allocator, node);
+        var properties = try std.json.parseFromSlice(Value, allocator, node.properties_json, .{ .allocate = .alloc_always });
+        errdefer properties.deinit();
+        if (!std.mem.eql(u8, stringValue(properties.value.object.get("summaryType")) orelse "", kind)) {
+            properties.deinit();
+            continue;
+        }
+        try found.append(allocator, .{ .qid = try allocator.dupe(u8, qid), .properties = properties });
+    }
+    std.mem.sort(TestSummary, found.items, {}, struct {
+        fn before(_: void, left: TestSummary, right: TestSummary) bool {
+            return std.mem.order(u8, left.qid, right.qid) == .lt;
+        }
+    }.before);
+    return found.toOwnedSlice(allocator);
+}
+
+fn freeSummaries(summaries_found: []TestSummary) void {
+    for (summaries_found) |summary| summary.deinit();
+    std.testing.allocator.free(summaries_found);
+}
+
+fn rememberStarterDay(runtime: *Runtime, day: usize, content: []const u8) ![]u8 {
+    const allocator = std.testing.allocator;
+    const request = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"method\":\"memory.remember\",\"params\":{{\"scope\":{{\"userId\":\"baker\"}},\"sessionId\":\"day-{d}\",\"messages\":[{{\"role\":\"user\",\"content\":\"{s}\",\"createdAt\":\"2023-05-{d:0>2}T19:00:00Z\"}},{{\"role\":\"assistant\",\"content\":\"Noted.\",\"createdAt\":\"2023-05-{d:0>2}T19:00:05Z\"}}]}}}}",
+        .{ day, content, day, day },
+    );
+    defer allocator.free(request);
+    const response = try runtime.dispatch(allocator, request);
+    defer allocator.free(response);
+    return resultArrayFirst(allocator, response, "messageQids");
+}
+
+fn edgeExists(store: storage.Adapter, from_qid: []const u8, to_qid: []const u8, edge_type: []const u8) !bool {
+    const allocator = std.testing.allocator;
+    const edges = try store.findEdges(allocator, .{ .from_qid = from_qid, .to_qid = to_qid, .edge_type = edge_type, .limit = 4 });
+    defer store.freeEdges(allocator, edges);
+    return edges.len > 0;
+}
+
+test "summary jobs write a summary per session and per topic and ask again only for what changed" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = SummaryTestModel{};
+    defer model.deinit();
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{ .extract_provider = model.endpoint() });
+    defer runtime.deinit();
+
+    const keep = try rememberStarterDay(&runtime, 1, "I keep a sourdough starter named Bubbles.");
+    defer allocator.free(keep);
+    const feed = try rememberStarterDay(&runtime, 8, "I feed Bubbles every morning.");
+    defer allocator.free(feed);
+    allocator.free(try rememberStarterDay(&runtime, 10, "I booked a ferry to Zanzibar for August."));
+    _ = try runtime.runExtractJobs(allocator, "test", 10, 1);
+    try std.testing.expectEqual(@as(usize, 3), try countSummaryJobs(runtime.store, "pending"));
+
+    // Three sessions, and one topic: the two claims about the starter. The
+    // ferry stands alone.
+    const first = try runtime.runSummaryJobs(allocator, "test", 100);
+    try std.testing.expectEqual(@as(usize, 3), first.succeededCount);
+    try std.testing.expectEqual(@as(usize, 1), first.scopes);
+    try std.testing.expectEqual(@as(usize, 4), first.calls);
+    try std.testing.expectEqual(@as(usize, 3), first.counts.sessions);
+    try std.testing.expectEqual(@as(usize, 3), first.counts.sessionsWritten);
+    try std.testing.expectEqual(@as(usize, 3), first.counts.claims);
+    try std.testing.expectEqual(@as(usize, 3), first.counts.claimsIndexed);
+    try std.testing.expectEqual(@as(usize, 1), first.counts.groups);
+    try std.testing.expectEqual(@as(usize, 1), first.counts.topicsWritten);
+    try std.testing.expectEqualStrings(
+        "- said 2023-05-01: The user keeps a sourdough starter named Bubbles.\n- said 2023-05-08: The user feeds the sourdough starter named Bubbles daily.\n",
+        model.last_topic.?,
+    );
+
+    const sessions = try currentSummaries(runtime.store, "session");
+    defer freeSummaries(sessions);
+    try std.testing.expectEqual(@as(usize, 3), sessions.len);
+    try std.testing.expectEqualStrings("A chat about the user's day: The user mentioned something they did.", sessions[0].string("text"));
+    try std.testing.expect(sessions[0].string("vector").len > 0);
+    try std.testing.expectEqual(@as(i64, 2), sessions[0].properties.value.object.get("sourceCount").?.integer);
+    try std.testing.expect(try edgeExists(runtime.store, sessions[0].qid, sessions[0].string("sessionQid"), "SUMMARIZES"));
+    try std.testing.expect(try edgeExists(runtime.store, sessions[0].qid, sessions[0].string("evidenceQid"), "EVIDENCED_BY"));
+
+    const topics = try currentSummaries(runtime.store, "topic");
+    defer freeSummaries(topics);
+    try std.testing.expectEqual(@as(usize, 1), topics.len);
+    const topic_qid = try allocator.dupe(u8, topics[0].qid);
+    defer allocator.free(topic_qid);
+    try std.testing.expectEqualStrings("Sourdough starter Bubbles", topics[0].string("title"));
+    try std.testing.expectEqualStrings("2023-05-01T19:00:00Z", topics[0].string("firstSaid"));
+    try std.testing.expectEqualStrings("2023-05-08T19:00:00Z", topics[0].string("lastSaid"));
+    try std.testing.expect(topics[0].string("vector").len > 0);
+    const members = topics[0].properties.value.object.get("members").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), members.len);
+    for (members) |member| try std.testing.expect(try edgeExists(runtime.store, topic_qid, member.string, "DERIVED_FROM"));
+    try std.testing.expect(try edgeExists(runtime.store, topic_qid, keep, "EVIDENCED_BY"));
+    try std.testing.expect(try edgeExists(runtime.store, topic_qid, feed, "EVIDENCED_BY"));
+    // A summary is found through its own vector, not by search.
+    try std.testing.expectEqual(false, topics[0].properties.value.object.get("searchable").?.bool);
+
+    // Nothing changed: a pass asks nothing and writes nothing.
+    try runtime.queueSummaryJob(allocator, .{ .user_id = "baker" });
+    const idle = try runtime.runSummaryJobs(allocator, "test", 100);
+    try std.testing.expectEqual(@as(usize, 0), idle.calls);
+    try std.testing.expectEqual(@as(usize, 4), idle.counts.unchanged);
+    try std.testing.expectEqual(@as(usize, 0), idle.counts.claimsIndexed);
+
+    // A third claim about the starter: its session and the topic are asked
+    // about, and the topic keeps its node.
+    allocator.free(try rememberStarterDay(&runtime, 12, "I gave half of Bubbles to my neighbour."));
+    _ = try runtime.runExtractJobs(allocator, "test", 10, 1);
+    const grown = try runtime.runSummaryJobs(allocator, "test", 100);
+    try std.testing.expectEqual(@as(usize, 2), grown.calls);
+    try std.testing.expectEqual(@as(usize, 1), grown.counts.sessionsWritten);
+    try std.testing.expectEqual(@as(usize, 1), grown.counts.topicsWritten);
+    try std.testing.expectEqual(@as(usize, 1), grown.counts.claimsIndexed);
+    try std.testing.expectEqual(@as(usize, 3), grown.counts.unchanged);
+    const after = try currentSummaries(runtime.store, "topic");
+    defer freeSummaries(after);
+    try std.testing.expectEqual(@as(usize, 1), after.len);
+    try std.testing.expectEqualStrings(topic_qid, after[0].qid);
+    try std.testing.expectEqual(@as(usize, 3), after[0].properties.value.object.get("members").?.array.items.len);
+    try std.testing.expectEqualStrings("2023-05-12T19:00:00Z", after[0].string("lastSaid"));
+}
+
+test "forgetting a message removes the summaries that rest on it and rebuilds them from the rest" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = SummaryTestModel{};
+    defer model.deinit();
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{ .extract_provider = model.endpoint() });
+    defer runtime.deinit();
+
+    allocator.free(try rememberStarterDay(&runtime, 1, "I keep a sourdough starter named Bubbles."));
+    const feed = try rememberStarterDay(&runtime, 8, "I feed Bubbles every morning.");
+    defer allocator.free(feed);
+    allocator.free(try rememberStarterDay(&runtime, 12, "I gave half of Bubbles to my neighbour."));
+    _ = try runtime.runExtractJobs(allocator, "test", 10, 1);
+    _ = try runtime.runSummaryJobs(allocator, "test", 100);
+    const before = try currentSummaries(runtime.store, "topic");
+    defer freeSummaries(before);
+    try std.testing.expectEqual(@as(usize, 1), before.len);
+    try std.testing.expectEqual(@as(usize, 3), before[0].properties.value.object.get("members").?.array.items.len);
+
+    const forget = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"f\",\"method\":\"memory.forget\",\"params\":{{\"selector\":{{\"qids\":[\"{s}\"]}},\"mode\":\"hard_delete\",\"reason\":\"test\"}}}}",
+        .{feed},
+    );
+    defer allocator.free(forget);
+    const forgotten = try runtime.dispatch(allocator, forget);
+    defer allocator.free(forgotten);
+    try std.testing.expect(std.mem.indexOf(u8, forgotten, before[0].qid) != null);
+
+    // The topic and the session's summary went with the message, and
+    // nothing of them can be read back.
+    const gone = (try runtime.store.getNode(allocator, before[0].qid)).?;
+    defer runtime.store.freeNode(allocator, gone);
+    try std.testing.expect(std.mem.indexOf(u8, gone.properties_json, "\"kind\":\"tombstone\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, gone.properties_json, "Bubbles") == null);
+    const left = try currentSummaries(runtime.store, "topic");
+    defer freeSummaries(left);
+    try std.testing.expectEqual(@as(usize, 0), left.len);
+    const sessions_left = try currentSummaries(runtime.store, "session");
+    defer freeSummaries(sessions_left);
+    try std.testing.expectEqual(@as(usize, 2), sessions_left.len);
+
+    // The forget queued a rebuild: the two claims that remain form the topic
+    // again, under a new node, and the session is summarised from the
+    // message it still has.
+    try std.testing.expectEqual(@as(usize, 1), try countSummaryJobs(runtime.store, "pending"));
+    const rebuilt = try runtime.runSummaryJobs(allocator, "test", 100);
+    try std.testing.expectEqual(@as(usize, 2), rebuilt.calls);
+    try std.testing.expectEqual(@as(usize, 1), rebuilt.counts.topicsWritten);
+    try std.testing.expectEqual(@as(usize, 3), rebuilt.counts.sessions);
+    try std.testing.expectEqual(@as(usize, 1), rebuilt.counts.sessionsWritten);
+    const again = try currentSummaries(runtime.store, "topic");
+    defer freeSummaries(again);
+    try std.testing.expectEqual(@as(usize, 1), again.len);
+    try std.testing.expect(!std.mem.eql(u8, before[0].qid, again[0].qid));
+    try std.testing.expectEqual(@as(usize, 2), again[0].properties.value.object.get("members").?.array.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, model.last_topic.?, "feeds") == null);
+}
+
+test "a group the model declines is remembered and not asked about again" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = SummaryTestModel{ .decline = true };
+    defer model.deinit();
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{ .extract_provider = model.endpoint() });
+    defer runtime.deinit();
+
+    allocator.free(try rememberStarterDay(&runtime, 1, "I keep a sourdough starter named Bubbles."));
+    allocator.free(try rememberStarterDay(&runtime, 8, "I feed Bubbles every morning."));
+    _ = try runtime.runExtractJobs(allocator, "test", 10, 1);
+    const first = try runtime.runSummaryJobs(allocator, "test", 100);
+    try std.testing.expectEqual(@as(usize, 1), first.counts.topicsDeclined);
+    try std.testing.expectEqual(@as(usize, 0), first.counts.topicsWritten);
+    const topics = try currentSummaries(runtime.store, "topic");
+    defer freeSummaries(topics);
+    try std.testing.expectEqual(@as(usize, 1), topics.len);
+    try std.testing.expectEqual(true, topics[0].properties.value.object.get("declined").?.bool);
+    try std.testing.expectEqualStrings("", topics[0].string("text"));
+    try std.testing.expectEqualStrings("", topics[0].string("vector"));
+
+    try runtime.queueSummaryJob(allocator, .{ .user_id = "baker" });
+    const second = try runtime.runSummaryJobs(allocator, "test", 100);
+    try std.testing.expectEqual(@as(usize, 0), second.calls);
+    try std.testing.expectEqual(@as(usize, 1), model.topic_calls);
+
+    // Without a model there is nothing to run.
+    var unconfigured = Runtime.init(store.adapter(), harness.health());
+    try std.testing.expectError(error.ProviderUnavailable, unconfigured.runSummaryJobs(allocator, "test", 100));
+    const refused = try unconfigured.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"memory.summaries.run\",\"params\":{}}");
+    defer allocator.free(refused);
+    try std.testing.expect(std.mem.indexOf(u8, refused, "\"code\":\"provider_error\"") != null);
 }
 
 test "pattern jobs call the pattern model when one is configured" {

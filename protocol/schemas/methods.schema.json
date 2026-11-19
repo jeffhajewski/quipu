@@ -467,6 +467,17 @@
               "type": "boolean",
               "description": "memory.retrieve and memory.answer resolve a time the question names and anchor the context on what was said then. Not an option."
             },
+            "summaries": {
+              "type": "object",
+              "required": ["available", "promptVersion", "model"],
+              "additionalProperties": false,
+              "description": "Summary nodes: a title and summary of each conversation, and of each group of facts about one subject, written by the background worker. Built when the store embeds text and an extract provider is configured.",
+              "properties": {
+                "available": { "type": "boolean", "description": "True when the store can embed text." },
+                "promptVersion": { "type": "string" },
+                "model": { "type": ["string", "null"], "description": "The chat model summary jobs call: the extract model. Null when none is configured." }
+              }
+            },
             "patterns": {
               "type": "object",
               "required": ["available", "promptVersion", "model"],

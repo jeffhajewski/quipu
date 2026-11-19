@@ -651,8 +651,8 @@ Failure handling:
   the next batch. It retries when a request arrives after the wait; an idle
   daemon does not wake itself. A chat call is given up after five minutes
   (`ProviderTimeout`), so a connection that died while the machine slept
-  cannot hold a batch for good. For pattern jobs an embedding provider that
-  does not answer counts the same way.
+  cannot hold a batch for good. For summary and pattern jobs an embedding
+  provider that does not answer counts the same way.
 - **One job fails.** A failed call among answered ones, or a reply that stays
   malformed, uses one of the job's three attempts. After the third the job is
   dead-lettered.
@@ -663,14 +663,15 @@ Failure handling:
   an attempt.
 
 `consolidate` jobs are drained the same way once no `extract` job is pending,
-and `pattern` jobs once no `consolidate` job is. A pattern batch takes up to
-256 jobs, because the jobs of one scope are settled by one pass, and holds
-its leases for up to 30 minutes.
+`summary` jobs once no `consolidate` job is, and `pattern` jobs last. A
+summary or pattern batch takes up to 256 jobs, because the jobs of one scope
+are settled by one pass, and holds its leases for up to 30 minutes.
 
 Known limits: the batch's claim embeddings are computed in the write step, so
 an HTTP embedding provider delays the next request by one embedding call per
 batch; a pattern pass embeds the sentences of up to 64 new messages before
-its model calls start, which delays the next request the same way; entity
+its model calls start, and a summary pass up to 2,048 claims, which delays
+the next request the same way; entity
 resolution still runs only on request.
 
 ### Consolidation: knowledge updates
@@ -845,6 +846,90 @@ With the option off the prompt is byte-for-byte what it was. With it on, a
 question that touches no replaced fact gets no facts section, so without
 consolidation the option adds nothing.
 
+### Summary nodes
+
+A claim is one sentence about one thing, and a conversation is a list of
+messages. Neither says what a conversation was for, or that forty claims
+spread over a year are the same thread: the marathon training, the kitchen
+being redone, the sister's wedding. Summary nodes are that layer, built in
+the background above the claims and the conversations: a title and a short
+summary of every conversation, and of every group of claims about one
+subject.
+
+There is no switch. Every finished `extract` job publishes
+`quipu.summary.requested` and queues a `summary` job for its scope, on a
+store that can embed text. The jobs run once extraction and consolidation
+have caught up and before pattern jobs: in the background worker, or on
+request with `quipu jobs run summaries` and the operational RPC
+`memory.summaries.run`. They use the extract provider. Jobs for the same
+scope are settled by one pass.
+
+One pass brings the summaries of one scope up to date:
+
+1. **Sessions.** Every conversation with a stored message gets one summary.
+   The model is given the conversation in order, each message cut to 700
+   bytes when a person wrote it and 220 when the assistant did, and the whole
+   to 24,000 bytes with the middle left out, and returns a title of at most
+   eight words and at most three sentences: what the person wanted, which
+   specific things the assistant gave, and what the person mentioned about
+   their own life in passing.
+2. **Claim vectors.** Every `Assertion` node of the scope needs a vector to
+   be grouped by. The text the store indexes the claim by is embedded, and
+   the first 256 dimensions are kept, renormalised, as signed bytes, in the
+   node's `vector` property with the embedding model's name in `vectorModel`.
+   A claim is embedded once per embedding model; at most 2,048 claims are
+   embedded in a pass, and a scope with more waiting is finished by further
+   passes before anything is grouped.
+3. **Groups.** Claims are grouped by average-link clustering: every claim
+   starts alone, and the two groups whose members have the highest mean
+   cosine are merged until no two groups reach 0.5. The groups are worked out
+   from scratch in every pass, so they do not depend on the order claims
+   arrived in. The newest 4,096 claims are compared. A group of two or more
+   claims is a topic; a claim alone stays a leaf.
+4. **Topics.** One call per topic that is new or has changed, given its
+   claims with the day each was said (the earliest 12 and the latest 36 when
+   there are more): a title of at most eight words and one or two sentences
+   on how the facts relate and what happened over time. The model may answer
+   that the claims are not about one thing; the node is then stored as
+   declined, with nothing to show, so the group is not asked about again
+   until it changes.
+
+A `Summary` node stores `summaryType` (`session` or `topic`), `title`,
+`summary`, `text` (`Title: summary`), a vector of that text made the way
+claim vectors are, the first and last time its sources were said, and a key
+of its sources: the messages of the session, or the claims of the topic. A
+session summary has a `SUMMARIZES` edge to its `Session` node. A topic
+summary lists its claims in `members` and has a `DERIVED_FROM` edge to each.
+Both have an `EVIDENCED_BY` edge to every message they rest on. The node is
+not indexed for search and is never returned as a search hit.
+
+A summary is asked for again only when its sources change: a session that
+gained or lost a message, a group that gained or lost a claim. A group is the
+same topic as a stored node when it holds at least half of that node's
+claims, and it then keeps the node's qid; a node no group matches is marked
+`superseded`. A pass over a scope with nothing new makes no call. Replies are
+validated: a reply that cannot be read is retried once and then left for the
+next pass, and a summary is never stored without its vector, so when the
+embedding provider does not answer the jobs go back unspent, as they do when
+the chat model does not. A summary whose message was forgotten while the
+pass's calls were out is not written.
+
+Forgetting a message tombstones every summary evidenced by it, the
+conversation's and each topic's that held one of its claims, and queues a
+summary job for the scope, which writes them again from what remains.
+Forgetting a claim does the same for its topic.
+
+Retrieval does not read summary nodes yet: `memory.retrieve` and
+`memory.answer` return what they did before.
+
+Known limits. A pass reads every message and every claim of the scope to
+find what changed, and compares every pair of claims: 4,096 claims are about
+8 million cosines. Two threads that share most of their words (two different
+trips to the same city) can be put in one topic, and the model is asked only
+whether a group is about one thing, not to split it. A claim belongs to one
+topic. The session summary does not see the middle of a conversation longer
+than 24,000 bytes after cutting.
+
 ### Pattern nodes
 
 Claims and updates are about single statements. Some things a person never
@@ -857,8 +942,8 @@ shown to the question that is about them.
 
 There is no switch. Every finished `extract` job publishes
 `quipu.pattern.requested` and queues a `pattern` job for its scope, on a store
-that can embed text. The jobs run after extraction and consolidation have
-caught up: in the background worker, or on request with
+that can embed text. The jobs run after extraction, consolidation and the
+summary jobs have caught up: in the background worker, or on request with
 `quipu jobs run patterns` and the operational RPC `memory.patterns.run`. They
 use the extract provider. Jobs for the same scope are settled by one pass.
 

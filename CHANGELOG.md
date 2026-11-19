@@ -76,6 +76,20 @@
   it was being measured, is gone, and the `Time references:` line no longer
   needs `options.temporalHints`. `trace.timeAnchors` counts the windows and
   items, and `system.health` reports `capabilities.timeAnchors`.
+- Summary nodes. After a conversation is extracted, a `summary` job writes a
+  title and summary of each conversation, and groups the scope's claims by
+  their vectors (average-link clustering at a mean cosine of 0.5) and asks the
+  extract model to name each group of two or more and say how its claims
+  relate. The results are `Summary` nodes of type `session` and `topic`,
+  evidenced by the messages they rest on; a topic lists its claims and is
+  derived from each. A summary is asked for again only when its messages or
+  claims change, and forgetting a message or claim removes the summaries that
+  rest on it and queues their rebuild. Each `Assertion` node gains a `vector`
+  property. There is no option. It needs a store that embeds text and an
+  extract provider, and runs in the background worker after consolidation and
+  before pattern jobs, with `quipu jobs run summaries`, or with
+  `memory.summaries.run`. `system.health` reports `capabilities.summaries`
+  and `workers.summaries`. Retrieval does not read these nodes yet.
 - Pattern nodes. After a conversation is extracted, a `pattern` job groups
   alike sentences that people wrote on different occasions and, for a group of
   six or more occasions, asks the extract model what the group is about, which

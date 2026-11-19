@@ -30,6 +30,7 @@
       "workers": {
         "extractor": "unavailable",
         "consolidator": "unavailable",
+        "summaries": "unavailable",
         "patterns": "unavailable"
       },
       "capabilities": {
@@ -45,6 +46,11 @@
         "factKeys": true,
         "facts": true,
         "timeAnchors": true,
+        "summaries": {
+          "available": false,
+          "promptVersion": "quipu.summaries.v1",
+          "model": null
+        },
         "patterns": {
           "available": false,
           "promptVersion": "quipu.patterns.v1",

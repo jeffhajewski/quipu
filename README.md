@@ -67,6 +67,10 @@ Quipu currently supports:
   core memory blocks.
 - Native LatticeDB-backed persistence with graph nodes/edges, FTS,
   configurable hash or OpenAI-compatible vector search, and durable streams.
+- Summary nodes: after extraction, a background job writes a title and
+  summary of each conversation and of each group of claims about one subject,
+  as nodes evidenced by the messages they rest on. Retrieval does not read
+  them yet. See [docs/algorithms.md](./docs/algorithms.md#summary-nodes).
 - Pattern nodes: after extraction, a background job groups what a person
   wrote about one kind of recurring occasion, has the extract model propose
   generalisations and answer them occasion by occasion, and stores what the

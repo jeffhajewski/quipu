@@ -1150,8 +1150,16 @@ Edges:
 ```text
 (:Summary)-[:SUMMARIZES]->(:Session | :Episode | :Entity | :Project)
 (:Summary)-[:COMPILED_FROM]->(:MemoryCard | :Fact | :Episode)
+(:Summary)-[:DERIVED_FROM]->(:Assertion)
+(:Summary)-[:EVIDENCED_BY]->(:Message)
 (:Summary)-[:CONTAMINATED_BY]->(:DeletionRequest)
 ```
+
+The `session` and `topic` types are implemented (§10.7.3). They store
+`summaryType`, `title`, `summary`, `text`, `sourceKey`, `sourceCount`,
+`firstSaid`, `lastSaid` and a vector of the text, and a deleted source
+tombstones the summary and queues its rebuild rather than marking it
+contaminated.
 
 #### 7.7.12 MemoryBlock
 
@@ -2115,6 +2123,33 @@ recur. `docs/algorithms.md` is the detailed reference; the contract is:
 - The generalisations first proposed for a node are kept; new occasions are
   counted against them. A regularity that stops holding is reported as no
   longer holding by the counts.
+
+#### 10.7.3 Implemented third: session and topic summaries
+
+The third consolidation output is the layer between a claim and everything a
+person has said: a `:Summary` node for each conversation and for each group
+of claims about one subject. `docs/algorithms.md` is the detailed reference;
+the contract is:
+
+- A `summary` job is queued per scope after each `extract` job and after a
+  forget that removed a summary, on a store that embeds text. There is no
+  option. It runs after consolidation and before pattern jobs.
+- Which claims form a topic is decided by the daemon, by average-link
+  clustering of the claims' vectors, from scratch in every pass. The model
+  only names a group and says how its claims relate, and may decline; it
+  never chooses the members (invariant: validate LLM output). A reply that
+  is not a title and a summary is not stored.
+- A session summary `SUMMARIZES` its session and is `EVIDENCED_BY` each of
+  its messages. A topic summary is `DERIVED_FROM` each of its claims and
+  `EVIDENCED_BY` each claim's message (invariant 2). Both carry the scope of
+  their sources and the first and last time those were said (invariant 3).
+  No message and no claim's text is rewritten (invariant 1); a claim gains a
+  `vector` property.
+- A summary is asked for again only when its sources change. A topic keeps
+  its node while at least half of the node's claims stay together; a node no
+  group matches is `superseded`, not deleted (invariant 4).
+- Forgetting a message or a claim tombstones every summary that rests on it
+  and queues a rebuild from what remains (invariant 5).
 
 ### 10.8 Retrieval planner
 

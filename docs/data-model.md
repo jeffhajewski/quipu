@@ -26,6 +26,16 @@ Derived labels:
 - `Assertion`: one claim a person stated, written by LLM fact extraction.
 - `Update`: the record that a later claim replaced an earlier one, written by
   consolidation.
+- `Summary`: a title and summary of one conversation (`summaryType:
+  "session"`) or of one group of claims about the same subject
+  (`summaryType: "topic"`), written by the summary job (see
+  [algorithms.md](algorithms.md#summary-nodes)). It stores `title`,
+  `summary`, `text`, a vector of the text, `firstSaid` and `lastSaid`, and a
+  key of the sources it was written from. A session summary has a
+  `SUMMARIZES` edge to its session; a topic summary lists its claims in
+  `members` and has a `DERIVED_FROM` edge to each. Both have an
+  `EVIDENCED_BY` edge to every message they rest on. Internal for now: not
+  indexed for search and not returned as an item.
 - `SentenceIndex`: the byte range and embedding of each sentence of one
   message, without the text, and the embedding model that made the vectors.
   Internal; never returned as an item.
