@@ -151,7 +151,7 @@ pub fn writeOffset(out: *std.Io.Writer, date: CivilDate, current: CivilDate) !vo
     if (delta > 0) try out.writeAll(" ago");
 }
 
-const Resolution = union(enum) {
+pub const Resolution = union(enum) {
     /// An exact day (`yesterday`, `3 days ago`, `last Friday`).
     day: CivilDate,
     /// An approximate day (`2 weeks ago`, `3 months ago`).
@@ -210,39 +210,14 @@ pub fn resolveTimeReferences(allocator: std.mem.Allocator, query: []const u8, cu
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var tokens = std.ArrayList([]const u8).empty;
-    var cursor: usize = 0;
-    while (cursor < query.len) {
-        while (cursor < query.len and !std.ascii.isAlphanumeric(query[cursor])) : (cursor += 1) {}
-        const start = cursor;
-        while (cursor < query.len and std.ascii.isAlphanumeric(query[cursor])) : (cursor += 1) {}
-        if (cursor > start) try tokens.append(arena, query[start..cursor]);
-    }
-
+    const named = try resolveNamedTimes(arena, query, current);
+    if (named.len == 0) return null;
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
-    var phrases = std.ArrayList([]const u8).empty;
-    var index: usize = 0;
-    while (index < tokens.items.len) {
-        const found = matchAt(tokens.items, index, current) orelse {
-            index += 1;
-            continue;
-        };
-        const phrase = try std.mem.join(arena, " ", tokens.items[index .. index + found.len]);
-        index += found.len;
-        if (!found.value.isWritable()) continue;
-        const repeated = for (phrases.items) |seen| {
-            if (std.ascii.eqlIgnoreCase(seen, phrase)) break true;
-        } else false;
-        if (repeated) continue;
-        if (phrases.items.len > 0) try out.writer.writeAll("; ");
-        try phrases.append(arena, phrase);
-        try out.writer.print("\"{s}\" = ", .{phrase});
-        try found.value.write(&out.writer);
-    }
-    if (phrases.items.len == 0) {
-        out.deinit();
-        return null;
+    for (named, 0..) |time, position| {
+        if (position > 0) try out.writer.writeAll("; ");
+        try out.writer.print("\"{s}\" = ", .{time.phrase});
+        try time.value.write(&out.writer);
     }
     return try out.toOwnedSlice();
 }
@@ -254,18 +229,41 @@ pub const Window = struct { start: CivilDate, end: CivilDate };
 /// be worth anchoring retrieval on (`this year`, `in 2023`).
 const max_window_days: i64 = 92;
 
-/// The windows the relative time expressions in `query` point at, resolved
-/// against `current` with the grammar of `resolveTimeReferences`. An exact day
-/// is a one-day window. An approximate day (`2 weeks ago`) is widened by a
-/// seventh of its distance from `current`, at least one day each way. `today`
-/// and windows wider than `max_window_days` are left out. Caller owns the
-/// slice.
-pub fn resolveWindows(allocator: std.mem.Allocator, query: []const u8, current: CivilDate) ![]Window {
-    if (!writable(current)) return &.{};
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+/// A time the question names: the words, what they resolve to, and the days
+/// a memory may be dated to count as being from then.
+pub const NamedTime = struct {
+    phrase: []const u8,
+    value: Resolution,
+    /// Null for `today` and for spans wider than `max_window_days`, which
+    /// say too little to look for a memory by.
+    window: ?Window,
 
+    /// How a day inside the window relates to the phrase: it is the day
+    /// named, it is near the day named, or it is inside the span named.
+    pub fn relation(self: NamedTime, date: CivilDate) enum { is, near, within } {
+        return switch (self.value) {
+            .day => .is,
+            .around => |day| if (day.eql(date)) .is else .near,
+            .range => |span| if (span.start.eql(span.end)) .is else .within,
+        };
+    }
+};
+
+/// Words that make the time after them looser: "roughly two weeks ago".
+const hedges = [_][]const u8{ "about", "around", "roughly", "approximately", "maybe", "perhaps", "nearly", "almost", "some" };
+
+/// The relative time expressions in `query`, in question order with repeats
+/// dropped, resolved against `current` by plain date arithmetic. Everything
+/// is allocated in `arena`.
+///
+/// An exact day (`yesterday`, `10 days ago`, `last Saturday`) is a one-day
+/// window. An approximate one (`2 weeks ago`) is widened by a seventh of its
+/// distance from `current`, at least a day each way. A hedged count
+/// (`roughly two weeks ago`, `10 days ago or so`) is widened by a third of
+/// its distance instead. A weekday in front of an approximate time (`the
+/// Wednesday two months ago`) picks that weekday nearest to it, exactly.
+pub fn resolveNamedTimes(arena: std.mem.Allocator, query: []const u8, current: CivilDate) ![]NamedTime {
+    if (!writable(current)) return &.{};
     var tokens = std.ArrayList([]const u8).empty;
     var cursor: usize = 0;
     while (cursor < query.len) {
@@ -275,30 +273,77 @@ pub fn resolveWindows(allocator: std.mem.Allocator, query: []const u8, current: 
         if (cursor > start) try tokens.append(arena, query[start..cursor]);
     }
 
-    var windows = std.ArrayList(Window).empty;
-    errdefer windows.deinit(allocator);
+    var named = std.ArrayList(NamedTime).empty;
     const today = daysFromCivil(current);
     var index: usize = 0;
+    var previous_end: usize = 0;
     while (index < tokens.items.len) {
         const found = matchAt(tokens.items, index, current) orelse {
             index += 1;
             continue;
         };
-        index += found.len;
+        var first = index;
+        const end = index + found.len;
+        // Words of the phrase before belong to it, not to this one.
+        const taken = previous_end;
+        index = end;
+        previous_end = end;
         if (!found.value.isWritable()) continue;
-        const window: Window = switch (found.value) {
+
+        var value = found.value;
+        const counted = wordAt(tokens.items, end - 1, "ago");
+        const hedged = counted and
+            ((first > 0 and anyWordAt(tokens.items, first - 1, &hedges)) or
+                (wordAt(tokens.items, end, "or") and wordAt(tokens.items, end + 1, "so")));
+        if (value == .around and !hedged and first > taken) {
+            if (weekdayAt(tokens.items, first - 1)) |weekday| {
+                // The nearest such weekday is at most three days away.
+                const target = value.around;
+                const ahead = @mod(@as(i64, weekday) - isoWeekday(target), 7);
+                value = .{ .day = addDays(target, if (ahead > 3) ahead - 7 else ahead) };
+                first -= 1;
+            }
+        }
+        if (hedged) switch (value) {
+            .day => |date| value = .{ .around = date },
+            else => {},
+        };
+
+        const phrase = try std.mem.join(arena, " ", tokens.items[first..end]);
+        const repeated = for (named.items) |seen| {
+            if (std.ascii.eqlIgnoreCase(seen.phrase, phrase)) break true;
+        } else false;
+        if (repeated) continue;
+
+        var window: ?Window = switch (value) {
             .day => |date| .{ .start = date, .end = date },
             .around => |date| blk: {
                 const distance = @abs(today - daysFromCivil(date));
-                const slack: i64 = @intCast(@max(1, distance / 7));
+                const slack: i64 = @intCast(@max(1, distance / @as(u64, if (hedged) 3 else 7)));
                 break :blk .{ .start = addDays(date, -slack), .end = addDays(date, slack) };
             },
             .range => |span| .{ .start = span.start, .end = span.end },
         };
-        const first = daysFromCivil(window.start);
-        const last = daysFromCivil(window.end);
-        if (first == today and last == today) continue;
-        if (last < first or last - first + 1 > max_window_days) continue;
+        const from = daysFromCivil(window.?.start);
+        const to = daysFromCivil(window.?.end);
+        if ((from == today and to == today) or to < from or to - from + 1 > max_window_days) window = null;
+        try named.append(arena, .{ .phrase = phrase, .value = value, .window = window });
+    }
+    return named.items;
+}
+
+/// The windows the relative time expressions in `query` point at; see
+/// `resolveNamedTimes`. `today` and windows wider than `max_window_days` are
+/// left out. Caller owns the slice.
+pub fn resolveWindows(allocator: std.mem.Allocator, query: []const u8, current: CivilDate) ![]Window {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const named = try resolveNamedTimes(arena_state.allocator(), query, current);
+
+    var windows = std.ArrayList(Window).empty;
+    errdefer windows.deinit(allocator);
+    for (named) |time| {
+        const window = time.window orelse continue;
         const repeated = for (windows.items) |seen| {
             if (seen.start.eql(window.start) and seen.end.eql(window.end)) break true;
         } else false;
@@ -1223,6 +1268,42 @@ fn expectWindows(query: []const u8, current: []const u8, expected: []const [2][]
         try std.testing.expect(testDate(want[0]).eql(got.start));
         try std.testing.expect(testDate(want[1]).eql(got.end));
     }
+}
+
+test "a hedge widens a counted time and a weekday pins an approximate one" {
+    // Two weeks back is 2023-04-21: two days either way, four when hedged.
+    try expectWindows("What did I plant two weeks ago?", "2023-05-05", &.{.{ "2023-04-19", "2023-04-23" }});
+    try expectWindows("What did I plant roughly two weeks ago?", "2023-05-05", &.{.{ "2023-04-17", "2023-04-25" }});
+    try expectWindows("What did I plant two weeks ago or so?", "2023-05-05", &.{.{ "2023-04-17", "2023-04-25" }});
+    // A counted day is exact until it is hedged.
+    try expectWindows("Who called me 10 days ago?", "2023-05-11", &.{.{ "2023-05-01", "2023-05-01" }});
+    try expectWindows("Who called me about 10 days ago?", "2023-05-11", &.{.{ "2023-04-28", "2023-05-04" }});
+    try expectReferences("Who called me about 10 days ago?", "2023-05-11", "\"10 days ago\" = around 2023-05-01 (Mon)");
+    // "about" belongs to the trip, and "last Saturday" is a day whatever precedes it.
+    try expectWindows("What did I say about the trip 10 days ago?", "2023-05-11", &.{.{ "2023-05-01", "2023-05-01" }});
+    try expectWindows("What happened around last Saturday?", "2023-03-09", &.{.{ "2023-03-04", "2023-03-04" }});
+
+    // The weekday nearest the approximate time, named as one day.
+    try expectWindows("What did I do with Rachel on the Wednesday two months ago?", "2023-04-01", &.{.{ "2023-02-01", "2023-02-01" }});
+    try expectReferences("What did I do with Rachel on the Wednesday two months ago?", "2023-04-01", "\"Wednesday two months ago\" = 2023-02-01 (Wed)");
+    try expectWindows("Where was I on the Friday three weeks ago?", "2023-05-09", &.{.{ "2023-04-21", "2023-04-21" }});
+    try expectWindows("Where was I on the Sunday three weeks ago?", "2023-05-09", &.{.{ "2023-04-16", "2023-04-16" }});
+}
+
+test "named times say how a day relates to them" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const named = try resolveNamedTimes(arena_state.allocator(), "What did I do last Saturday, two weeks ago, over the past weekend, and today?", testDate("2023-03-09"));
+    try std.testing.expectEqual(@as(usize, 4), named.len);
+    try std.testing.expectEqualStrings("last Saturday", named[0].phrase);
+    try std.testing.expect(named[0].relation(testDate("2023-03-04")) == .is);
+    try std.testing.expectEqualStrings("two weeks ago", named[1].phrase);
+    try std.testing.expect(named[1].relation(testDate("2023-02-23")) == .is);
+    try std.testing.expect(named[1].relation(testDate("2023-02-24")) == .near);
+    try std.testing.expect(named[2].relation(testDate("2023-03-05")) == .within);
+    // Today is a time reference but not somewhere to look for a memory.
+    try std.testing.expectEqualStrings("today", named[3].phrase);
+    try std.testing.expect(named[3].window == null);
 }
 
 test "time windows cover the day meant, with slack for approximate ones" {

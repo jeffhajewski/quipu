@@ -280,6 +280,8 @@ parseable `validAt`, nothing changes. The hints never affect retrieval.
    | `today`, `yesterday`, `day before yesterday`, `last night` | that day |
    | `N days ago` | that day |
    | `N weeks/months/years ago`, `a week ago` | `around` that day (months clamp to month end) |
+   | `about/around/roughly/approximately N <unit> ago`, `N <unit> ago or so` | `around` that day, with a wider window |
+   | `<weekday> N weeks/months/years ago` | that weekday nearest the day |
    | `past/last/previous N days/weeks/months/years` | N units back to today |
    | `past week/month/year`, `the last week/month/year` | one unit back to today |
    | `last/previous week`, `last weekend` | the previous Monday to Sunday, or its Saturday and Sunday |
@@ -721,7 +723,11 @@ about the thing it asks for, so relevance alone often leaves the message out.
   `time.validAt` with the grammar of the temporal hints. An exact day
   (`yesterday`, `10 days ago`, `last Saturday`) is a one-day window. An
   approximate one (`two weeks ago`) is widened by a seventh of its distance
-  from the question date, at least a day each way. Ranges (`past weekend`,
+  from the question date, at least a day each way. A hedged count (`roughly
+  two weeks ago`, `about 10 days ago`, `two weeks ago or so`) is widened by a
+  third of its distance instead. A weekday in front of an approximate time
+  (`the Wednesday two months ago`) picks that weekday nearest to it, as one
+  day. Ranges (`past weekend`,
   `in January`) are used as they are. `today` and windows wider than 92 days
   are ignored.
 - The question is searched 1,000 hits deep in the request's mode. A message or
