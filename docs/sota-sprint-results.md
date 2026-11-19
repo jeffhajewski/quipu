@@ -1537,6 +1537,100 @@ Mastra observational memory 85.7%. The remaining gap is 9 answers in 133.
 This iteration cost about $3.90: $2.57 on the Sonnet 5.5 reader run, $0.29 on
 GPT-5-mini, and about $1.00 on the GPT-4o and GPT-4o-mini runs of both builds.
 
+## Iteration 9 (November 19): reading the graph from the top, a prototype
+
+### What the reader was getting
+
+In the best configuration, 99.6% of the reader's context was raw chat text
+found by searching raw text (55 temporal contexts at 4,096 tokens: 16,122 of
+16,227 characters). Claims acted as search keys and were swapped for their
+source message. Across the 133 temporal histories a typical one held 489
+messages, 161 claims, no `Update` node (56 in all; 91 histories had none) and
+one pattern node, and no context showed a pattern. So the nodes the
+background jobs build were almost never read, and nothing was retrieved by
+starting from them.
+
+### The prototype
+
+`artifacts/experiments/topdown/` (git-ignored) rebuilds each store exactly as
+the harness does, takes the daemon's own reader request, and replaces only
+the `<memory>` block. Same reader, prompt, judge and token count. Background
+steps, none of which sees the question:
+
+- **Threads.** Claims are grouped by embedding similarity (average link,
+  0.5, chosen once) and a small model names each group and says what
+  connects it. A typical history's 165 claims become 38 threads, and 87% of
+  claims get a parent.
+- **Recall.** User messages that produced no claim get an extraction call of
+  their own. 10 of 259 temporal gold turns had no claim ("I just finished
+  reading 'The Nightingale' today"); this adds about five claims a history
+  and closed that gap on the frozen half (47 to 54 of 54 histories).
+- **Restatements.** Inside a thread, a later claim that looks back on the
+  same occurrence is linked to the earlier one, judged pair by pair from the
+  two quotes. About one link a history.
+- **Episodes.** Every session gets a title and summary and is the parent of
+  its messages.
+- **Dates in the claim's own words.** A relative time in a claim's quote ("a
+  few months ago", "three weeks ago") is resolved by date arithmetic against
+  the day it was said. Extraction had left these vague or coarsened them to
+  a month; 7.6% of claims carried an event date.
+
+At question time the question is matched against threads, loose claims and
+episodes. Matched threads are shown with their children in the order things
+happened, each with its date and distance from the question date. The
+sessions those children and the matched episodes belong to are opened, and
+the rest of the budget is raw lines from those sessions only.
+
+### Results
+
+All seven categories, GPT-4o-mini background jobs, about 3,600 tokens:
+
+| Set | Reader | Raw search | Top-down | Wins / losses |
+| --- | --- | ---: | ---: | --- |
+| Dev (70) | GPT-4o | 57 | 64 | 8 / 1 |
+| Held-out (63) | GPT-4o | 44 | 50 | 10 / 4 |
+| Both (133) | GPT-4o | 101 (75.9%) | 114 (85.7%) | 18 / 5 |
+| Both (133) | GPT-4o-mini | 95 (71.4%) | 107 (80.5%) | 18 / 6 |
+
+The held-out set was not looked at while the prototype was designed. No
+category fell with the GPT-4o reader; multi-session rose most (8 to 13 of
+19). With GPT-4o-mini abstention fell on the dev set (8 to 6 of 10) and
+rose on the held-out set (5 to 7 of 9).
+
+Ablation on the same 133 questions (GPT-4o):
+
+| Arm | Correct |
+| --- | ---: |
+| Raw search | 101 |
+| Top-down | 114 |
+| The same descent, threads hidden from the reader | 101 |
+| No episodes (threads, then only the messages behind their claims) | 93 |
+
+Retrieval by descent alone finds nothing raw search did not; the gain comes
+from the reader seeing the derived memory. Without episodes the assistant's
+replies cannot be reached at all (single-session-assistant 0 of 19).
+
+Temporal reasoning alone does not move on questions the prototype was not
+fitted to:
+
+| Temporal set | Raw search | Top-down |
+| --- | ---: | ---: |
+| Tuning half (55, fitted on) | 44 | 48 |
+| Frozen half (54) | 41 | 40 |
+| Earlier-seen (24) | 20 | 21 |
+| All (133) | 105 | 109 (12 wins, 8 losses) |
+
+Five of the six frozen-half losses ask how long passed between two events,
+with the evidence shown as claim and as raw text; the cause has not been
+found. A first version without recall, restatements, episodes or resolved
+dates scored 107 of 133 (14 wins, 12 losses).
+
+Limits: one run per set, one budget, a prototype outside the daemon that
+borrows the daemon's ranking inside an opened session. The background steps
+add about $0.02 of GPT-4o-mini calls per 500-message history, mostly the
+episode summaries. The day's runs cost about $13.50 after the $3.90 of
+iteration 8.
+
 ## What we learned
 
 - **The reader is now the bottleneck, not retrieval.** At 4K, 93% of gold
