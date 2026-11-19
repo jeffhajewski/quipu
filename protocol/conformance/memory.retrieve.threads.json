@@ -1,0 +1,285 @@
+{
+  "name": "memory.retrieve with summary nodes: the threads section and session summaries",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_threads",
+    "method": "memory.retrieve",
+    "params": {
+      "query": "How is my sourdough starter Bubbles doing?",
+      "mode": "fts",
+      "budgetTokens": 2000,
+      "scope": {
+        "userId": "baker"
+      },
+      "time": {
+        "validAt": "2023-05-30T12:00:00Z"
+      },
+      "options": {
+        "includeDebug": true,
+        "logRetrieval": false
+      }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "req_retrieve_threads",
+    "result": {
+      "retrievalId": "q_retr_82",
+      "prompt": "Current date: 2023-05-30 (Tuesday)\n<memory>\n<threads>\n(Background jobs grouped facts the user stated into threads by subject, oldest first. Each line: the qid of the source message, the date it was said and how long ago that was, then the fact. \"happened\" gives the event's date when it is not the date said; \"about\" gives a date worked out from a relative time (\"a month ago\").)\n## Sourdough starter Bubbles: The user keeps a starter named Bubbles and looks after it.\n[q_msg_4] 2023-05-01 (Mon), 29 days ago: The user keeps a sourdough starter named Bubbles.\n[q_msg_11] 2023-05-08 (Mon), 22 days ago: The user feeds the sourdough starter named Bubbles daily.\n[q_msg_25] 2023-05-12 (Fri), 18 days ago: The user gave half of the sourdough starter named Bubbles away.\n</threads>\n<sessions>\n## session day-1 2023-05-01 (Mon) | Looking after Bubbles: The user talked about the sourdough starter Bubbles.\n[q_msg_4] user: I keep a sourdough starter named Bubbles.\n## session day-8 2023-05-08 (Mon) | Looking after Bubbles: The user talked about the sourdough starter Bubbles.\n[q_msg_11] user: I feed Bubbles every morning.\n## session day-12 2023-05-12 (Fri) | Looking after Bubbles: The user talked about the sourdough starter Bubbles.\n[q_msg_25] user: I gave half of Bubbles to my neighbour.\n</sessions>\n</memory>",
+      "context": {
+        "core": [],
+        "currentFacts": [],
+        "preferences": [],
+        "procedural": [],
+        "patterns": [],
+        "threads": [
+          {
+            "qid": "q_sum_81",
+            "type": "summary",
+            "text": "Sourdough starter Bubbles: The user keeps a starter named Bubbles and looks after it.",
+            "score": 0.6123724579811096,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2023-05-01T19:00:00Z",
+            "validTo": null,
+            "evidence": [
+              {
+                "qid": "q_msg_4",
+                "quote": "The user keeps a sourdough starter named Bubbles.",
+                "timestamp": "2023-05-01T19:00:00Z"
+              },
+              {
+                "qid": "q_msg_11",
+                "quote": "The user feeds the sourdough starter named Bubbles daily.",
+                "timestamp": "2023-05-08T19:00:00Z"
+              },
+              {
+                "qid": "q_msg_25",
+                "quote": "The user gave half of the sourdough starter named Bubbles away.",
+                "timestamp": "2023-05-12T19:00:00Z"
+              }
+            ]
+          }
+        ],
+        "episodes": [
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "text": "I keep a sourdough starter named Bubbles.",
+            "score": 0.6123724579811096,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2023-05-01T19:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_11",
+            "type": "message",
+            "text": "I feed Bubbles every morning.",
+            "score": 0.5669467449188232,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2023-05-08T19:00:00Z",
+            "validTo": null,
+            "evidence": []
+          },
+          {
+            "qid": "q_msg_25",
+            "type": "message",
+            "text": "I gave half of Bubbles to my neighbour.",
+            "score": 1.2659580707550049,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2023-05-12T19:00:00Z",
+            "validTo": null,
+            "evidence": []
+          }
+        ],
+        "warnings": []
+      },
+      "items": [
+        {
+          "qid": "q_msg_4",
+          "type": "message",
+          "text": "I keep a sourdough starter named Bubbles.",
+          "score": 0.6123724579811096,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2023-05-01T19:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_11",
+          "type": "message",
+          "text": "I feed Bubbles every morning.",
+          "score": 0.5669467449188232,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2023-05-08T19:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_25",
+          "type": "message",
+          "text": "I gave half of Bubbles to my neighbour.",
+          "score": 1.2659580707550049,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2023-05-12T19:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_sum_81",
+          "type": "summary",
+          "text": "Sourdough starter Bubbles: The user keeps a starter named Bubbles and looks after it.",
+          "score": 0.6123724579811096,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2023-05-01T19:00:00Z",
+          "validTo": null,
+          "evidence": [
+            {
+              "qid": "q_msg_4",
+              "quote": "The user keeps a sourdough starter named Bubbles.",
+              "timestamp": "2023-05-01T19:00:00Z"
+            },
+            {
+              "qid": "q_msg_11",
+              "quote": "The user feeds the sourdough starter named Bubbles daily.",
+              "timestamp": "2023-05-08T19:00:00Z"
+            },
+            {
+              "qid": "q_msg_25",
+              "quote": "The user gave half of the sourdough starter named Bubbles away.",
+              "timestamp": "2023-05-12T19:00:00Z"
+            }
+          ]
+        }
+      ],
+      "tokenEstimate": 312,
+      "confidence": 0.7200000286102295,
+      "warnings": [],
+      "trace": {
+        "query": "How is my sourdough starter Bubbles doing?",
+        "requestedNeedsCount": 0,
+        "budgetTokens": 2000,
+        "candidateSources": {
+          "fts": 3,
+          "vector": 0,
+          "hybrid": 0,
+          "graph": 0,
+          "core": 0
+        },
+        "candidateCount": 3,
+        "keptCount": 4,
+        "droppedForNeeds": 0,
+        "droppedForBudget": 0,
+        "tokenEstimate": 312,
+        "validAt": "2023-05-30T12:00:00Z",
+        "scoreBreakdowns": [
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "score": 0.6123724579811096,
+            "lexical": 0.3797959089279175,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_11",
+            "type": "message",
+            "score": 0.5669467449188232,
+            "lexical": 0.3618162274360657,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_25",
+            "type": "message",
+            "score": 1.2659580707550049,
+            "lexical": 0.5586855411529541,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_sum_81",
+            "type": "summary",
+            "score": 0.6123724579811096,
+            "lexical": 0.3797959089279175,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          }
+        ],
+        "scoringDetails": [
+          {
+            "qid": "q_msg_4",
+            "type": "message",
+            "finalScore": 0.6123724579811096,
+            "lexical": 0.3797959089279175,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_msg_11",
+            "type": "message",
+            "finalScore": 0.5669467449188232,
+            "lexical": 0.3618162274360657,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_msg_25",
+            "type": "message",
+            "finalScore": 1.2659580707550049,
+            "lexical": 0.5586855411529541,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_sum_81",
+            "type": "summary",
+            "finalScore": 0.6123724579811096,
+            "lexical": 0.3797959089279175,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          }
+        ],
+        "droppedItemReasons": [],
+        "threads": {
+          "topics": 1,
+          "sessions": 10,
+          "claims": 4,
+          "shown": 1,
+          "facts": 3,
+          "sessionsOpened": 6,
+          "rawDropped": 0,
+          "tokens": 189
+        }
+      }
+    }
+  }
+}

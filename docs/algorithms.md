@@ -130,6 +130,12 @@ advertises a non-hash embedding model. Callers can override this with
    headers. Items that do not fit are skipped and counted in the trace.
 9. Split kept items into context sections and render the prompt from those sections.
 
+When the scope has summary nodes, the candidates of steps 1–7 are not the
+whole of the raw evidence and not the first thing shown: the summaries are
+compared with the question, their threads are shown ahead of the sessions,
+and they decide which sessions raw evidence is taken from. See
+[Reading the summaries first](#reading-the-summaries-first).
+
 Retrieval must return scoped, evidence-backed, budgeted context packets rather
 than arbitrary top-k chunks. Reranking changes which items fit the budget, not
 how kept items are rendered.
@@ -226,6 +232,10 @@ Current date: 2023-05-30 (Tuesday)          <- retrieve only, when time.validAt 
 
 - Derived memory (`core`, `facts`, `preferences`, `procedures`) is rendered in
   its own sections as `[qid] (state, validity) text`, ordered by `validFrom`.
+- When the scope has summary nodes, a `<threads>` section comes after the
+  patterns section and before the sessions, and a session header ends with
+  ` | Title: summary` of that session. See
+  [Reading the summaries first](#reading-the-summaries-first).
 - Raw evidence (messages, chunks, episodes, observations) is grouped by
   session. The header shows the caller's `sessionId` when present, otherwise
   the session qid, plus the session's earliest ISO date and weekday. Sessions
@@ -919,8 +929,8 @@ conversation's and each topic's that held one of its claims, and queues a
 summary job for the scope, which writes them again from what remains.
 Forgetting a claim does the same for its topic.
 
-Retrieval does not read summary nodes yet: `memory.retrieve` and
-`memory.answer` return what they did before.
+Retrieval starts from these nodes: see
+[Reading the summaries first](#reading-the-summaries-first).
 
 Known limits. A pass reads every message and every claim of the scope to
 find what changed, and compares every pair of claims: 4,096 claims are about
@@ -929,6 +939,96 @@ trips to the same city) can be put in one topic, and the model is asked only
 whether a group is about one thing, not to split it. A claim belongs to one
 topic. The session summary does not see the middle of a conversation longer
 than 24,000 bytes after cutting.
+
+### Reading the summaries first
+
+A question starts at the summary nodes. `memory.retrieve` and `memory.answer`
+compare the question with what the background work wrote, show the reader the
+threads it is nearest, and only then go down to the conversations: the raw
+messages shown are the ones the summaries and their facts point at. There is
+no option. It happens whenever the scope has a current summary node and the
+store embeds text. A scope with none (nothing extracted yet, or no embedding
+provider) gets the context it had before, and so does a request whose `needs`
+leaves out `current_facts`.
+
+1. **Compare.** The question is embedded once and cut to the stored form
+   (256 dimensions, signed bytes). Its cosine is taken with every current
+   topic summary, every session summary, and every claim of the scope said by
+   `time.validAt`. A summary whose sources run past `validAt`, one made with
+   another embedding model, and a declined topic are left out.
+2. **Rank the threads.** A topic is as near the question as its summary or
+   its nearest claim, whichever is nearer, so a topic whose title says little
+   is still found through one fact. A claim in no topic competes on its own.
+   Anything less than half as near as the nearest is not about the question
+   and is left out.
+3. **Fill the section.** The threads section may take 45% of the budget left
+   after the facts and patterns sections. First, for each time the question
+   names (see [Time anchors](#time-anchors)), the claims said or dated inside
+   that window, nearest the question first, in at most half the section,
+   under a heading that gives the window. Then the topics in rank order, each
+   under its title and summary with its claims in the order they happened. A
+   topic that does not fit whole is shown with the claims nearest the
+   question that do, and its heading says how many of its facts those are.
+   Claims in no topic come last under `## Other facts`.
+4. **Open sessions.** Raw evidence is taken only from sessions that are
+   opened: the six whose summaries are nearest the question, every session
+   dated inside a time the question names, and the sessions of the first ten
+   messages behind the facts shown. A session that has no summary yet is
+   always open: what was said a minute ago is found by search alone until the
+   background work reaches it. Search candidates from a summarised session
+   that was not opened are dropped and counted in `trace.threads.rawDropped`.
+5. **Take the raw evidence.** The message behind each fact shown and the
+   search candidates in opened sessions are taken in turn, a fact's message
+   then a search hit, each once; a message is not shown beside one of its own
+   chunks. They are packed into what the budget has left after the sections
+   above. Each session header is followed by that session's title and
+   summary, charged to the first item kept from the session.
+
+```text
+<threads>
+(Background jobs grouped facts the user stated into threads by subject, ...)
+## Said on or about 2023-05-20 (Sat): the question's "last Saturday"
+[q_msg_41] 2023-05-20 (Sat), 10 days ago: The user picked up the road bike from the shop.
+## Road bike upkeep: The user had the brakes looked at and then changed the pedals.
+[q_msg_12] 2023-05-02 (Tue), 28 days ago: The user bought the road bike in March. (happened 2023-03)
+[q_msg_30] 2023-05-16 (Tue), 14 days ago: The user dropped the road bike at the shop yesterday. (happened 2023-05-15 (Mon), 15 days ago)
+## Other facts
+[q_msg_55] 2023-05-24 (Wed), 6 days ago: The user is riding a sportive in July. (planned for 2023-07)
+</threads>
+<sessions>
+## session s-shop 2023-05-20 (Sat): this is the question's "last Saturday" | Collecting the bike: The user asked how to bed in new brake pads. ...
+[q_msg_41] user: Picked the bike up this morning, the brakes feel sharp again.
+</sessions>
+```
+
+A line gives the qid of the message the claim came from, the day it was said
+with the weekday and how long before `time.validAt` that was, then the claim.
+When the claim has an event span (`eventStart` and `eventEnd`, see
+[LLM fact extraction](#llm-fact-extraction)) that is not the day it was
+said, the line ends with it: `(happened DAY)` for a
+day, `(happened 2023-04)` or `(happened 2019)` for a month or a year,
+`(about DAY)` for the middle of a span worked out from a relative time, and
+`planned for` in place of `happened` when the event had not happened yet. A
+claim whose text names more than one date carries no tag, because one date
+could be read as belonging to the wrong one. Without `time.validAt` the lines
+give dates only.
+
+In the response a topic shown is one item of type `summary` in
+`context.threads`: its text is `Title: summary`, and its evidence is the
+message of each fact shown under it, quoting the fact. A fact shown outside a
+topic is an item of type `assertion` evidenced by its message. The messages
+themselves are ordinary raw items, so a reader that cites a line's qid cites
+a message that is in the packet. `trace.threads` counts the topic and session
+summaries and claims compared, the threads and facts shown, the sessions
+opened, the search candidates dropped, and the tokens the section took.
+
+Known limits. Every summary and every claim of the scope is read and compared
+for each question; that is a few thousand nodes for a person with hundreds of
+conversations, and it will need an index over the stored vectors beyond that.
+A question that compares two things said in different threads gets both only
+when both are near it. A fact the extractor never wrote down has no line: the
+message is still reachable through search inside an opened session, and
+through nothing else once its session is summarised and closed.
 
 ### Pattern nodes
 

@@ -273,6 +273,44 @@ class ProtocolFixtureTests(unittest.TestCase):
         self.assertEqual(plain["response"]["result"]["context"]["patterns"], [])
         self.assertNotIn("patterns", plain["response"]["result"]["trace"])
 
+    def test_summary_nodes_are_read_first_with_no_option(self):
+        defs = json.loads((SCHEMA_DIR / "methods.schema.json").read_text())["$defs"]
+        for result in ("memoryRetrieveResult", "memoryAnswerResult"):
+            self.assertIn("threads", defs[result]["properties"]["context"]["required"])
+        for params in ("memoryRetrieveParams", "memoryAnswerParams"):
+            self.assertNotIn("threads", defs[params]["properties"]["options"]["properties"])
+            self.assertNotIn("summaries", defs[params]["properties"]["options"]["properties"])
+
+        fixture = json.loads((FIXTURE_DIR / "memory.retrieve.threads.json").read_text())
+        self.assertNotIn("threads", fixture["request"]["params"]["options"])
+        result = fixture["response"]["result"]
+        prompt = result["prompt"]
+        # The threads come before the conversations they were built from.
+        self.assertLess(prompt.index("<threads>\n"), prompt.index("<sessions>\n"))
+        self.assertIn("\n## Sourdough starter Bubbles: The user keeps a starter named Bubbles and looks after it.\n", prompt)
+        self.assertIn("[q_msg_25] 2023-05-12 (Fri), 18 days ago: The user gave half of the sourdough starter named Bubbles away.\n", prompt)
+        # Each session opened is headed by its summary.
+        self.assertIn("## session day-12 2023-05-12 (Fri) | Looking after Bubbles: The user talked about the sourdough starter Bubbles.\n", prompt)
+
+        self.assertEqual(len(result["context"]["threads"]), 1)
+        topic = result["context"]["threads"][0]
+        self.assertEqual(topic["type"], "summary")
+        # Every fact shown under the topic is evidence: its message, quoting the fact.
+        self.assertEqual([evidence["qid"] for evidence in topic["evidence"]], ["q_msg_4", "q_msg_11", "q_msg_25"])
+        item_qids = {item["qid"] for item in result["items"]}
+        for evidence in topic["evidence"]:
+            self.assertIn("Bubbles", evidence["quote"])
+            self.assertIn(evidence["qid"], item_qids)
+        self.assertEqual(
+            result["trace"]["threads"],
+            {"topics": 1, "sessions": 10, "claims": 4, "shown": 1, "facts": 3, "sessionsOpened": 6, "rawDropped": 0, "tokens": 189},
+        )
+
+        plain = json.loads((FIXTURE_DIR / "memory.retrieve.success.json").read_text())
+        self.assertEqual(plain["response"]["result"]["context"]["threads"], [])
+        self.assertNotIn("threads", plain["response"]["result"]["trace"])
+        self.assertNotIn("<threads>", plain["response"]["result"]["prompt"])
+
     def test_query_expansion_is_part_of_the_retrieve_and_answer_contract(self):
         defs = json.loads((SCHEMA_DIR / "methods.schema.json").read_text())["$defs"]
         self.assertEqual(defs["queryExpansionMode"]["enum"], ["off", "rules", "llm"])

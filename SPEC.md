@@ -1594,6 +1594,7 @@ Response:
     "preferences": [],
     "procedural": [],
     "patterns": [],
+    "threads": [],
     "episodes": [],
     "warnings": []
   },
@@ -2150,6 +2151,14 @@ the contract is:
   group matches is `superseded`, not deleted (invariant 4).
 - Forgetting a message or a claim tombstones every summary that rests on it
   and queues a rebuild from what remains (invariant 5).
+- Retrieval reads the summaries first, with no option: the question is
+  compared with every current summary and claim of the scope, the nearest
+  topics are shown with their claims ahead of the raw evidence
+  (`context.threads`), and raw evidence is taken from the sessions the
+  summaries and the facts shown point at and from sessions not summarised
+  yet. Every topic and fact shown is evidenced by messages that are in the
+  same packet (invariant 2), and nothing said after `time.validAt` is
+  compared or shown (invariant 3).
 
 ### 10.8 Retrieval planner
 

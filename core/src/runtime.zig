@@ -166,6 +166,9 @@ const MessageResult = struct {
     /// factKeys: the item entered the candidates through an Assertion hit.
     /// Not serialized.
     via_assertion: bool = false,
+    /// Set on the items of the threads section: how the item is rendered.
+    /// Not serialized.
+    thread: ?ThreadBlock = null,
 
     pub fn jsonStringify(self: @This(), jw: anytype) !void {
         try jw.beginObject();
@@ -270,6 +273,9 @@ const ContextPacket = struct {
     procedural: []const MessageResult = &.{},
     /// At most one: the pattern node that owns the question.
     patterns: []const MessageResult = &.{},
+    /// The topics nearest the question, each a summary evidenced by the
+    /// messages of its facts, and the facts shown outside a topic.
+    threads: []const MessageResult = &.{},
     episodes: []const MessageResult = &.{},
     warnings: []const []const u8 = &.{},
 };
@@ -300,12 +306,14 @@ const RetrievalTrace = struct {
     timeAnchors: ?TimeAnchorsTrace = null,
     /// Present only when the scope has pattern nodes with a finding.
     patterns: ?PatternsTrace = null,
+    /// Present only when the scope has summaries to read.
+    threads: ?ThreadsTrace = null,
 
     pub fn jsonStringify(self: @This(), jw: anytype) !void {
         try jw.beginObject();
         inline for (std.meta.fields(@This())) |field| {
             const value = @field(self, field.name);
-            if (comptime (std.mem.eql(u8, field.name, "rerank") or std.mem.eql(u8, field.name, "factKeys") or std.mem.eql(u8, field.name, "queryExpansion") or std.mem.eql(u8, field.name, "facts") or std.mem.eql(u8, field.name, "timeAnchors") or std.mem.eql(u8, field.name, "patterns"))) {
+            if (comptime (std.mem.eql(u8, field.name, "rerank") or std.mem.eql(u8, field.name, "factKeys") or std.mem.eql(u8, field.name, "queryExpansion") or std.mem.eql(u8, field.name, "facts") or std.mem.eql(u8, field.name, "timeAnchors") or std.mem.eql(u8, field.name, "patterns") or std.mem.eql(u8, field.name, "threads"))) {
                 if (value) |present| {
                     try jw.objectField(field.name);
                     try jw.write(present);
@@ -1528,9 +1536,21 @@ pub const Runtime = struct {
             .include_debug = include_trace,
         }, needs_value, @intCast(budget));
         defer owned_pattern.items.deinit();
-        const dropped_for_budget = results.applyTokenBudget(@as(usize, @intCast(budget)) - facts.trace.tokens - owned_pattern.trace.tokens);
+        // Memory is read from the top: the topics nearest the question, and
+        // raw evidence from the sessions they and the session summaries
+        // point at.
+        const evidence_budget = @as(usize, @intCast(budget)) - facts.trace.tokens - owned_pattern.trace.tokens;
+        var threads = try self.collectThreadItems(allocator, query, .{
+            .scope = scope,
+            .valid_at = valid_at,
+            .include_evidence = include_evidence,
+            .include_debug = include_trace,
+        }, needs_value, evidence_budget, fact_keys, &results);
+        defer threads.deinit();
+        const dropped_for_budget = try results.applySessionTokenBudget(evidence_budget - threads.trace.tokens, &threads.session_titles);
         try results.adopt(&facts.items);
         try results.adopt(&owned_pattern.items);
+        try results.adopt(&threads.items);
 
         var warnings = std.ArrayList([]const u8).empty;
         defer warnings.deinit(allocator);
@@ -1561,6 +1581,7 @@ pub const Runtime = struct {
             .time_references = time_references,
             .question = query,
             .question_date = question_date,
+            .session_titles = &threads.session_titles,
         });
         defer allocator.free(prompt);
         const token_estimate = estimatePromptTokens(prompt);
@@ -1590,6 +1611,7 @@ pub const Runtime = struct {
             .queryExpansion = expansion_trace,
             .facts = if (with_facts) facts.trace else null,
             .patterns = if (owned_pattern.trace.candidates > 0) owned_pattern.trace else null,
+            .threads = if (threads.active) threads.trace else null,
             .timeAnchors = time_anchors_trace,
         };
 
@@ -1722,9 +1744,21 @@ pub const Runtime = struct {
             .include_debug = include_trace,
         }, needs_value, @intCast(budget));
         defer owned_pattern.items.deinit();
-        const dropped_for_budget = results.applyTokenBudget(@as(usize, @intCast(budget)) - facts.trace.tokens - owned_pattern.trace.tokens);
+        // Memory is read from the top: the topics nearest the question, and
+        // raw evidence from the sessions they and the session summaries
+        // point at.
+        const evidence_budget = @as(usize, @intCast(budget)) - facts.trace.tokens - owned_pattern.trace.tokens;
+        var threads = try self.collectThreadItems(allocator, query, .{
+            .scope = scope,
+            .valid_at = valid_at,
+            .include_evidence = include_evidence,
+            .include_debug = include_trace,
+        }, needs_value, evidence_budget, fact_keys, &results);
+        defer threads.deinit();
+        const dropped_for_budget = try results.applySessionTokenBudget(evidence_budget - threads.trace.tokens, &threads.session_titles);
         try results.adopt(&facts.items);
         try results.adopt(&owned_pattern.items);
+        try results.adopt(&threads.items);
 
         var warnings = std.ArrayList([]const u8).empty;
         defer warnings.deinit(allocator);
@@ -1756,6 +1790,7 @@ pub const Runtime = struct {
             .hint_date = hint_date,
             .question = query,
             .question_date = question_date,
+            .session_titles = &threads.session_titles,
         });
         defer allocator.free(prompt);
         const token_estimate = estimatePromptTokens(prompt);
@@ -1785,6 +1820,7 @@ pub const Runtime = struct {
             .queryExpansion = expansion_trace,
             .facts = if (with_facts) facts.trace else null,
             .patterns = if (owned_pattern.trace.candidates > 0) owned_pattern.trace else null,
+            .threads = if (threads.active) threads.trace else null,
             .timeAnchors = time_anchors_trace,
         };
 
@@ -3451,6 +3487,374 @@ pub const Runtime = struct {
         sortItemsByScore(owned);
         trace.tokens = used;
         return trace;
+    }
+
+    /// The summary layer's part of a context: the threads section, and which
+    /// sessions raw evidence is taken from.
+    ///
+    /// The question is compared with every topic summary, every claim and
+    /// every session summary of the scope. Facts dated inside a time the
+    /// question names come first, under a heading that says so. Then the
+    /// topics, best first, each with its facts in the order they happened:
+    /// a topic is as near the question as its summary or its nearest fact,
+    /// whichever is nearer, and one that does not fit whole is shown with
+    /// the facts nearest the question that do. A fact in no topic competes
+    /// on its own and is listed under `summaries.loose_heading`. Nothing
+    /// less than `summaries.relevance_floor` as near as the nearest is
+    /// shown. The section takes at most `summaries.threads_budget_percent`
+    /// of `budget`.
+    ///
+    /// Raw evidence in `results` is then cut back to the sessions this opens:
+    /// the ones whose summary is nearest the question, the ones dated inside
+    /// a time it names, and the ones the first facts shown were said in. The
+    /// messages behind the facts shown are added, alternating with what
+    /// search found in those sessions. A session that has no summary yet has
+    /// not been through the background jobs, and stays open.
+    ///
+    /// With no summary in scope nothing is changed.
+    fn collectThreadItems(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        query: []const u8,
+        filter: ItemFilter,
+        needs_value: ?Value,
+        budget: usize,
+        fact_keys: bool,
+        results: *OwnedItems,
+    ) !ThreadItems {
+        var found = ThreadItems{ .items = .{ .allocator = allocator }, .arena_state = std.heap.ArenaAllocator.init(allocator) };
+        errdefer found.deinit();
+        if (needsCount(needs_value) > 0 and !needsIncludes(needs_value, "current_facts")) return found;
+        if (!self.store.capabilities().vector) return found;
+
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const embedding_model = self.store.capabilities().embedding_model;
+
+        var topics = std.ArrayList(ShownSummary).empty;
+        var sessions = std.ArrayList(ShownSummary).empty;
+        {
+            var iterator = self.store.iterateNodes(arena, .{
+                .label = "Summary",
+                .where = try scopeWhere(arena, filter.scope, &.{.{ .name = "state", .value = "current" }}),
+            });
+            defer iterator.deinit();
+            while (try iterator.next()) |qid| {
+                const node = (try self.store.getNode(arena, qid)) orelse continue;
+                if (!try filter.scope.matchesNode(arena, node)) continue;
+                const summary = (try parseShownSummary(arena, node)) orelse continue;
+                if (!sameEmbeddingModel(summary.vector_model, embedding_model)) continue;
+                // A summary of things said later is not known yet at the
+                // time the question asks about.
+                if (filter.valid_at) |valid_at| {
+                    if (summary.last_said) |last_said| {
+                        if (std.mem.order(u8, dateKey(last_said), dateKey(valid_at)) == .gt) continue;
+                    }
+                }
+                switch (summary.kind) {
+                    .topic => try topics.append(arena, summary),
+                    .session => if (summary.session_qid != null) try sessions.append(arena, summary),
+                }
+            }
+        }
+        found.trace.topics = topics.items.len;
+        found.trace.sessions = sessions.items.len;
+        if (topics.items.len == 0 and sessions.items.len == 0) return found;
+
+        const query_vector = self.store.embedText(allocator, query) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return found;
+        };
+        defer allocator.free(query_vector);
+        var query_stored: [patterns.dims]i8 = undefined;
+        const dims = patterns.storedDims(query_vector.len);
+        patterns.quantize(query_vector, query_stored[0..dims]);
+        const question = ThreadQuestion{ .vector = query_stored[0..dims], .norm = patterns.norm(query_stored[0..dims]) };
+
+        const current: ?temporal.CivilDate = if (filter.valid_at) |valid_at| parseIsoDate(valid_at) catch null else null;
+        const named: []const temporal.NamedTime = if (current) |date| try temporal.resolveNamedTimes(arena, query, date) else &.{};
+
+        var claims = std.ArrayList(ShownClaim).empty;
+        var claim_index: std.StringHashMapUnmanaged(u32) = .empty;
+        {
+            var iterator = self.store.iterateNodes(arena, .{ .label = "Assertion", .where = try scopeWhere(arena, filter.scope, &.{}) });
+            defer iterator.deinit();
+            while (try iterator.next()) |qid| {
+                const node = (try self.store.getNode(arena, qid)) orelse continue;
+                if (!try filter.scope.matchesNode(arena, node)) continue;
+                var claim = (try parseShownClaim(arena, node)) orelse continue;
+                if (filter.valid_at) |valid_at| {
+                    if (timestampBefore(valid_at, claim.created_at)) continue;
+                }
+                if (sameEmbeddingModel(claim.vector_model, embedding_model)) claim.score = question.cosine(claim.vector);
+                for (named, 0..) |time, index| {
+                    const window = time.window orelse continue;
+                    if (!try nodeDatedWithin(arena, node, window, true)) continue;
+                    claim.named = index;
+                    break;
+                }
+                try claim_index.put(arena, claim.qid, @intCast(claims.items.len));
+                try claims.append(arena, claim);
+            }
+        }
+        found.trace.claims = claims.items.len;
+
+        // What competes for the section: every topic with a fact to show,
+        // and every fact that is in none.
+        var candidates = std.ArrayList(ThreadCandidate).empty;
+        for (topics.items, 0..) |*topic, topic_index| {
+            var best = question.cosine(topic.vector);
+            var children = std.ArrayList(u32).empty;
+            for (topic.members) |member| {
+                const index = claim_index.get(member) orelse continue;
+                const claim = &claims.items[index];
+                if (claim.topic != null) continue;
+                claim.topic = topic_index;
+                best = @max(best, claim.score);
+                try children.append(arena, index);
+            }
+            if (children.items.len == 0) continue;
+            std.mem.sort(u32, children.items, claims.items, ShownClaim.happenedBefore);
+            topic.children = children.items;
+            try candidates.append(arena, .{ .score = best, .topic = topic_index });
+        }
+        for (claims.items, 0..) |claim, index| {
+            if (claim.topic == null) try candidates.append(arena, .{ .score = claim.score, .claim = @intCast(index) });
+        }
+        std.mem.sort(ThreadCandidate, candidates.items, {}, ThreadCandidate.before);
+
+        const limit = (budget *| summaries.threads_budget_percent) / 100;
+        var used = estimatePromptTokens(summaries.threads_note) + 8;
+        var blocks = std.ArrayList(ThreadBlockPlan).empty;
+
+        // Facts from a time the question names, nearest the question first,
+        // in at most their share of the section.
+        for (named, 0..) |time, time_index| {
+            const window = time.window orelse continue;
+            var dated = std.ArrayList(u32).empty;
+            for (claims.items, 0..) |claim, index| {
+                if (claim.named == time_index) try dated.append(arena, @intCast(index));
+            }
+            if (dated.items.len == 0) continue;
+            std.mem.sort(u32, dated.items, claims.items, ShownClaim.nearerQuestion);
+            const heading = try namedTimeHeading(arena, time, window);
+            var cost = estimatePromptTokens(heading) + 2;
+            var kept = std.ArrayList(u32).empty;
+            for (dated.items) |index| {
+                const tokens = try claims.items[index].lineTokens(arena, current);
+                if (used + cost + tokens > limit * summaries.named_time_percent / 100) break;
+                try kept.append(arena, index);
+                cost += tokens;
+            }
+            if (kept.items.len == 0) continue;
+            std.mem.sort(u32, kept.items, claims.items, ShownClaim.saidBefore);
+            for (kept.items) |index| claims.items[index].shown = true;
+            try blocks.append(arena, .{ .heading = heading, .members = kept.items });
+            used += cost;
+        }
+
+        var loose = std.ArrayList(u32).empty;
+        const nearest = if (candidates.items.len > 0) candidates.items[0].score else 0;
+        for (candidates.items) |candidate| {
+            if (candidate.score < nearest * summaries.relevance_floor or candidate.score <= 0) break;
+            if (candidate.topic) |topic_index| {
+                const topic = topics.items[topic_index];
+                var members = std.ArrayList(u32).empty;
+                const heading_tokens = estimatePromptTokens(topic.text) + 8;
+                var cost = heading_tokens;
+                for (topic.children) |index| {
+                    if (claims.items[index].shown) continue;
+                    try members.append(arena, index);
+                    cost += try claims.items[index].lineTokens(arena, current);
+                }
+                if (members.items.len == 0) continue;
+                var heading = topic.text;
+                if (used + cost > limit) {
+                    // The topic does not fit whole: its facts nearest the
+                    // question, as many as do.
+                    const whole = members.items.len;
+                    std.mem.sort(u32, members.items, claims.items, ShownClaim.nearerQuestion);
+                    cost = heading_tokens;
+                    var fits: usize = 0;
+                    for (members.items) |index| {
+                        const tokens = try claims.items[index].lineTokens(arena, current);
+                        if (used + cost + tokens > limit) break;
+                        cost += tokens;
+                        fits += 1;
+                    }
+                    if (fits == 0) continue;
+                    members.shrinkRetainingCapacity(fits);
+                    std.mem.sort(u32, members.items, claims.items, ShownClaim.happenedBefore);
+                    heading = try std.fmt.allocPrint(arena, "{s} ({d} of its {d} facts)", .{ topic.text, fits, whole });
+                }
+                for (members.items) |index| claims.items[index].shown = true;
+                try blocks.append(arena, .{ .heading = heading, .topic = topic_index, .score = candidate.score, .members = members.items });
+                used += cost;
+                found.trace.shown += 1;
+            } else {
+                const claim = &claims.items[candidate.claim];
+                if (claim.shown) continue;
+                const tokens = try claim.lineTokens(arena, current);
+                if (used + tokens + summaries.loose_reserve_tokens > limit) continue;
+                claim.shown = true;
+                try loose.append(arena, candidate.claim);
+                used += tokens;
+            }
+            if (used + summaries.closing_tokens > limit) break;
+        }
+        if (loose.items.len > 0) {
+            std.mem.sort(u32, loose.items, claims.items, ShownClaim.saidBefore);
+            try blocks.append(arena, .{ .heading = summaries.loose_heading, .members = loose.items });
+        }
+
+        for (blocks.items) |block| {
+            found.trace.facts += block.members.len;
+            if (block.topic) |topic_index| {
+                // A topic is one item: its summary node, evidenced by the
+                // messages of the facts shown under it.
+                const topic = topics.items[topic_index];
+                const lines = try arena.alloc([]const u8, block.members.len);
+                for (block.members, lines) |index, *line| line.* = claims.items[index].rendered.?;
+                try appendThreadItem(allocator, &found.items, .{
+                    .qid = topic.qid,
+                    .type = "summary",
+                    .text = topic.text,
+                    .score = block.score,
+                    .valid_from = topic.first_said,
+                    .heading = block.heading,
+                    .lines = lines,
+                }, claims.items, block.members, filter);
+            } else for (block.members) |index| {
+                // A fact outside a topic is an item of its own.
+                const claim = claims.items[index];
+                try appendThreadItem(allocator, &found.items, .{
+                    .qid = claim.qid,
+                    .type = "assertion",
+                    .text = claim.text,
+                    .score = claim.score,
+                    .valid_from = claim.created_at,
+                    .heading = block.heading,
+                    .lines = &.{claim.rendered.?},
+                }, claims.items, &.{index}, filter);
+            }
+        }
+        found.trace.tokens = if (blocks.items.len > 0) used else 0;
+
+        // The order raw evidence is taken in: the facts from a named time
+        // and the rest, each nearest the question first, in turn.
+        var order = std.ArrayList(u32).empty;
+        {
+            var dated = std.ArrayList(u32).empty;
+            var other = std.ArrayList(u32).empty;
+            for (claims.items, 0..) |claim, index| {
+                if (!claim.shown) continue;
+                try (if (claim.named != null) &dated else &other).append(arena, @intCast(index));
+            }
+            std.mem.sort(u32, dated.items, claims.items, ShownClaim.nearerQuestion);
+            std.mem.sort(u32, other.items, claims.items, ShownClaim.nearerQuestion);
+            const paired = if (dated.items.len == 0) 0 else @min(dated.items.len, other.items.len);
+            for (0..paired) |index| {
+                try order.append(arena, dated.items[index]);
+                try order.append(arena, other.items[index]);
+            }
+            try order.appendSlice(arena, dated.items[paired..]);
+            try order.appendSlice(arena, other.items[paired..]);
+        }
+
+        // Sessions whose raw messages may be shown.
+        const kept = found.arena_state.allocator();
+        var opened: std.StringHashMapUnmanaged(void) = .empty;
+        var summarised: std.StringHashMapUnmanaged(void) = .empty;
+        for (sessions.items) |*session| {
+            session.score = question.cosine(session.vector);
+            try summarised.put(arena, session.session_qid.?, {});
+            if (session.text.len > 0) try found.session_titles.put(kept, try kept.dupe(u8, session.session_qid.?), try kept.dupe(u8, session.text));
+            const said = parseIsoDate(session.first_said orelse continue) catch continue;
+            for (named) |time| {
+                const window = time.window orelse continue;
+                if (temporal.windowContains(window, said)) try opened.put(arena, session.session_qid.?, {});
+            }
+        }
+        std.mem.sort(ShownSummary, sessions.items, {}, ShownSummary.nearerQuestion);
+        for (sessions.items[0..@min(sessions.items.len, summaries.opened_by_summary)]) |session| {
+            try opened.put(arena, session.session_qid.?, {});
+        }
+        {
+            var sources: std.StringHashMapUnmanaged(void) = .empty;
+            for (order.items) |index| {
+                if (sources.count() >= summaries.opened_by_facts) break;
+                const claim = claims.items[index];
+                const slot = try sources.getOrPut(arena, claim.message_qid);
+                if (slot.found_existing) continue;
+                if (claim.session_qid) |session_qid| try opened.put(arena, session_qid, {});
+            }
+        }
+        found.trace.sessionsOpened = opened.count();
+
+        // The messages the facts shown were drawn from.
+        var from_facts = OwnedItems{ .allocator = allocator };
+        defer from_facts.deinit();
+        var evidence_filter = filter;
+        evidence_filter.labels_value = null;
+        evidence_filter.event_window = .{};
+        for (order.items) |index| {
+            const node = (try self.store.getNode(allocator, claims.items[index].qid)) orelse continue;
+            defer self.store.freeNode(allocator, node);
+            try self.appendAssertionEvidence(allocator, &from_facts, node, claims.items[index].score, evidence_filter, std.math.maxInt(usize));
+        }
+        if (fact_keys) try self.attachEventDates(allocator, &from_facts);
+
+        // What search found, in the opened sessions only.
+        var from_search = std.ArrayList(MessageResult).empty;
+        defer from_search.deinit(allocator);
+        errdefer for (from_search.items) |item| results.freeItem(item);
+        {
+            var write_index: usize = 0;
+            for (results.items.items) |item| {
+                const source = item.raw_source orelse {
+                    results.items.items[write_index] = item;
+                    write_index += 1;
+                    continue;
+                };
+                const open = if (source.session_qid) |session_qid| opened.contains(session_qid) or !summarised.contains(session_qid) else true;
+                if (!open) {
+                    results.freeItem(item);
+                    found.trace.rawDropped += 1;
+                    continue;
+                }
+                from_search.append(allocator, item) catch |err| {
+                    results.freeItem(item);
+                    results.items.items.len = write_index;
+                    return err;
+                };
+            }
+            results.items.items.len = write_index;
+        }
+
+        // In turn, a message behind a fact and a message search found, each
+        // once: a message is not shown beside one of its own chunks.
+        try results.items.ensureUnusedCapacity(allocator, from_facts.items.items.len + from_search.items.len);
+        const raw_start = results.items.items.len;
+        const longest = @max(from_facts.items.items.len, from_search.items.len);
+        for (0..longest) |index| {
+            for ([_][]const MessageResult{ from_facts.items.items, from_search.items }) |list| {
+                if (index >= list.len) continue;
+                const item = list[index];
+                const repeated = for (results.items.items[raw_start..]) |taken| {
+                    if (sameRawEvidence(taken, item)) break true;
+                } else false;
+                if (repeated) {
+                    results.freeItem(item);
+                } else {
+                    results.items.appendAssumeCapacity(item);
+                }
+            }
+        }
+        from_facts.items.clearRetainingCapacity();
+        from_search.clearRetainingCapacity();
+        found.active = true;
+        return found;
     }
 
     /// `options.facts`: the claims matching the query that consolidation
@@ -7694,6 +8098,43 @@ const OwnedItems = struct {
         return dropped;
     }
 
+    /// `applyTokenBudget` for a context whose session headers carry the
+    /// session's summary: the first item kept from a session pays for it.
+    fn applySessionTokenBudget(self: *OwnedItems, budget: usize, titles: *const std.StringHashMapUnmanaged([]const u8)) !usize {
+        if (titles.count() == 0) return self.applyTokenBudget(budget);
+        var charged: std.StringHashMapUnmanaged(void) = .empty;
+        defer charged.deinit(self.allocator);
+        var dropped: usize = 0;
+        var used: usize = 0;
+        var write_index: usize = 0;
+        for (self.items.items) |item| {
+            var item_tokens = estimateItemTokens(item);
+            var session: ?[]const u8 = null;
+            if (item.raw_source) |source| {
+                if (source.session_qid) |session_qid| {
+                    if (!charged.contains(session_qid)) {
+                        if (titles.get(session_qid)) |title| {
+                            item_tokens += estimatePromptTokens(title) + 2;
+                            session = session_qid;
+                        }
+                    }
+                }
+            }
+            if (used + item_tokens > budget) {
+                self.freeItem(item);
+                dropped += 1;
+                continue;
+            }
+            // The key belongs to an item that is kept.
+            if (session) |session_qid| try charged.put(self.allocator, session_qid, {});
+            used += item_tokens;
+            self.items.items[write_index] = item;
+            write_index += 1;
+        }
+        self.items.items.len = write_index;
+        return dropped;
+    }
+
     /// Moves every item of `other` to the end of this list.
     fn adopt(self: *OwnedItems, other: *OwnedItems) !void {
         try self.items.appendSlice(self.allocator, other.items.items);
@@ -7736,9 +8177,367 @@ const OwnedItems = struct {
         if (item.unit) |value| self.allocator.free(value);
         if (item.aggregationMode) |value| self.allocator.free(value);
         if (item.raw_source) |source| source.deinit(self.allocator);
+        if (item.thread) |block| block.deinit(self.allocator);
         freeEvidence(self.allocator, item.evidence);
     }
 };
+
+/// What the summary layer gave one retrieval; see `Runtime.collectThreadItems`.
+const ThreadItems = struct {
+    items: OwnedItems,
+    trace: ThreadsTrace = .{},
+    /// False when the scope has no summary to read: the context is then
+    /// built as it was before there were any.
+    active: bool = false,
+    /// `Title: summary` of each summarised session, by session qid, for the
+    /// session headers.
+    session_titles: std.StringHashMapUnmanaged([]const u8) = .empty,
+    arena_state: std.heap.ArenaAllocator,
+
+    fn deinit(self: *ThreadItems) void {
+        self.items.deinit();
+        self.arena_state.deinit();
+    }
+};
+
+const ThreadsTrace = struct {
+    /// Topic and session summaries of the scope that could be compared with
+    /// the question, and the claims that were.
+    topics: usize = 0,
+    sessions: usize = 0,
+    claims: usize = 0,
+    /// Topics shown, and the facts shown in the whole section.
+    shown: usize = 0,
+    facts: usize = 0,
+    /// Sessions raw evidence could come from, and raw candidates left out
+    /// because their session was not one of them.
+    sessionsOpened: usize = 0,
+    rawDropped: usize = 0,
+    /// Estimated tokens of the section, taken out of the raw evidence budget.
+    tokens: usize = 0,
+};
+
+/// How an item of the threads section is rendered: the heading it stands
+/// under and its lines, each `[message qid] day said: fact`.
+const ThreadBlock = struct {
+    heading: []const u8,
+    lines: []const []const u8,
+
+    fn init(allocator: std.mem.Allocator, heading: []const u8, lines: []const []const u8) !ThreadBlock {
+        const owned_heading = try allocator.dupe(u8, heading);
+        errdefer allocator.free(owned_heading);
+        const owned_lines = try allocator.alloc([]const u8, lines.len);
+        var filled: usize = 0;
+        errdefer {
+            for (owned_lines[0..filled]) |line| allocator.free(line);
+            allocator.free(owned_lines);
+        }
+        for (lines) |line| {
+            owned_lines[filled] = try allocator.dupe(u8, line);
+            filled += 1;
+        }
+        return .{ .heading = owned_heading, .lines = owned_lines };
+    }
+
+    fn deinit(self: ThreadBlock, allocator: std.mem.Allocator) void {
+        allocator.free(self.heading);
+        for (self.lines) |line| allocator.free(line);
+        allocator.free(self.lines);
+    }
+};
+
+/// A block of the threads section while it is being filled.
+const ThreadBlockPlan = struct {
+    heading: []const u8,
+    topic: ?usize = null,
+    score: f32 = 0,
+    members: []const u32,
+};
+
+/// A topic, or a fact in no topic, competing for the threads section.
+const ThreadCandidate = struct {
+    score: f32,
+    topic: ?usize = null,
+    claim: u32 = 0,
+
+    fn before(_: void, left: ThreadCandidate, right: ThreadCandidate) bool {
+        if (left.score != right.score) return left.score > right.score;
+        if ((left.topic == null) != (right.topic == null)) return left.topic != null;
+        return if (left.topic) |topic| topic < right.topic.? else left.claim < right.claim;
+    }
+};
+
+/// The question as a stored vector.
+const ThreadQuestion = struct {
+    vector: []const i8,
+    norm: f32,
+
+    fn cosine(self: ThreadQuestion, vector: []const i8) f32 {
+        if (vector.len != self.vector.len) return 0;
+        return patterns.cosine(self.vector, self.norm, vector, patterns.norm(vector));
+    }
+};
+
+/// A summary node as retrieval reads it.
+const ShownSummary = struct {
+    qid: []const u8,
+    kind: SummaryKind,
+    /// `Title: summary`.
+    text: []const u8,
+    vector: []const i8,
+    vector_model: ?[]const u8 = null,
+    members: []const []const u8 = &.{},
+    session_qid: ?[]const u8 = null,
+    first_said: ?[]const u8 = null,
+    last_said: ?[]const u8 = null,
+    /// A topic's facts that can be shown, in the order they happened.
+    children: []const u32 = &.{},
+    score: f32 = 0,
+
+    fn nearerQuestion(_: void, left: ShownSummary, right: ShownSummary) bool {
+        if (left.score != right.score) return left.score > right.score;
+        return naturalQidOrder(left.qid, right.qid) == .lt;
+    }
+};
+
+/// Reads a current summary that has something to show; null for anything
+/// else, a summary the model declined among them.
+fn parseShownSummary(arena: std.mem.Allocator, node: storage.Node) !?ShownSummary {
+    if (!std.mem.eql(u8, node.label, "Summary")) return null;
+    const value = std.json.parseFromSliceLeaky(Value, arena, node.properties_json, .{}) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return null;
+    };
+    const props = objectValue(value) orelse return null;
+    if (boolField(&props, "deleted") orelse false) return null;
+    if (!std.mem.eql(u8, stringField(&props, "state") orelse "", "current")) return null;
+    if (boolField(&props, "declined") orelse false) return null;
+    const kind = std.meta.stringToEnum(SummaryKind, stringField(&props, "summaryType") orelse "") orelse return null;
+    const text = stringField(&props, "text") orelse return null;
+    if (std.mem.trim(u8, text, " \t\r\n").len == 0) return null;
+    const vector = patterns.decodeVectors(arena, stringField(&props, "vector") orelse return null) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return null;
+    };
+    if (vector.len == 0 or vector.len > patterns.dims) return null;
+    var members = std.ArrayList([]const u8).empty;
+    if (arrayValue(props.get("members"))) |wire| {
+        for (wire.items) |member| try members.append(arena, stringValue(member) orelse return null);
+    }
+    return .{
+        .qid = node.qid,
+        .kind = kind,
+        .text = text,
+        .vector = vector,
+        .vector_model = optionalStringField(&props, "vectorModel"),
+        .members = members.items,
+        .session_qid = optionalStringField(&props, "sessionQid"),
+        .first_said = optionalStringField(&props, "firstSaid"),
+        .last_said = optionalStringField(&props, "lastSaid"),
+    };
+}
+
+/// A claim as retrieval reads it for the threads section.
+const ShownClaim = struct {
+    qid: []const u8,
+    text: []const u8,
+    created_at: []const u8,
+    said: temporal.CivilDate,
+    message_qid: []const u8,
+    session_qid: ?[]const u8 = null,
+    event: ?temporal.Window = null,
+    planned: bool = false,
+    vector: []const i8 = &.{},
+    vector_model: ?[]const u8 = null,
+    /// Cosine with the question; zero for a claim not embedded yet.
+    score: f32 = 0,
+    /// The time named in the question that the claim is dated inside.
+    named: ?usize = null,
+    topic: ?usize = null,
+    shown: bool = false,
+    rendered: ?[]const u8 = null,
+
+    /// The claim's line of the section, written once.
+    fn line(self: *ShownClaim, arena: std.mem.Allocator, current: ?temporal.CivilDate) ![]const u8 {
+        if (self.rendered) |text| return text;
+        var writer: std.Io.Writer.Allocating = .init(arena);
+        try writer.writer.print("[{s}] ", .{self.message_qid});
+        try summaries.writeFactLine(&writer.writer, .{ .said = self.said, .text = self.text, .event = self.event, .planned = self.planned }, current);
+        self.rendered = writer.written();
+        return self.rendered.?;
+    }
+
+    fn lineTokens(self: *ShownClaim, arena: std.mem.Allocator, current: ?temporal.CivilDate) !usize {
+        return estimatePromptTokens(try self.line(arena, current)) + 1;
+    }
+
+    fn placed(self: ShownClaim) i64 {
+        return summaries.placedDay(.{ .said = self.said, .text = self.text, .event = self.event });
+    }
+
+    fn happenedBefore(claims: []ShownClaim, left: u32, right: u32) bool {
+        const left_day = claims[left].placed();
+        const right_day = claims[right].placed();
+        if (left_day != right_day) return left_day < right_day;
+        return saidBefore(claims, left, right);
+    }
+
+    fn saidBefore(claims: []ShownClaim, left: u32, right: u32) bool {
+        const order = std.mem.order(u8, claims[left].created_at, claims[right].created_at);
+        if (order != .eq) return order == .lt;
+        return naturalQidOrder(claims[left].qid, claims[right].qid) == .lt;
+    }
+
+    fn nearerQuestion(claims: []ShownClaim, left: u32, right: u32) bool {
+        if (claims[left].score != claims[right].score) return claims[left].score > claims[right].score;
+        return left < right;
+    }
+};
+
+/// Reads a live claim a person made, with the day it was said; null for
+/// anything else.
+fn parseShownClaim(arena: std.mem.Allocator, node: storage.Node) !?ShownClaim {
+    if (!std.mem.eql(u8, node.label, "Assertion")) return null;
+    const value = std.json.parseFromSliceLeaky(Value, arena, node.properties_json, .{}) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return null;
+    };
+    const props = objectValue(value) orelse return null;
+    if (boolField(&props, "deleted") orelse false) return null;
+    if (!isSpeakerRole(stringField(&props, "role") orelse "user")) return null;
+    const text = std.mem.trim(u8, stringField(&props, "text") orelse return null, " \t\r\n");
+    if (text.len == 0) return null;
+    const created_at = stringField(&props, "createdAt") orelse return null;
+    const said = parseIsoDate(created_at) catch return null;
+    var claim = ShownClaim{
+        .qid = node.qid,
+        .text = text,
+        .created_at = created_at,
+        .said = said,
+        .message_qid = stringField(&props, "sourceMessageQid") orelse return null,
+        .session_qid = optionalStringField(&props, "sessionQid"),
+        .planned = boolField(&props, "planned") orelse false,
+        .vector_model = optionalStringField(&props, "vectorModel"),
+    };
+    if (stringField(&props, "eventStart")) |start_text| {
+        if (stringField(&props, "eventEnd")) |end_text| {
+            const start: ?temporal.CivilDate = parseIsoDate(start_text) catch null;
+            const end: ?temporal.CivilDate = parseIsoDate(end_text) catch null;
+            if (start != null and end != null and temporal.daysFromCivil(start.?) <= temporal.daysFromCivil(end.?)) {
+                claim.event = .{ .start = start.?, .end = end.? };
+            }
+        }
+    }
+    // A claim stored before events had spans has a day at most.
+    if (claim.event == null) {
+        if (stringField(&props, "eventDate")) |event_date| {
+            if (event_date.len == 10) {
+                if (parseIsoDate(event_date)) |day| {
+                    claim.event = .{ .start = day, .end = day };
+                } else |_| {}
+            }
+        }
+    }
+    if (stringField(&props, "vector")) |encoded| {
+        const vector = patterns.decodeVectors(arena, encoded) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return claim;
+        };
+        if (vector.len > 0 and vector.len <= patterns.dims) claim.vector = vector;
+    }
+    return claim;
+}
+
+/// The heading over the facts dated inside a time the question names:
+/// `Said on or about 2023-05-20 (Sat): the question's "last Saturday"`.
+fn namedTimeHeading(arena: std.mem.Allocator, time: temporal.NamedTime, window: temporal.Window) ![]const u8 {
+    var writer: std.Io.Writer.Allocating = .init(arena);
+    const out = &writer.writer;
+    try out.writeAll("Said on or about ");
+    try summaries.writeDay(out, window.start, null);
+    if (!window.start.eql(window.end)) {
+        try out.writeAll(" to ");
+        try summaries.writeDay(out, window.end, null);
+    }
+    try out.print(": the question's \"{s}\"", .{time.phrase});
+    return writer.written();
+}
+
+const ThreadItemSpec = struct {
+    qid: []const u8,
+    type: []const u8,
+    text: []const u8,
+    score: f32,
+    valid_from: ?[]const u8,
+    heading: []const u8,
+    lines: []const []const u8,
+};
+
+/// Adds one item of the threads section. Its evidence is the message of
+/// each fact shown with it, quoting the fact.
+fn appendThreadItem(
+    allocator: std.mem.Allocator,
+    owned: *OwnedItems,
+    spec: ThreadItemSpec,
+    claims: []const ShownClaim,
+    members: []const u32,
+    filter: ItemFilter,
+) !void {
+    const qid = try allocator.dupe(u8, spec.qid);
+    errdefer allocator.free(qid);
+    const text = try allocator.dupe(u8, spec.text);
+    errdefer allocator.free(text);
+    const state = try allocator.dupe(u8, "current");
+    errdefer allocator.free(state);
+    const valid_from = try dupeOptional(allocator, spec.valid_from);
+    errdefer if (valid_from) |value| allocator.free(value);
+    var evidence = std.ArrayList(EvidenceResult).empty;
+    errdefer {
+        for (evidence.items) |entry| {
+            allocator.free(entry.qid);
+            allocator.free(entry.quote);
+            if (entry.timestamp) |timestamp| allocator.free(timestamp);
+        }
+        evidence.deinit(allocator);
+    }
+    if (filter.include_evidence) {
+        try evidence.ensureTotalCapacityPrecise(allocator, members.len);
+        for (members) |index| {
+            const claim = claims[index];
+            const message_qid = try allocator.dupe(u8, claim.message_qid);
+            errdefer allocator.free(message_qid);
+            const quote = try allocator.dupe(u8, claim.text);
+            errdefer allocator.free(quote);
+            const timestamp = try allocator.dupe(u8, claim.created_at);
+            evidence.appendAssumeCapacity(.{ .qid = message_qid, .quote = quote, .timestamp = timestamp });
+        }
+    }
+    const block = try ThreadBlock.init(allocator, spec.heading, spec.lines);
+    errdefer block.deinit(allocator);
+    const evidence_slice = try evidence.toOwnedSlice(allocator);
+    errdefer freeEvidence(allocator, evidence_slice);
+    try owned.items.append(allocator, .{
+        .qid = qid,
+        .type = spec.type,
+        .text = text,
+        .score = spec.score,
+        .state = state,
+        .validFrom = valid_from,
+        .evidence = evidence_slice,
+        .includeDebug = filter.include_debug,
+        .thread = block,
+    });
+}
+
+/// Whether two raw items show the same text: the same node, or a message
+/// and one of its own chunks.
+fn sameRawEvidence(left: MessageResult, right: MessageResult) bool {
+    if (std.mem.eql(u8, left.qid, right.qid)) return true;
+    const left_source = left.raw_source orelse return false;
+    const right_source = right.raw_source orelse return false;
+    if (!std.mem.eql(u8, left_source.message_qid, right_source.message_qid)) return false;
+    return left_source.chunk_index == null or right_source.chunk_index == null;
+}
 
 /// `options.facts`: the fact items of one retrieval and what they add up to.
 const FactItems = struct {
@@ -7915,6 +8714,7 @@ const OwnedContextPacket = struct {
     preferences: std.ArrayList(MessageResult) = .empty,
     procedural: std.ArrayList(MessageResult) = .empty,
     patterns: std.ArrayList(MessageResult) = .empty,
+    threads: std.ArrayList(MessageResult) = .empty,
     episodes: std.ArrayList(MessageResult) = .empty,
     warnings: []const []const u8 = &.{},
 
@@ -7922,7 +8722,9 @@ const OwnedContextPacket = struct {
         var context = OwnedContextPacket{ .allocator = allocator, .warnings = warnings };
         errdefer context.deinit();
         for (items) |item| {
-            if (std.mem.eql(u8, item.type, "core")) {
+            if (item.thread != null) {
+                try context.threads.append(allocator, item);
+            } else if (std.mem.eql(u8, item.type, "core")) {
                 try context.core.append(allocator, item);
             } else if (std.mem.eql(u8, item.type, "fact")) {
                 try context.current_facts.append(allocator, item);
@@ -7946,6 +8748,7 @@ const OwnedContextPacket = struct {
             .preferences = self.preferences.items,
             .procedural = self.procedural.items,
             .patterns = self.patterns.items,
+            .threads = self.threads.items,
             .episodes = self.episodes.items,
             .warnings = self.warnings,
         };
@@ -7957,6 +8760,7 @@ const OwnedContextPacket = struct {
         self.preferences.deinit(self.allocator);
         self.procedural.deinit(self.allocator);
         self.patterns.deinit(self.allocator);
+        self.threads.deinit(self.allocator);
         self.episodes.deinit(self.allocator);
     }
 };
@@ -8909,6 +9713,10 @@ const PromptOptions = struct {
     /// to do the date arithmetic to find it.
     question: ?[]const u8 = null,
     question_date: ?temporal.CivilDate = null,
+    /// `Title: summary` of summarised sessions, by session qid. A session
+    /// header ends with its session's (`## session s07 2023-05-20 (Sat) |
+    /// Trip planning: ...`).
+    session_titles: ?*const std.StringHashMapUnmanaged([]const u8) = null,
 };
 
 /// Per-item rendering metadata read from the item's node. Every field is
@@ -8981,11 +9789,12 @@ fn renderPrompt(
     try writePromptSection(arena, out, "preferences", context.preferences);
     try writePromptSection(arena, out, "procedures", context.procedural);
     try writePromptSection(arena, out, "patterns", context.patterns);
+    try writeThreadSection(out, context.threads);
     const named_times: []const temporal.NamedTime = if (options.question_date) |date|
         try temporal.resolveNamedTimes(arena, options.question orelse "", date)
     else
         &.{};
-    try writeSessionSection(arena, out, entries, options.hint_date, named_times);
+    try writeSessionSection(arena, out, entries, options.hint_date, named_times, options.session_titles);
     try out.writeAll("\n</memory>");
     return writer.toOwnedSlice();
 }
@@ -9025,6 +9834,31 @@ fn writePromptSection(arena: std.mem.Allocator, out: *std.Io.Writer, name: []con
     try out.print("\n</{s}>", .{name});
 }
 
+/// The threads section: a note on how to read it, then each topic as
+/// `## Title: summary` over its facts, and the facts outside a topic under
+/// the heading they were collected with. Items are written in the order
+/// given.
+fn writeThreadSection(out: *std.Io.Writer, items: []const MessageResult) !void {
+    if (items.len == 0) return;
+    try out.writeAll("\n<threads>\n" ++ summaries.threads_note);
+    var heading: ?[]const u8 = null;
+    for (items) |item| {
+        const block = item.thread orelse continue;
+        const is_topic = std.mem.eql(u8, item.type, "summary");
+        const continues = !is_topic and heading != null and std.mem.eql(u8, heading.?, block.heading);
+        if (!continues) {
+            try out.writeAll("\n## ");
+            try writeItemText(out, block.heading);
+        }
+        heading = if (is_topic) null else block.heading;
+        for (block.lines) |line| {
+            try out.writeByte('\n');
+            try writeItemText(out, line);
+        }
+    }
+    try out.writeAll("\n</threads>");
+}
+
 fn derivedRendersBefore(items: []const MessageResult, left: usize, right: usize) bool {
     const left_from = items[left].validFrom;
     const right_from = items[right].validFrom;
@@ -9047,6 +9881,7 @@ fn writeSessionSection(
     entries: []const RenderEntry,
     hint_date: ?temporal.CivilDate,
     named_times: []const temporal.NamedTime,
+    session_titles: ?*const std.StringHashMapUnmanaged([]const u8),
 ) !void {
     if (entries.len == 0) return;
     var groups = std.ArrayList(RenderGroup).empty;
@@ -9098,6 +9933,14 @@ fn writeSessionSection(
                     }
                 } else |_| {
                     try out.print(" {s}", .{date});
+                }
+            }
+            if (session_titles) |titles| {
+                if (group.first_session_qid) |session_qid| {
+                    if (titles.get(session_qid)) |title| {
+                        try out.writeAll(" | ");
+                        try writeItemText(out, title);
+                    }
                 }
             }
         } else {
@@ -13882,6 +14725,8 @@ const SummaryTestModel = struct {
     /// belong together.
     last_topic: ?[]u8 = null,
     decline: bool = false,
+    /// Summarise a session that mentions the starter as being about it.
+    name_starter_sessions: bool = false,
 
     const extract_replies = [_][2][]const u8{
         .{ "I keep a sourdough starter", "{\"assertions\":[{\"text\":\"The user keeps a sourdough starter named Bubbles.\",\"messageIndex\":0,\"quote\":\"I keep a sourdough starter named Bubbles\"}]}" },
@@ -13903,6 +14748,9 @@ const SummaryTestModel = struct {
         const self: *SummaryTestModel = @ptrCast(@alignCast(context.?));
         if (std.mem.startsWith(u8, turn.system_prompt, summaries.session_prompt)) {
             self.session_calls += 1;
+            if (self.name_starter_sessions and std.mem.indexOf(u8, turn.user_content, "Bubbles") != null) {
+                return allocator.dupe(u8, "{\"title\":\"Looking after Bubbles\",\"summary\":\"The user talked about the sourdough starter Bubbles.\"}");
+            }
             return allocator.dupe(u8, "{\"title\":\"A chat about the user's day\",\"summary\":\"The user mentioned something they did.\"}");
         }
         if (std.mem.startsWith(u8, turn.system_prompt, summaries.topic_prompt)) {
@@ -14173,6 +15021,133 @@ test "a group the model declines is remembered and not asked about again" {
     const refused = try unconfigured.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"memory.summaries.run\",\"params\":{}}");
     defer allocator.free(refused);
     try std.testing.expect(std.mem.indexOf(u8, refused, "\"code\":\"provider_error\"") != null);
+}
+
+fn threadRetrieve(runtime: *Runtime, query: []const u8, budget: usize) ![]u8 {
+    const allocator = std.testing.allocator;
+    const request = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"q\",\"method\":\"memory.retrieve\",\"params\":{{\"query\":\"{s}\",\"scope\":{{\"userId\":\"baker\"}},\"mode\":\"fts\",\"budgetTokens\":{d},\"time\":{{\"validAt\":\"2023-05-30T12:00:00Z\"}},\"options\":{{\"includeDebug\":true,\"logRetrieval\":false,\"logAudit\":false}}}}}}",
+        .{ query, budget },
+    );
+    defer allocator.free(request);
+    return runtime.dispatch(allocator, request);
+}
+
+test "retrieval shows the topics nearest the question and opens sessions through the summaries" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = SummaryTestModel{ .name_starter_sessions = true };
+    defer model.deinit();
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{ .extract_provider = model.endpoint() });
+    defer runtime.deinit();
+
+    const keep = try rememberStarterDay(&runtime, 1, "I keep a sourdough starter named Bubbles.");
+    defer allocator.free(keep);
+    const feed = try rememberStarterDay(&runtime, 8, "I feed Bubbles every morning.");
+    defer allocator.free(feed);
+    allocator.free(try rememberStarterDay(&runtime, 10, "I booked a ferry to Zanzibar for August."));
+    const gave = try rememberStarterDay(&runtime, 12, "I gave half of Bubbles to my neighbour.");
+    defer allocator.free(gave);
+    for (20..26) |day| allocator.free(try rememberStarterDay(&runtime, day, "The weather was fine and I walked along the river."));
+    _ = try runtime.runExtractJobs(allocator, "test", 20, 1);
+    _ = try runtime.runSummaryJobs(allocator, "test", 100);
+
+    // Before any summary exists a context has no threads section; that is
+    // every other test. With them, the topic about the starter leads, its
+    // facts in the order they happened, each under the message it came
+    // from, and the fact in no topic follows.
+    const response = try threadRetrieve(&runtime, "How is my sourdough starter Bubbles doing?", 2000);
+    defer allocator.free(response);
+    const prompt = try resultStringField(allocator, response, "prompt");
+    defer allocator.free(prompt);
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "<memory>\n<threads>\n" ++ summaries.threads_note ++ "\n" ++
+            "## Sourdough starter Bubbles: The user keeps a starter named Bubbles and looks after it.\n" ++
+            "[{s}] 2023-05-01 (Mon), 29 days ago: The user keeps a sourdough starter named Bubbles.\n" ++
+            "[{s}] 2023-05-08 (Mon), 22 days ago: The user feeds the sourdough starter named Bubbles daily.\n" ++
+            "[{s}] 2023-05-12 (Fri), 18 days ago: The user gave half of the sourdough starter named Bubbles away.\n" ++
+            "</threads>\n",
+        .{ keep, feed, gave },
+    );
+    defer allocator.free(expected);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, expected) != null);
+    // The ferry has nothing to do with the question.
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "ferry") == null);
+    // A session's header carries its summary, and the messages behind the
+    // facts are shown as raw evidence.
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "## session day-1 2023-05-01 (Mon) | Looking after Bubbles: The user talked about the sourdough starter Bubbles.\n") != null);
+    const keep_line = try std.fmt.allocPrint(allocator, "[{s}] user: I keep a sourdough starter named Bubbles.", .{keep});
+    defer allocator.free(keep_line);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, keep_line) != null);
+
+    // The topic is one item, its summary node, evidenced by the messages of
+    // its facts; the trace says what was read.
+    var parsed = try std.json.parseFromSlice(Value, allocator, response, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    const threads = result.get("context").?.object.get("threads").?.array.items;
+    try std.testing.expectEqualStrings("summary", threads[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings("Sourdough starter Bubbles: The user keeps a starter named Bubbles and looks after it.", threads[0].object.get("text").?.string);
+    const evidence = threads[0].object.get("evidence").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), evidence.len);
+    try std.testing.expectEqualStrings(keep, evidence[0].object.get("qid").?.string);
+    try std.testing.expectEqual(@as(usize, 1), threads.len);
+    const trace = result.get("trace").?.object.get("threads").?.object;
+    try std.testing.expectEqual(@as(i64, 1), trace.get("topics").?.integer);
+    try std.testing.expectEqual(@as(i64, 10), trace.get("sessions").?.integer);
+    try std.testing.expectEqual(@as(i64, 4), trace.get("claims").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), trace.get("shown").?.integer);
+    try std.testing.expectEqual(@as(i64, 3), trace.get("facts").?.integer);
+    try std.testing.expectEqual(@as(i64, 0), trace.get("rawDropped").?.integer);
+
+    // A fact in no topic is shown on its own when it is what was asked
+    // about, and the topic that is not is left out.
+    const ferry = try threadRetrieve(&runtime, "When did I book the ferry to Zanzibar?", 2000);
+    defer allocator.free(ferry);
+    const ferry_prompt = try resultStringField(allocator, ferry, "prompt");
+    defer allocator.free(ferry_prompt);
+    try std.testing.expect(std.mem.indexOf(u8, ferry_prompt, "\n## Other facts\n[q_msg_") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ferry_prompt, "20 days ago: The user booked a ferry to Zanzibar for August.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ferry_prompt, "## Sourdough starter Bubbles") == null);
+    try std.testing.expect(std.mem.indexOf(u8, ferry, "\"type\":\"assertion\"") != null);
+
+    // With less room than the topic needs, it is shown with the facts
+    // nearest the question, and says how many it has.
+    const tight = try threadRetrieve(&runtime, "How is my sourdough starter Bubbles doing?", 400);
+    defer allocator.free(tight);
+    const tight_prompt = try resultStringField(allocator, tight, "prompt");
+    defer allocator.free(tight_prompt);
+    try std.testing.expect(std.mem.indexOf(u8, tight_prompt, "## Sourdough starter Bubbles: The user keeps a starter named Bubbles and looks after it. (2 of its 3 facts)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tight_prompt, "The user keeps a sourdough starter named Bubbles.\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tight_prompt, "The user feeds the sourdough starter named Bubbles daily.\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tight_prompt, "gave half of the sourdough starter") == null);
+
+    // A later conversation that only mentions a starter in passing: its
+    // summary is about something else and none of its messages is behind a
+    // fact, so search finding the message does not put it in the context.
+    allocator.free(try rememberStarterDay(&runtime, 26, "At the bakery someone asked how a sourdough starter is doing."));
+    _ = try runtime.runExtractJobs(allocator, "test", 20, 1);
+    _ = try runtime.runSummaryJobs(allocator, "test", 100);
+    // A conversation the background jobs have not reached is read as before.
+    allocator.free(try rememberStarterDay(&runtime, 27, "My sourdough starter Bubbles overflowed its jar."));
+    const later = try threadRetrieve(&runtime, "How is my sourdough starter Bubbles doing?", 2000);
+    defer allocator.free(later);
+    const later_prompt = try resultStringField(allocator, later, "prompt");
+    defer allocator.free(later_prompt);
+    try std.testing.expect(std.mem.indexOf(u8, later_prompt, "bakery") == null);
+    try std.testing.expect(std.mem.indexOf(u8, later, "\"rawDropped\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, later_prompt, "My sourdough starter Bubbles overflowed its jar.") != null);
+
+    // A question about an earlier time is not told what was said after it.
+    const early = try runtime.dispatch(allocator, "{\"jsonrpc\":\"2.0\",\"id\":\"q\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"How is my sourdough starter Bubbles doing?\",\"scope\":{\"userId\":\"baker\"},\"mode\":\"fts\",\"budgetTokens\":2000,\"time\":{\"validAt\":\"2023-05-09T12:00:00Z\"},\"options\":{\"logRetrieval\":false,\"logAudit\":false}}}");
+    defer allocator.free(early);
+    try std.testing.expect(std.mem.indexOf(u8, early, "gave half") == null);
+    try std.testing.expect(std.mem.indexOf(u8, early, "## Sourdough starter Bubbles") == null);
+    try std.testing.expect(std.mem.indexOf(u8, early, "8 days ago: The user keeps a sourdough starter named Bubbles.") != null);
 }
 
 test "pattern jobs call the pattern model when one is configured" {

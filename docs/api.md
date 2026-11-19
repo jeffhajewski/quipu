@@ -110,6 +110,22 @@ an empty `context.patterns` and the context it would have had. The trace
 gains a `patterns` block when the scope has a node that could be shown. See
 [algorithms.md](algorithms.md#pattern-nodes).
 
+Summary nodes need no option either, and they are read first. When the
+background work has written session and topic summaries for the scope, the
+question is compared with them and with the claims under them. The topics it
+is nearest are shown in a `<threads>` section ahead of the sessions, each
+under its title and summary with its facts as dated lines, and are returned
+in `context.threads`: a topic as one item of type `summary` whose evidence
+is the message of each fact shown, quoting the fact, and a fact outside any
+topic as an item of type `assertion`. Raw evidence then comes only from the
+sessions the summaries and those facts point at, and from sessions not
+summarised yet, and each session header carries the session's title and
+summary. The section uses at most 45% of the token budget left after the
+facts and patterns sections. A scope with no summaries has an empty
+`context.threads` and the context it would have had. The trace gains a
+`threads` block when summaries were read. See
+[algorithms.md](algorithms.md#reading-the-summaries-first).
+
 ## Search V0
 
 `memory.search` supports `mode: "fts"`, `"vector"`, `"hybrid"`, and `"graph"`.

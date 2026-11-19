@@ -205,6 +205,44 @@ test("pattern nodes are part of every retrieve and answer context, with no optio
   assert.equal(plain.response.result.trace.patterns, undefined);
 });
 
+test("summary nodes are read first by every retrieve and answer, with no option", () => {
+  const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
+  for (const def of ["memoryRetrieveResult", "memoryAnswerResult"]) {
+    assert.ok(schema.$defs[def].properties.context.required.includes("threads"));
+  }
+  for (const def of ["memoryRetrieveParams", "memoryAnswerParams"]) {
+    assert.equal(schema.$defs[def].properties.options.properties.threads, undefined);
+    assert.equal(schema.$defs[def].properties.options.properties.summaries, undefined);
+  }
+
+  const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.retrieve.threads.json"), "utf8"));
+  assert.equal(fixture.request.params.options.threads, undefined);
+  const result = fixture.response.result;
+  // The threads come before the conversations they were built from.
+  assert.ok(result.prompt.indexOf("<threads>\n") >= 0);
+  assert.ok(result.prompt.indexOf("<threads>\n") < result.prompt.indexOf("<sessions>\n"));
+  assert.ok(result.prompt.includes("\n## Sourdough starter Bubbles: The user keeps a starter named Bubbles and looks after it.\n"));
+  assert.ok(result.prompt.includes("[q_msg_25] 2023-05-12 (Fri), 18 days ago: The user gave half of the sourdough starter named Bubbles away.\n"));
+  // Each session opened is headed by its summary.
+  assert.ok(result.prompt.includes("## session day-12 2023-05-12 (Fri) | Looking after Bubbles: The user talked about the sourdough starter Bubbles.\n"));
+
+  assert.equal(result.context.threads.length, 1);
+  const topic = result.context.threads[0];
+  assert.equal(topic.type, "summary");
+  // Every fact shown under the topic is evidence: its message, quoting the fact.
+  assert.deepEqual(topic.evidence.map((evidence) => evidence.qid), ["q_msg_4", "q_msg_11", "q_msg_25"]);
+  for (const evidence of topic.evidence) {
+    assert.ok(evidence.quote.includes("Bubbles"));
+    assert.ok(result.items.some((item) => item.qid === evidence.qid));
+  }
+  assert.deepEqual(result.trace.threads, { topics: 1, sessions: 10, claims: 4, shown: 1, facts: 3, sessionsOpened: 6, rawDropped: 0, tokens: 189 });
+
+  const plain = JSON.parse(readFileSync(path.join(fixtureDir, "memory.retrieve.success.json"), "utf8"));
+  assert.deepEqual(plain.response.result.context.threads, []);
+  assert.equal(plain.response.result.trace.threads, undefined);
+  assert.ok(!plain.response.result.prompt.includes("<threads>"));
+});
+
 test("method schema accepts slot metadata, support validity, and answer prompt", () => {
   const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
   assert.ok(schema.$defs.memoryItem.properties.slotKey);

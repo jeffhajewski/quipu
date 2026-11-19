@@ -34,8 +34,10 @@ Derived labels:
   key of the sources it was written from. A session summary has a
   `SUMMARIZES` edge to its session; a topic summary lists its claims in
   `members` and has a `DERIVED_FROM` edge to each. Both have an
-  `EVIDENCED_BY` edge to every message they rest on. Internal for now: not
-  indexed for search and not returned as an item.
+  `EVIDENCED_BY` edge to every message they rest on. Not indexed for search:
+  `memory.retrieve` and `memory.answer` compare every current summary of the
+  scope with the question, and a topic shown is returned as an item of type
+  `summary` in `context.threads`.
 - `SentenceIndex`: the byte range and embedding of each sentence of one
   message, without the text, and the embedding model that made the vectors.
   Internal; never returned as an item.

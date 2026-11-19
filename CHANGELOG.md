@@ -89,7 +89,19 @@
   extract provider, and runs in the background worker after consolidation and
   before pattern jobs, with `quipu jobs run summaries`, or with
   `memory.summaries.run`. `system.health` reports `capabilities.summaries`
-  and `workers.summaries`. Retrieval does not read these nodes yet.
+  and `workers.summaries`.
+- Retrieval reads the summary nodes first. When a scope has them,
+  `memory.retrieve` and `memory.answer` compare the question with every
+  topic summary, session summary and claim, and show the nearest topics in
+  a `<threads>` section ahead of the sessions: a title and summary, then
+  the topic's claims as lines dated by when they were said and when the
+  event happened. Raw messages are then taken only from the sessions whose
+  summaries are nearest the question, sessions dated inside a time it
+  names, the sessions the facts shown were said in, and sessions not
+  summarised yet; each session header carries its title and summary. The
+  response gains `context.threads` (required, empty without summaries) and
+  `trace.threads`. There is no option, and a scope with no summaries gets
+  the context it had before.
 - Pattern nodes. After a conversation is extracted, a `pattern` job groups
   alike sentences that people wrote on different occasions and, for a group of
   six or more occasions, asks the extract model what the group is about, which
