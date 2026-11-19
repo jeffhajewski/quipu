@@ -4240,6 +4240,8 @@ pub const Runtime = struct {
             .searchText = stated_text,
             .quote = quote,
             .eventDate = claim.event_date,
+            .eventStart = claim.event_start,
+            .eventEnd = claim.event_end,
             .planned = claim.planned,
             .sourceMessageQid = source.message_qid,
             .evidenceQid = source.message_qid,
@@ -7510,11 +7512,22 @@ fn itemAllowedByNeeds(item: MessageResult, needs_value: ?Value) bool {
 }
 
 /// Whether a node's date falls inside a window the question names: the day a
-/// message or chunk was written, or a claim's event date when it has one
-/// (`YYYY-MM-DD`; a month-only date is too coarse to anchor on) and
-/// otherwise the day it was said.
+/// message or chunk was written, or for a claim the days of its event when it
+/// has them and otherwise the day it was said. An event span counts when it
+/// overlaps the window and is no longer than the window or a week, whichever
+/// is longer: "in April 2023" says too little to answer "two weeks ago" by.
+/// A claim written before spans were stored is matched by its event date
+/// (`YYYY-MM-DD` only).
 fn nodeDatedWithin(allocator: std.mem.Allocator, node: storage.Node, window: temporal.Window, is_claim: bool) !bool {
     if (is_claim) {
+        if (try readEventSpan(allocator, node.properties_json)) |span| {
+            if (try propertyBool(allocator, node.properties_json, "planned")) return false;
+            const window_days = temporal.daysFromCivil(window.end) - temporal.daysFromCivil(window.start) + 1;
+            const span_days = temporal.daysFromCivil(span.end) - temporal.daysFromCivil(span.start) + 1;
+            if (span_days > @max(window_days, 7)) return false;
+            return temporal.daysFromCivil(span.start) <= temporal.daysFromCivil(window.end) and
+                temporal.daysFromCivil(span.end) >= temporal.daysFromCivil(window.start);
+        }
         if (try readOptionalPropertyString(allocator, node.properties_json, "eventDate")) |event_date| {
             defer allocator.free(event_date);
             if (try propertyBool(allocator, node.properties_json, "planned")) return false;
@@ -7526,6 +7539,18 @@ fn nodeDatedWithin(allocator: std.mem.Allocator, node: storage.Node, window: tem
     defer allocator.free(created_at);
     const date = parseIsoDate(created_at) catch return false;
     return temporal.windowContains(window, date);
+}
+
+/// A claim's `eventStart` and `eventEnd`, when both are stored and in order.
+fn readEventSpan(allocator: std.mem.Allocator, properties_json: []const u8) !?temporal.Window {
+    const start_text = (try readOptionalPropertyString(allocator, properties_json, "eventStart")) orelse return null;
+    defer allocator.free(start_text);
+    const end_text = (try readOptionalPropertyString(allocator, properties_json, "eventEnd")) orelse return null;
+    defer allocator.free(end_text);
+    const start = parseIsoDate(start_text) catch return null;
+    const end = parseIsoDate(end_text) catch return null;
+    if (temporal.daysFromCivil(end) < temporal.daysFromCivil(start)) return null;
+    return .{ .start = start, .end = end };
 }
 
 fn nodeWithinEventWindow(allocator: std.mem.Allocator, node: storage.Node, window: EventWindow) !bool {
@@ -11368,6 +11393,8 @@ test "extract worker stores a claim's relative time as a date and searches it as
         "\"statedText\":\"The user adopted a beagle named Biscuit yesterday.\"",
         "\"searchText\":\"The user adopted a beagle named Biscuit yesterday.\"",
         "\"eventDate\":\"2023-05-08\"",
+        "\"eventStart\":\"2023-05-08\"",
+        "\"eventEnd\":\"2023-05-08\"",
         "\"planned\":false",
     }) |needle| {
         if (std.mem.indexOf(u8, node.properties_json, needle) == null) {
@@ -11375,6 +11402,34 @@ test "extract worker stores a claim's relative time as a date and searches it as
             return error.TestUnexpectedResult;
         }
     }
+}
+
+test "a claim is from a time the question names when its event span overlaps it" {
+    const claim = struct {
+        fn within(properties: []const u8, start: []const u8, end: []const u8) !bool {
+            const node = storage.Node{ .qid = "q_asrt_test", .label = "Assertion", .properties_json = properties };
+            return nodeDatedWithin(std.testing.allocator, node, .{ .start = parseIsoDate(start) catch unreachable, .end = parseIsoDate(end) catch unreachable }, true);
+        }
+    }.within;
+
+    // "the weekend of May 6 to May 7", said on the 9th.
+    const weekend = "{\"createdAt\":\"2023-05-09T10:00:00Z\",\"eventStart\":\"2023-05-06\",\"eventEnd\":\"2023-05-07\",\"planned\":false}";
+    try std.testing.expect(try claim(weekend, "2023-05-06", "2023-05-06"));
+    try std.testing.expect(try claim(weekend, "2023-05-07", "2023-05-12"));
+    // The day it was said is not when it happened.
+    try std.testing.expect(!try claim(weekend, "2023-05-09", "2023-05-09"));
+    // A month says too little for a day, and enough for that month.
+    const month = "{\"createdAt\":\"2023-05-09T10:00:00Z\",\"eventDate\":\"2023-04\",\"eventStart\":\"2023-04-01\",\"eventEnd\":\"2023-04-30\",\"planned\":false}";
+    try std.testing.expect(!try claim(month, "2023-04-10", "2023-04-10"));
+    try std.testing.expect(try claim(month, "2023-04-01", "2023-04-30"));
+    // A plan has not happened.
+    const plan = "{\"createdAt\":\"2023-05-09T10:00:00Z\",\"eventStart\":\"2023-05-13\",\"eventEnd\":\"2023-05-14\",\"planned\":true}";
+    try std.testing.expect(!try claim(plan, "2023-05-13", "2023-05-13"));
+    // Claims stored before spans: the event day, else the day said.
+    const dated = "{\"createdAt\":\"2023-05-09T10:00:00Z\",\"eventDate\":\"2023-05-08\",\"planned\":false}";
+    try std.testing.expect(try claim(dated, "2023-05-08", "2023-05-08"));
+    const undated = "{\"createdAt\":\"2023-05-09T10:00:00Z\",\"planned\":false}";
+    try std.testing.expect(try claim(undated, "2023-05-09", "2023-05-09"));
 }
 
 test "extract worker retries malformed JSON a bounded number of times" {

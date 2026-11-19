@@ -573,8 +573,27 @@ Either way a job is processed like this:
    reading of "last Saturday" or "last Sunday" as the most recent one; that
    reading is a choice, and the benchmark does not test it. Claims with an
    event date rose from 273 to 341.
+
+   A claim that names exactly one time also stores the days its event may
+   have happened on, as `eventStart` and `eventEnd` (`YYYY-MM-DD`, both
+   included). A day is one day. A period is its days: the week, the weekend,
+   the month, the year. A counted time ("two weeks ago") is its date and a
+   seventh of the distance to the day said either way, at least a day; a
+   third when the count is hedged or loose ("about two weeks ago", "a few
+   weeks ago"). That is the window a question naming the same time gets
+   (`temporal.resolveNamedTimes`). A stretch that ends or starts on the day
+   said ("for the past two weeks") is not an event time. The model's
+   `eventDate` is kept beside a span only when they agree, meaning one lies
+   inside the other; otherwise it is dropped (`eventDatesCorrected`). A day
+   from the model inside a named week or month narrows the span to that day.
+   A claim with only the model's `eventDate` gets that day or that month as
+   its span. A span that starts after the day said makes the claim `planned`.
+   `eventSpans` counts the claims with a span. On 21,288 claims from 133
+   LongMemEval-S histories, 1,633 (7.7%) had an event date before spans;
+   about 670 more name one period or counted time.
 7. Write each accepted claim as an `Assertion` node with
-   `{kind: "assertion", text, statedText, searchText, quote, eventDate, planned,
+   `{kind: "assertion", text, statedText, searchText, quote, eventDate,
+   eventStart, eventEnd, planned,
    sourceMessageQid, evidenceQid, chunkQids, messageIndex, role, createdAt,
    sessionQid, sessionId, turnQid, tenantId, userId, agentId, projectId,
    extractorProvider, extractorModel, promptVersion, groundingRepaired, jobQid,
@@ -744,9 +763,11 @@ no option; a question that names no time, or a request without a parseable
   resolved for the reader but not searched by.
 - **Bring in.** The question is searched 1,000 hits deep in the request's
   mode. A message or chunk is inside a window when it was written then. With
-  `options.factKeys`, a claim with an event date inside the window (the
-  message said "yesterday") brings in its source message; a planned event or
-  a month-only date does not. Only what a speaker said is anchored: the
+  `options.factKeys`, a claim whose event span overlaps the window (the
+  message said "yesterday" or "last weekend") brings in its source message.
+  A planned event does not, and neither does a span longer than both the
+  window and a week: "in April 2023" does not answer "two weeks ago". Only
+  what a speaker said is anchored: the
   assistant's replies of that day are long and do not say what the person
   did. The anchored items are placed ahead of every other candidate, most
   relevant first: at most 24 per window, and half the token budget in all.

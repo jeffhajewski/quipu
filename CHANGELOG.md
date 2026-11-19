@@ -38,6 +38,14 @@
   months ago" and "a couple of days ago" are read as three, five and two, and
   the claim keeps the words with the date after them: "a few weeks ago (around
   April 18, 2023)". They used to get "(said on DATE)".
+- Extracted claims store the days their event may have happened on, as
+  `eventStart` and `eventEnd`, whenever the claim names one time: a day, a
+  week, a weekend, a month, a year, or a counted time such as "two weeks ago"
+  with the same slack a question naming it gets. A question that names a time
+  brings in claims whose span overlaps it, not only claims dated to one day.
+  The model's `eventDate` is dropped when it disagrees with the span, and the
+  extract job result counts `eventSpans`. Claims stored earlier keep working
+  by their `eventDate`.
 - Consolidation of knowledge updates, off by default: with `--consolidate on`
   (or `QUIPU_CONSOLIDATE=on`) each extracted conversation queues a
   `consolidate` job. It asks the extract model which earlier claims of the same

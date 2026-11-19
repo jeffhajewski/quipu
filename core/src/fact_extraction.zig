@@ -149,6 +149,11 @@ pub const Claim = struct {
     /// `YYYY-MM-DD` or `YYYY-MM`, validated; null when absent or rejected.
     /// When the fact names one day ("yesterday"), this is that day.
     event_date: ?[]const u8 = null,
+    /// First and last day the event may have happened on, `YYYY-MM-DD`: the
+    /// one time the fact names, else the day or month of `event_date`. Null
+    /// together when the fact has no time of its own.
+    event_start: ?[]const u8 = null,
+    event_end: ?[]const u8 = null,
     planned: bool = false,
     /// The model's index was wrong or missing; the quote located the message.
     repaired: bool = false,
@@ -182,6 +187,10 @@ pub const Counts = struct {
     /// Event dates the model gave that differed from that day and were
     /// replaced by it.
     eventDatesCorrected: usize = 0,
+    /// Accepted claims with the days of their event (`eventStart`,
+    /// `eventEnd`): those with an event date, and those naming one period or
+    /// counted time ("last week", "two weeks ago").
+    eventSpans: usize = 0,
 
     pub fn add(self: *Counts, other: Counts) void {
         inline for (std.meta.fields(Counts)) |field| {
@@ -209,7 +218,9 @@ pub const Grounding = struct {
 /// A fact is said on its message's date, so the relative times in it are
 /// then written as calendar dates (`temporal.resolveStatedTimes`): a fact that
 /// says "yesterday" reads wrongly on every day but one. When a fact names one
-/// day, that day is its event date, whatever the model computed.
+/// day, that day is its event date, whatever the model computed. When it
+/// names one period or counted time, those days are the event's span; the
+/// model's date is kept only if the two agree (one lies inside the other).
 pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: []const SourceMessage) !Grounding {
     const items = switch (payload) {
         .object => |object| switch (object.get("assertions") orelse return error.MalformedExtraction) {
@@ -296,8 +307,10 @@ pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: [
             else => counts.eventDatesRejected += 1,
         }
         var resolved_text: ?[]const u8 = null;
+        var resolved_when: ?NamedSpan = null;
         if (try resolveTimes(allocator, &owned, text, messages[located].created_at)) |resolved| {
             resolved_text = resolved.text;
+            resolved_when = resolved.when;
             counts.timesResolved += 1;
             if (resolved.day) |day| {
                 if (event_date == null) {
@@ -309,18 +322,40 @@ pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: [
                 if (resolved.after_said) planned = true;
             }
         }
+        var span: ?temporal.Window = if (event_date) |date| eventDateSpan(date) else null;
+        if (resolved_when) |named| {
+            if (span) |given| {
+                if (!within(given, named.window) and !within(named.window, given)) {
+                    event_date = null;
+                    counts.eventDatesCorrected += 1;
+                    span = named.window;
+                } else if (named.counted or within(named.window, given)) {
+                    // A counted time is no finer than its slack, and a period
+                    // inside the model's month is the finer of the two.
+                    span = named.window;
+                }
+            } else {
+                span = named.window;
+            }
+            if (named.after_said) planned = true;
+        }
+        const event_start = if (span) |days| try ownDate(allocator, &owned, days.start) else null;
+        const event_end = if (span) |days| try ownDate(allocator, &owned, days.end) else null;
         try claims.append(allocator, .{
             .text = resolved_text orelse text,
             .stated_text = if (resolved_text != null) text else null,
             .quote = quote,
             .message_index = located,
             .event_date = event_date,
+            .event_start = event_start,
+            .event_end = event_end,
             .planned = planned,
             .repaired = repaired,
         });
         counts.accepted += 1;
         if (repaired) counts.repaired += 1;
         if (event_date != null) counts.eventDates += 1;
+        if (span != null) counts.eventSpans += 1;
         if (planned) counts.planned += 1;
     }
     const owned_slice = try owned.toOwnedSlice(allocator);
@@ -337,7 +372,41 @@ const ResolvedTimes = struct {
     day: ?[]const u8 = null,
     /// That day is after the day the fact was said.
     after_said: bool = false,
+    /// When the fact names exactly one time that is not a single day.
+    when: ?NamedSpan = null,
 };
+
+/// The days of the one period or counted time a fact names.
+const NamedSpan = struct {
+    window: temporal.Window,
+    /// Counted back from the day said ("two weeks ago"): a point with slack.
+    counted: bool,
+    /// It starts after the day the fact was said.
+    after_said: bool,
+};
+
+/// Whether every day of `inner` is a day of `outer`.
+fn within(inner: temporal.Window, outer: temporal.Window) bool {
+    return temporal.daysFromCivil(inner.start) >= temporal.daysFromCivil(outer.start) and
+        temporal.daysFromCivil(inner.end) <= temporal.daysFromCivil(outer.end);
+}
+
+/// The day, or the days of the month, of a validated event date.
+fn eventDateSpan(value: []const u8) ?temporal.Window {
+    const event = parseEventDate(value) orelse return null;
+    const first = temporal.CivilDate{ .year = event.year, .month = event.month, .day = event.day orelse 1 };
+    if (event.day != null) return .{ .start = first, .end = first };
+    return .{ .start = first, .end = .{ .year = event.year, .month = event.month, .day = temporal.daysInMonth(event.year, event.month) } };
+}
+
+fn ownDate(allocator: std.mem.Allocator, owned: *std.ArrayList([]u8), date: temporal.CivilDate) ![]const u8 {
+    const written = try std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u32, @intCast(date.year)), date.month, date.day });
+    owned.append(allocator, written) catch |err| {
+        allocator.free(written);
+        return err;
+    };
+    return written;
+}
 
 /// `text` with its relative times resolved against the day it was said, or
 /// null when it names none or the message has no date. The strings go into
@@ -351,13 +420,14 @@ fn resolveTimes(allocator: std.mem.Allocator, owned: *std.ArrayList([]u8), text:
     };
     var resolved = ResolvedTimes{ .text = stated.text };
     if (stated.day) |day| {
-        const written = try std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u32, @intCast(day.year)), day.month, day.day });
-        owned.append(allocator, written) catch |err| {
-            allocator.free(written);
-            return err;
-        };
-        resolved.day = written;
+        resolved.day = try ownDate(allocator, owned, day);
         resolved.after_said = temporal.daysFromCivil(day) > temporal.daysFromCivil(said);
+    } else if (stated.when) |window| {
+        resolved.when = .{
+            .window = window,
+            .counted = stated.counted,
+            .after_said = temporal.daysFromCivil(window.start) > temporal.daysFromCivil(said),
+        };
     }
     return resolved;
 }
@@ -640,12 +710,18 @@ test "grounding writes relative times as dates and dates the claim by them" {
     try testing.expectEqualStrings("The user takes Miso to the vet on Tuesday, May 23, 2023.", claims[2].text);
     try testing.expectEqualStrings("2023-05-23", claims[2].event_date.?);
     try testing.expect(claims[2].planned);
-    // A period is written out; the model's coarser date stays.
+    try testing.expectEqualStrings("2023-05-23", claims[2].event_start.?);
+    try testing.expectEqualStrings("2023-05-23", claims[2].event_end.?);
+    // A period is written out; the model's coarser date stays, and the
+    // period is the event's span.
     try testing.expectEqualStrings("The user named a cat in the week of May 15 to May 21, 2023.", claims[3].text);
     try testing.expectEqualStrings("2023-05", claims[3].event_date.?);
+    try testing.expectEqualStrings("2023-05-15", claims[3].event_start.?);
+    try testing.expectEqualStrings("2023-05-21", claims[3].event_end.?);
     // A time that cannot be placed gets the day it was said.
     try testing.expectEqualStrings("The user recently adopted a cat (said on May 22, 2023).", claims[4].text);
     try testing.expectEqual(@as(?[]const u8, null), claims[4].event_date);
+    try testing.expectEqual(@as(?[]const u8, null), claims[4].event_start);
     // Nothing to resolve: the text is the model's.
     try testing.expectEqual(@as(?[]const u8, null), claims[5].stated_text);
 
@@ -656,7 +732,59 @@ test "grounding writes relative times as dates and dates the claim by them" {
     try testing.expectEqual(@as(usize, 2), counts.eventDatesDerived);
     try testing.expectEqual(@as(usize, 1), counts.eventDatesCorrected);
     try testing.expectEqual(@as(usize, 4), counts.eventDates);
+    try testing.expectEqual(@as(usize, 4), counts.eventSpans);
     try testing.expectEqual(@as(usize, 1), counts.planned);
+}
+
+test "a period or counted time a fact names is the span of its event" {
+    // The messages are dated 2023-05-22, a Monday.
+    const result = try groundReply(
+        \\{"assertions":[
+        \\{"text":"The user adopted a cat last weekend.","messageIndex":0,"quote":"adopted a cat"},
+        \\{"text":"The user adopted a cat last week.","messageIndex":0,"quote":"a cat named Miso","eventDate":"2023-05-20"},
+        \\{"text":"The user named a cat two weeks ago.","messageIndex":2,"quote":"because of the soup","eventDate":"2023-05-08"},
+        \\{"text":"The user bought cat food last month.","messageIndex":0,"quote":"named Miso","eventDate":"2023-03-30"},
+        \\{"text":"The user got a kitten a few weeks ago.","messageIndex":0,"quote":"I adopted"},
+        \\{"text":"The user takes Miso to the vet next week.","messageIndex":2,"quote":"I named her Miso"},
+        \\{"text":"The user moved in on March 3.","messageIndex":2,"quote":"named her","eventDate":"2023-03"}
+        \\]}
+    );
+    defer result.parsed.deinit();
+    defer result.grounding.deinit(testing.allocator);
+    const claims = result.grounding.claims;
+    try testing.expectEqual(@as(usize, 7), claims.len);
+
+    // No date from the model: the weekend is the span, and there is no date.
+    try testing.expectEqual(@as(?[]const u8, null), claims[0].event_date);
+    try testing.expectEqualStrings("2023-05-20", claims[0].event_start.?);
+    try testing.expectEqualStrings("2023-05-21", claims[0].event_end.?);
+    // The model's day lies inside the week named: the day is the span.
+    try testing.expectEqualStrings("2023-05-20", claims[1].event_date.?);
+    try testing.expectEqualStrings("2023-05-20", claims[1].event_start.?);
+    try testing.expectEqualStrings("2023-05-20", claims[1].event_end.?);
+    // A counted time is only as fine as its slack, whatever day the model gave.
+    try testing.expectEqualStrings("2023-05-08", claims[2].event_date.?);
+    try testing.expectEqualStrings("2023-05-06", claims[2].event_start.?);
+    try testing.expectEqualStrings("2023-05-10", claims[2].event_end.?);
+    // The model's date is outside the month named: it is dropped.
+    try testing.expectEqual(@as(?[]const u8, null), claims[3].event_date);
+    try testing.expectEqualStrings("2023-04-01", claims[3].event_start.?);
+    try testing.expectEqualStrings("2023-04-30", claims[3].event_end.?);
+    // A loose count: three weeks back, a third of that either way.
+    try testing.expectEqualStrings("The user got a kitten a few weeks ago (around May 1, 2023).", claims[4].text);
+    try testing.expectEqualStrings("2023-04-24", claims[4].event_start.?);
+    try testing.expectEqualStrings("2023-05-08", claims[4].event_end.?);
+    // A period after the day said is a plan.
+    try testing.expect(claims[5].planned);
+    try testing.expectEqualStrings("2023-05-29", claims[5].event_start.?);
+    // The model's month with no time named in the fact: the month is the span.
+    try testing.expectEqualStrings("2023-03-01", claims[6].event_start.?);
+    try testing.expectEqualStrings("2023-03-31", claims[6].event_end.?);
+
+    const counts = result.grounding.counts;
+    try testing.expectEqual(@as(usize, 7), counts.eventSpans);
+    try testing.expectEqual(@as(usize, 3), counts.eventDates);
+    try testing.expectEqual(@as(usize, 1), counts.eventDatesCorrected);
 }
 
 test "event date validation" {
