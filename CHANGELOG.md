@@ -34,6 +34,10 @@
   wording is kept as `statedText` and remains what search indexes, and the
   extract job result counts
   `timesResolved`, `eventDatesDerived` and `eventDatesCorrected`.
+- Extracted claims place loose counts of time. "A few weeks ago", "several
+  months ago" and "a couple of days ago" are read as three, five and two, and
+  the claim keeps the words with the date after them: "a few weeks ago (around
+  April 18, 2023)". They used to get "(said on DATE)".
 - Consolidation of knowledge updates, off by default: with `--consolidate on`
   (or `QUIPU_CONSOLIDATE=on`) each extracted conversation queues a
   `consolidate` job. It asks the extract model which earlier claims of the same

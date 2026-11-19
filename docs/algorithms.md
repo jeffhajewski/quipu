@@ -552,8 +552,11 @@ Either way a job is processed like this:
      becomes "around April 25, 2023" (no finer than the unit counted in).
    - A stretch up to or from the day of speaking keeps its words and gains
      its dates: "for the past two weeks (April 25 to May 9, 2023)".
-   - A time that cannot be placed ("recently", "a few weeks ago", "next
-     Friday") is kept, and the claim ends with "(said on May 9, 2023)".
+   - A loose count keeps its words and gains a date: "a few weeks ago (around
+     April 18, 2023)". A few, several and a couple are read as three, five
+     and two.
+   - A time that cannot be placed ("recently", "a while ago", "next Friday")
+     is kept, and the claim ends with "(said on May 9, 2023)".
    - Explicit dates, bare month names, titles and quoted words are left alone.
 
    When the claim names exactly one day, that day is its `eventDate`, replacing

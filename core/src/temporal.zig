@@ -317,11 +317,7 @@ pub fn resolveNamedTimes(arena: std.mem.Allocator, query: []const u8, current: C
 
         var window: ?Window = switch (value) {
             .day => |date| .{ .start = date, .end = date },
-            .around => |date| blk: {
-                const distance = @abs(today - daysFromCivil(date));
-                const slack: i64 = @intCast(@max(1, distance / @as(u64, if (hedged) 3 else 7)));
-                break :blk .{ .start = addDays(date, -slack), .end = addDays(date, slack) };
-            },
+            .around => |date| aroundWindow(date, current, hedged),
             .range => |span| .{ .start = span.start, .end = span.end },
         };
         const from = daysFromCivil(window.?.start);
@@ -330,6 +326,15 @@ pub fn resolveNamedTimes(arena: std.mem.Allocator, query: []const u8, current: C
         try named.append(arena, .{ .phrase = phrase, .value = value, .window = window });
     }
     return named.items;
+}
+
+/// The days an approximate time may mean: `date`, a seventh of its distance
+/// from `current` either way, or a third when the count was hedged, and at
+/// least a day.
+fn aroundWindow(date: CivilDate, current: CivilDate, hedged: bool) Window {
+    const distance = @abs(daysFromCivil(current) - daysFromCivil(date));
+    const slack: i64 = @intCast(@max(1, distance / @as(u64, if (hedged) 3 else 7)));
+    return .{ .start = addDays(date, -slack), .end = addDays(date, slack) };
 }
 
 /// The windows the relative time expressions in `query` point at; see
@@ -382,8 +387,9 @@ const Phrase = union(enum) {
     /// `on Monday, May 8, 2023`, or `on the night of Monday, May 8, 2023`.
     day: struct { date: CivilDate, part: ?[]const u8 = null },
     /// `around May 16, 2023`, `around March 2023` or `around 2021`: as fine
-    /// as the unit counted in.
-    around: struct { date: CivilDate, unit: Unit },
+    /// as the unit counted in. `hedged` when the count itself was loose
+    /// ("about two weeks ago", "a few weeks ago").
+    around: struct { date: CivilDate, unit: Unit, hedged: bool = false },
     /// `in the week of May 22 to May 28, 2023`, by its Monday.
     week: CivilDate,
     /// `on the weekend of May 27 to May 28, 2023`, by its Saturday.
@@ -404,6 +410,21 @@ const Phrase = union(enum) {
             .year => |year| year >= 1 and year <= 9999,
             .span => |value| writable(value.start) and writable(value.end),
         };
+    }
+
+    /// The days the phrase covers when said on `current`. Null for a stretch
+    /// that ends or starts on the day of speaking: the day said dates it.
+    fn covers(self: Phrase, current: CivilDate) ?Window {
+        const window: Window = switch (self) {
+            .day => |value| .{ .start = value.date, .end = value.date },
+            .around => |value| aroundWindow(value.date, current, value.hedged),
+            .week => |monday| .{ .start = monday, .end = addDays(monday, 6) },
+            .weekend => |saturday| .{ .start = saturday, .end = addDays(saturday, 1) },
+            .month => |first| .{ .start = first, .end = lastOfMonth(first) },
+            .year => |year| .{ .start = .{ .year = year, .month = 1, .day = 1 }, .end = .{ .year = year, .month = 12, .day = 31 } },
+            .span => return null,
+        };
+        return if (writable(window.start) and writable(window.end)) window else null;
     }
 
     /// The preposition the replacement opens with, unless the statement has
@@ -449,6 +470,9 @@ const Stated = struct {
     phrase: Phrase,
     /// "the day before yesterday": a "the" in front belongs to the phrase.
     takes_article: bool = false,
+    /// "a few weeks ago": the count is a reading of the words, so they stay
+    /// and the date follows in brackets.
+    keeps_words: bool = false,
 };
 
 /// `text` with its times written out, and the day it names.
@@ -456,6 +480,14 @@ pub const StatedTimes = struct {
     text: []u8,
     /// Set when the text names exactly one time and that time is one day.
     day: ?CivilDate = null,
+    /// Set when the text names exactly one time that can be placed: the days
+    /// it covers. One day for a day, the week, weekend, month or year for a
+    /// period, and the days around a counted time ("two weeks ago") as a
+    /// question's would be (`resolveNamedTimes`).
+    when: ?Window = null,
+    /// `when` was counted back from the day of speaking, so it is a point
+    /// with slack, not a calendar period.
+    counted: bool = false,
 };
 
 /// Rewrites the relative times in a statement made on `current` as calendar
@@ -471,10 +503,12 @@ pub const StatedTimes = struct {
 /// N weeks|months|years ago (as `around ...`, no finer than the unit).
 /// Kept, with the dates after them in brackets: stretches that end or start
 /// on the day of speaking (past|last|previous N <units>, the last|past <unit>,
-/// earlier this <unit>, [the] next N <units>, the next <unit>), and any phrase
+/// earlier this <unit>, [the] next N <units>, the next <unit>), any phrase
 /// in the possessive or behind an article ("yesterday's meeting", "the
-/// previous week").
-/// Times that cannot be placed ("recently", "a few weeks ago", "next Friday",
+/// previous week"), and a loose count: a few|several|a couple [of] <units>
+/// ago, read as three, five and two ("a few weeks ago (around April 18,
+/// 2023)").
+/// Times that cannot be placed ("recently", "a while ago", "next Friday",
 /// "next weekend") are left alone and ` (said on May 9, 2023)` is added at
 /// the end. Explicit dates, bare month names and a weekday followed by its
 /// date ("last Saturday, March 17th") are left as they are.
@@ -498,6 +532,8 @@ pub fn resolveStatedTimes(allocator: std.mem.Allocator, text: []const u8, curren
     var cursor: usize = 0;
     var replaced: usize = 0;
     var day: ?CivilDate = null;
+    var when: ?Window = null;
+    var counted = false;
     var index: usize = 0;
     while (index < tokens.items.len) {
         const found = matchStatedAt(tokens.items, index, current) orelse {
@@ -516,10 +552,6 @@ pub fn resolveStatedTimes(allocator: std.mem.Allocator, text: []const u8, curren
         if (std.mem.startsWith(u8, text[end + possessive ..], " (")) continue;
 
         replaced += 1;
-        day = switch (found.phrase) {
-            .day => |value| value.date,
-            else => null,
-        };
         var before: ?[]const u8 = adjacentWordBefore(text, tokens.items, first);
         var before_index = first;
         if (found.takes_article and before != null and std.ascii.eqlIgnoreCase(before.?, "the")) {
@@ -527,10 +559,26 @@ pub fn resolveStatedTimes(allocator: std.mem.Allocator, text: []const u8, curren
             before_index = first - 1;
             before = adjacentWordBefore(text, tokens.items, before_index);
         }
-        const bracketed = found.phrase == .span or possessive > 0 or (before != null and isDeterminer(before.?));
+        var phrase = found.phrase;
+        switch (phrase) {
+            // "about two weeks ago", "two weeks ago or so".
+            .around => |*value| if ((before != null and anyWordAt(&.{before.?}, 0, &hedges)) or
+                (wordAt(tokens.items, index, "or") and wordAt(tokens.items, index + 1, "so"))) {
+                value.hedged = true;
+            },
+            else => {},
+        }
+        day = switch (phrase) {
+            .day => |value| value.date,
+            else => null,
+        };
+        when = phrase.covers(current);
+        counted = phrase == .around;
+        const bracketed = found.keeps_words or phrase == .span or possessive > 0 or (before != null and isDeterminer(before.?));
         if (bracketed) {
             try out.writer.writeAll(text[cursor .. end + possessive]);
             try out.writer.writeAll(" (");
+            if (phrase == .around) try out.writer.writeAll("around ");
             try found.phrase.write(&out.writer);
             try out.writer.writeByte(')');
             cursor = end + possessive;
@@ -569,7 +617,13 @@ pub fn resolveStatedTimes(allocator: std.mem.Allocator, text: []const u8, curren
         rest = rest[body.len..];
     }
     try out.writer.writeAll(rest);
-    return .{ .text = try out.toOwnedSlice(), .day = if (replaced == 1) day else null };
+    const one = replaced == 1;
+    return .{
+        .text = try out.toOwnedSlice(),
+        .day = if (one) day else null,
+        .when = if (one) when else null,
+        .counted = one and counted and when != null,
+    };
 }
 
 fn tokenOffset(text: []const u8, token: []const u8) usize {
@@ -642,8 +696,6 @@ fn hasUnplacedTime(tokens: []const []const u8) bool {
         if (anyWordAt(tokens, i, &.{ "recently", "lately" })) return true;
         if (wordAt(tokens, i, "the") and wordAt(tokens, i + 1, "other") and wordAt(tokens, i + 2, "day")) return true;
         if (wordAt(tokens, i, "while") and anyWordAt(tokens, i + 1, &.{ "ago", "back" })) return true;
-        if (anyWordAt(tokens, i, &.{ "few", "several" }) and unitAt(tokens, i + 1) != null and wordAt(tokens, i + 2, "ago")) return true;
-        if (wordAt(tokens, i, "couple") and wordAt(tokens, i + 1, "of") and unitAt(tokens, i + 2) != null and wordAt(tokens, i + 3, "ago")) return true;
         if (wordAt(tokens, i, "next") and (weekdayAt(tokens, i + 1) != null or wordAt(tokens, i + 1, "weekend"))) return true;
         _ = token;
     }
@@ -727,8 +779,20 @@ fn statedDay(tokens: []const []const u8, i: usize, current: CivilDate) ?Stated {
 }
 
 /// N days|weeks|months|years ago. Days are exact; a longer unit is only as
-/// fine as itself.
+/// fine as itself. few|several|couple [of] <units> ago are read as three,
+/// five and two, loosely.
 fn statedAgo(tokens: []const []const u8, i: usize, current: CivilDate) ?Stated {
+    const loose: ?u32 = if (wordAt(tokens, i, "few")) 3 else if (wordAt(tokens, i, "several")) 5 else if (wordAt(tokens, i, "couple")) 2 else null;
+    if (loose) |count| {
+        const j = if (wordAt(tokens, i, "couple") and wordAt(tokens, i + 1, "of")) i + 2 else i + 1;
+        const unit = unitAt(tokens, j) orelse return null;
+        if (!wordAt(tokens, j + 1, "ago")) return null;
+        return .{
+            .len = j + 2 - i,
+            .phrase = .{ .around = .{ .date = shiftBack(current, unit, count), .unit = unit, .hedged = true } },
+            .keeps_words = true,
+        };
+    }
     const count = countAt(tokens, i, true) orelse return null;
     const unit = unitAt(tokens, i + 1) orelse return null;
     if (!wordAt(tokens, i + 2, "ago")) return null;
@@ -1239,7 +1303,7 @@ test "stated times keep their words where replacing them would not read" {
 
 test "times that cannot be placed get the day they were said" {
     const now = "2023-05-13T10:00:00Z";
-    try expectStated("The user watched Evita a few weeks ago.", now, "The user watched Evita a few weeks ago (said on May 13, 2023).", null);
+    try expectStated("The user moved a while ago.", now, "The user moved a while ago (said on May 13, 2023).", null);
     try expectStated("The user recently adopted a beagle", now, "The user recently adopted a beagle (said on May 13, 2023)", null);
     try expectStated("The user is seeing the dentist next Friday.", now, "The user is seeing the dentist next Friday (said on May 13, 2023).", null);
     try expectStated("The user hosts a brunch next weekend.", now, "The user hosts a brunch next weekend (said on May 13, 2023).", null);
@@ -1258,6 +1322,46 @@ test "stated times leave names, dates and other wording alone" {
     try expectStated("The user goes to the gym at 7:00 pm every day.", now, null, null);
     try expectStated("The user visited Rome in July.", now, null, null);
     try expectStated("The user owns 37 coins.", now, null, null);
+}
+
+fn expectWhen(text: []const u8, current: []const u8, expected: ?[2][]const u8, counted: bool) !void {
+    const stated = (try resolveStatedTimes(std.testing.allocator, text, testDate(current))).?;
+    defer std.testing.allocator.free(stated.text);
+    try std.testing.expectEqual(counted, stated.counted);
+    const want = expected orelse return std.testing.expectEqual(@as(?Window, null), stated.when);
+    try std.testing.expect(testDate(want[0]).eql(stated.when.?.start));
+    try std.testing.expect(testDate(want[1]).eql(stated.when.?.end));
+}
+
+test "a loose count keeps its words and gains a date" {
+    // 2023-05-09 is a Tuesday.
+    const now = "2023-05-09T10:00:00Z";
+    try expectStated("The user watched Evita a few weeks ago.", now, "The user watched Evita a few weeks ago (around April 18, 2023).", null);
+    try expectStated("The user moved a couple of months ago.", now, "The user moved a couple of months ago (around March 2023).", null);
+    try expectStated("The user called a plumber a couple days ago.", now, "The user called a plumber a couple days ago (around May 7, 2023).", null);
+    try expectStated("The user visited the Grand Canyon several years ago.", now, "The user visited the Grand Canyon several years ago (around 2018).", null);
+    // A second pass adds nothing, and other counts of things are not times.
+    try expectStated("The user watched Evita a few weeks ago (around April 18, 2023).", now, null, null);
+    try expectStated("The user took a few weeks off and a couple of days to rest.", now, null, null);
+}
+
+test "one stated time gives the days the event covers" {
+    const now = "2023-05-09T10:00:00Z";
+    try expectWhen("The user went to the dentist yesterday.", now, .{ "2023-05-08", "2023-05-08" }, false);
+    try expectWhen("The user ate a bag of chips last week.", now, .{ "2023-05-01", "2023-05-07" }, false);
+    try expectWhen("The user plans a bike ride this weekend.", now, .{ "2023-05-13", "2023-05-14" }, false);
+    try expectWhen("The user moved last month.", now, .{ "2023-04-01", "2023-04-30" }, false);
+    try expectWhen("The user ran a marathon last year.", now, .{ "2022-01-01", "2022-12-31" }, false);
+    // Counted back: a seventh of the distance either way, a third when loose.
+    try expectWhen("The user watched Evita two weeks ago.", now, .{ "2023-04-23", "2023-04-27" }, true);
+    try expectWhen("The user watched Evita about two weeks ago.", now, .{ "2023-04-21", "2023-04-29" }, true);
+    try expectWhen("The user watched Evita two weeks ago or so.", now, .{ "2023-04-21", "2023-04-29" }, true);
+    try expectWhen("The user watched Evita a few weeks ago.", now, .{ "2023-04-11", "2023-04-25" }, true);
+    try expectWhen("The user called a plumber a few days ago.", now, .{ "2023-05-05", "2023-05-07" }, true);
+    // A stretch up to today, two times, or a time that cannot be placed: none.
+    try expectWhen("The user has run 40 km in the last month.", now, null, false);
+    try expectWhen("The user met Dana yesterday and leaves tomorrow.", now, null, false);
+    try expectWhen("The user recently adopted a beagle.", now, null, false);
 }
 
 fn expectWindows(query: []const u8, current: []const u8, expected: []const [2][]const u8) !void {
