@@ -119,8 +119,8 @@ in `context.threads`: a topic as one item of type `summary` whose evidence
 is the message of each fact shown, quoting the fact, and a fact outside any
 topic as an item of type `assertion`. Raw evidence then comes only from the
 sessions the summaries and those facts point at, and from sessions not
-summarised yet, and each session header carries the session's title and
-summary. The section uses at most 45% of the token budget left after the
+summarised yet, and each session header carries the session's title and,
+while the summaries fit in 15% of the budget, its summary. The section uses at most 45% of the token budget left after the
 facts and patterns sections. A scope with no summaries has an empty
 `context.threads` and the context it would have had. The trace gains a
 `threads` block when summaries were read. See

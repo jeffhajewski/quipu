@@ -98,7 +98,9 @@
   event happened. Raw messages are then taken only from the sessions whose
   summaries are nearest the question, sessions dated inside a time it
   names, the sessions the facts shown were said in, and sessions not
-  summarised yet; each session header carries its title and summary. The
+  summarised yet; each session header carries its title and summary. A
+  topic or fact with a cosine under 0.3 is not shown, and header summaries
+  take at most 15% of the budget. The
   response gains `context.threads` (required, empty without summaries) and
   `trace.threads`. There is no option, and a scope with no summaries gets
   the context it had before.

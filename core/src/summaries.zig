@@ -334,6 +334,14 @@ pub const named_time_percent: usize = 50;
 /// A topic or fact less than this near the question, as a share of the
 /// nearest one's cosine, is not about what was asked and is left out.
 pub const relevance_floor: f32 = 0.5;
+/// And nothing whose cosine with the question is under this is about it at
+/// all: a question about what the assistant said is near no topic. On 125
+/// LongMemEval questions 190 of the 194 threads shown that held an answer
+/// scored higher, and 523 of the 847 that held none.
+pub const relevance_min: f32 = 0.3;
+/// Share of the evidence budget the summaries on session headers may take.
+/// Sessions past it are headed by their title alone.
+pub const session_summary_percent = 15;
 /// A loose fact is not added when fewer tokens than this would be left, and
 /// the section is closed when fewer than `closing_tokens` are.
 pub const loose_reserve_tokens: usize = 40;

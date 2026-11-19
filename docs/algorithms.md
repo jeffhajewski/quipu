@@ -960,7 +960,9 @@ leaves out `current_facts`.
    its nearest claim, whichever is nearer, so a topic whose title says little
    is still found through one fact. A claim in no topic competes on its own.
    Anything less than half as near as the nearest is not about the question
-   and is left out.
+   and is left out, and so is anything whose cosine with the question is
+   under 0.3: a question about what the assistant said is near no topic, and
+   then no thread is shown.
 3. **Fill the section.** The threads section may take 45% of the budget left
    after the facts and patterns sections. First, for each time the question
    names (see [Time anchors](#time-anchors)), the claims said or dated inside
@@ -977,12 +979,16 @@ leaves out `current_facts`.
    always open: what was said a minute ago is found by search alone until the
    background work reaches it. Search candidates from a summarised session
    that was not opened are dropped and counted in `trace.threads.rawDropped`.
-5. **Take the raw evidence.** The message behind each fact shown and the
-   search candidates in opened sessions are taken in turn, a fact's message
-   then a search hit, each once; a message is not shown beside one of its own
-   chunks. They are packed into what the budget has left after the sections
-   above. Each session header is followed by that session's title and
-   summary, charged to the first item kept from the session.
+5. **Take the raw evidence.** The search candidates in opened sessions and
+   the message behind each fact shown are taken in turn, a search hit then a
+   fact's message, each once; a message is not shown beside one of its own
+   chunks. Search goes first because its best hit may be a reply, which no
+   fact leads to. They are packed into what the budget has left after the
+   sections above. Each session header is followed by that session's title
+   and summary, charged to the first item kept from the session. The
+   summaries on headers may take 15% of the budget between them, in the
+   order the evidence ranks; a session reached after that is headed by its
+   title alone.
 
 ```text
 <threads>
@@ -1021,6 +1027,13 @@ themselves are ordinary raw items, so a reader that cites a line's qid cites
 a message that is in the packet. `trace.threads` counts the topic and session
 summaries and claims compared, the threads and facts shown, the sessions
 opened, the search candidates dropped, and the tokens the section took.
+
+The shares were set on a 1,024-token budget, where they matter. With the
+threads and a summary on every header, the reply a question asked about was
+pushed out of the context: on 70 LongMemEval questions of all categories,
+correct answers fell from 59 to 55, and came back to 59 with the cosine
+floor, search taken first and the cap on header summaries (57 to 62 at 4,096
+tokens).
 
 Known limits. Every summary and every claim of the scope is read and compared
 for each question; that is a few thousand nodes for a person with hundreds of

@@ -66,21 +66,10 @@
             "qid": "q_msg_4",
             "type": "message",
             "text": "I keep a sourdough starter named Bubbles.",
-            "score": 0.6123724579811096,
+            "score": 4.039926052093506,
             "confidence": 1,
             "state": "current",
             "validFrom": "2023-05-01T19:00:00Z",
-            "validTo": null,
-            "evidence": []
-          },
-          {
-            "qid": "q_msg_11",
-            "type": "message",
-            "text": "I feed Bubbles every morning.",
-            "score": 0.5669467449188232,
-            "confidence": 1,
-            "state": "current",
-            "validFrom": "2023-05-08T19:00:00Z",
             "validTo": null,
             "evidence": []
           },
@@ -94,6 +83,17 @@
             "validFrom": "2023-05-12T19:00:00Z",
             "validTo": null,
             "evidence": []
+          },
+          {
+            "qid": "q_msg_11",
+            "type": "message",
+            "text": "I feed Bubbles every morning.",
+            "score": 0.5669467449188232,
+            "confidence": 1,
+            "state": "current",
+            "validFrom": "2023-05-08T19:00:00Z",
+            "validTo": null,
+            "evidence": []
           }
         ],
         "warnings": []
@@ -103,21 +103,10 @@
           "qid": "q_msg_4",
           "type": "message",
           "text": "I keep a sourdough starter named Bubbles.",
-          "score": 0.6123724579811096,
+          "score": 4.039926052093506,
           "confidence": 1,
           "state": "current",
           "validFrom": "2023-05-01T19:00:00Z",
-          "validTo": null,
-          "evidence": []
-        },
-        {
-          "qid": "q_msg_11",
-          "type": "message",
-          "text": "I feed Bubbles every morning.",
-          "score": 0.5669467449188232,
-          "confidence": 1,
-          "state": "current",
-          "validFrom": "2023-05-08T19:00:00Z",
           "validTo": null,
           "evidence": []
         },
@@ -129,6 +118,17 @@
           "confidence": 1,
           "state": "current",
           "validFrom": "2023-05-12T19:00:00Z",
+          "validTo": null,
+          "evidence": []
+        },
+        {
+          "qid": "q_msg_11",
+          "type": "message",
+          "text": "I feed Bubbles every morning.",
+          "score": 0.5669467449188232,
+          "confidence": 1,
+          "state": "current",
+          "validFrom": "2023-05-08T19:00:00Z",
           "validTo": null,
           "evidence": []
         },
@@ -184,18 +184,8 @@
           {
             "qid": "q_msg_4",
             "type": "message",
-            "score": 0.6123724579811096,
-            "lexical": 0.3797959089279175,
-            "temporal": 1,
-            "scope": 1,
-            "confidence": 1,
-            "recency": 0.75
-          },
-          {
-            "qid": "q_msg_11",
-            "type": "message",
-            "score": 0.5669467449188232,
-            "lexical": 0.3618162274360657,
+            "score": 4.039926052093506,
+            "lexical": 0.8015843629837036,
             "temporal": 1,
             "scope": 1,
             "confidence": 1,
@@ -206,6 +196,16 @@
             "type": "message",
             "score": 1.2659580707550049,
             "lexical": 0.5586855411529541,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75
+          },
+          {
+            "qid": "q_msg_11",
+            "type": "message",
+            "score": 0.5669467449188232,
+            "lexical": 0.3618162274360657,
             "temporal": 1,
             "scope": 1,
             "confidence": 1,
@@ -226,19 +226,8 @@
           {
             "qid": "q_msg_4",
             "type": "message",
-            "finalScore": 0.6123724579811096,
-            "lexical": 0.3797959089279175,
-            "temporal": 1,
-            "scope": 1,
-            "confidence": 1,
-            "recency": 0.75,
-            "formula": "lexical + temporal + scope + confidence + recency"
-          },
-          {
-            "qid": "q_msg_11",
-            "type": "message",
-            "finalScore": 0.5669467449188232,
-            "lexical": 0.3618162274360657,
+            "finalScore": 4.039926052093506,
+            "lexical": 0.8015843629837036,
             "temporal": 1,
             "scope": 1,
             "confidence": 1,
@@ -250,6 +239,17 @@
             "type": "message",
             "finalScore": 1.2659580707550049,
             "lexical": 0.5586855411529541,
+            "temporal": 1,
+            "scope": 1,
+            "confidence": 1,
+            "recency": 0.75,
+            "formula": "lexical + temporal + scope + confidence + recency"
+          },
+          {
+            "qid": "q_msg_11",
+            "type": "message",
+            "finalScore": 0.5669467449188232,
+            "lexical": 0.3618162274360657,
             "temporal": 1,
             "scope": 1,
             "confidence": 1,

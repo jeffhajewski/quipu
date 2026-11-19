@@ -1547,7 +1547,11 @@ pub const Runtime = struct {
             .include_debug = include_trace,
         }, needs_value, evidence_budget, fact_keys, &results);
         defer threads.deinit();
-        const dropped_for_budget = try results.applySessionTokenBudget(evidence_budget - threads.trace.tokens, &threads.session_titles);
+        const dropped_for_budget = try results.applySessionTokenBudget(
+            evidence_budget - threads.trace.tokens,
+            &threads,
+            evidence_budget * summaries.session_summary_percent / 100,
+        );
         try results.adopt(&facts.items);
         try results.adopt(&owned_pattern.items);
         try results.adopt(&threads.items);
@@ -1755,7 +1759,11 @@ pub const Runtime = struct {
             .include_debug = include_trace,
         }, needs_value, evidence_budget, fact_keys, &results);
         defer threads.deinit();
-        const dropped_for_budget = try results.applySessionTokenBudget(evidence_budget - threads.trace.tokens, &threads.session_titles);
+        const dropped_for_budget = try results.applySessionTokenBudget(
+            evidence_budget - threads.trace.tokens,
+            &threads,
+            evidence_budget * summaries.session_summary_percent / 100,
+        );
         try results.adopt(&facts.items);
         try results.adopt(&owned_pattern.items);
         try results.adopt(&threads.items);
@@ -3500,8 +3508,8 @@ pub const Runtime = struct {
     /// whichever is nearer, and one that does not fit whole is shown with
     /// the facts nearest the question that do. A fact in no topic competes
     /// on its own and is listed under `summaries.loose_heading`. Nothing
-    /// less than `summaries.relevance_floor` as near as the nearest is
-    /// shown. The section takes at most `summaries.threads_budget_percent`
+    /// less than `summaries.relevance_floor` as near as the nearest, or with
+    /// a cosine under `summaries.relevance_min`, is shown. The section takes at most `summaries.threads_budget_percent`
     /// of `budget`.
     ///
     /// Raw evidence in `results` is then cut back to the sessions this opens:
@@ -3657,7 +3665,7 @@ pub const Runtime = struct {
         var loose = std.ArrayList(u32).empty;
         const nearest = if (candidates.items.len > 0) candidates.items[0].score else 0;
         for (candidates.items) |candidate| {
-            if (candidate.score < nearest * summaries.relevance_floor or candidate.score <= 0) break;
+            if (candidate.score < nearest * summaries.relevance_floor or candidate.score < summaries.relevance_min) break;
             if (candidate.topic) |topic_index| {
                 const topic = topics.items[topic_index];
                 var members = std.ArrayList(u32).empty;
@@ -3769,7 +3777,11 @@ pub const Runtime = struct {
         for (sessions.items) |*session| {
             session.score = question.cosine(session.vector);
             try summarised.put(arena, session.session_qid.?, {});
-            if (session.text.len > 0) try found.session_titles.put(kept, try kept.dupe(u8, session.session_qid.?), try kept.dupe(u8, session.text));
+            if (session.text.len > 0) {
+                const key = try kept.dupe(u8, session.session_qid.?);
+                try found.session_titles.put(kept, key, try kept.dupe(u8, session.text));
+                try found.session_names.put(kept, key, try kept.dupe(u8, session.title));
+            }
             const said = parseIsoDate(session.first_said orelse continue) catch continue;
             for (named) |time| {
                 const window = time.window orelse continue;
@@ -3832,13 +3844,14 @@ pub const Runtime = struct {
             results.items.items.len = write_index;
         }
 
-        // In turn, a message behind a fact and a message search found, each
-        // once: a message is not shown beside one of its own chunks.
+        // In turn, a message search found and a message behind a fact, each
+        // once: a message is not shown beside one of its own chunks. Search
+        // goes first: its best hit may be a reply, which no fact leads to.
         try results.items.ensureUnusedCapacity(allocator, from_facts.items.items.len + from_search.items.len);
         const raw_start = results.items.items.len;
         const longest = @max(from_facts.items.items.len, from_search.items.len);
         for (0..longest) |index| {
-            for ([_][]const MessageResult{ from_facts.items.items, from_search.items }) |list| {
+            for ([_][]const MessageResult{ from_search.items, from_facts.items.items }) |list| {
                 if (index >= list.len) continue;
                 const item = list[index];
                 const repeated = for (results.items.items[raw_start..]) |taken| {
@@ -8100,22 +8113,35 @@ const OwnedItems = struct {
 
     /// `applyTokenBudget` for a context whose session headers carry the
     /// session's summary: the first item kept from a session pays for it.
-    fn applySessionTokenBudget(self: *OwnedItems, budget: usize, titles: *const std.StringHashMapUnmanaged([]const u8)) !usize {
+    /// The summaries may take `summary_limit` tokens between them, in the
+    /// order the sessions are reached; a session past that is headed by its
+    /// title alone, and `threads.session_titles` then says so.
+    fn applySessionTokenBudget(self: *OwnedItems, budget: usize, threads: *ThreadItems, summary_limit: usize) !usize {
+        const titles = &threads.session_titles;
         if (titles.count() == 0) return self.applyTokenBudget(budget);
         var charged: std.StringHashMapUnmanaged(void) = .empty;
         defer charged.deinit(self.allocator);
         var dropped: usize = 0;
         var used: usize = 0;
+        var summaries_used: usize = 0;
         var write_index: usize = 0;
         for (self.items.items) |item| {
             var item_tokens = estimateItemTokens(item);
             var session: ?[]const u8 = null;
+            var heading: []const u8 = "";
+            var summary_tokens: usize = 0;
             if (item.raw_source) |source| {
                 if (source.session_qid) |session_qid| {
                     if (!charged.contains(session_qid)) {
                         if (titles.get(session_qid)) |title| {
-                            item_tokens += estimatePromptTokens(title) + 2;
                             session = session_qid;
+                            heading = title;
+                            summary_tokens = estimatePromptTokens(title) + 2;
+                            if (summaries_used + summary_tokens > summary_limit) {
+                                heading = threads.session_names.get(session_qid) orelse "";
+                                summary_tokens = 0;
+                            }
+                            item_tokens += estimatePromptTokens(heading) + 2;
                         }
                     }
                 }
@@ -8126,7 +8152,11 @@ const OwnedItems = struct {
                 continue;
             }
             // The key belongs to an item that is kept.
-            if (session) |session_qid| try charged.put(self.allocator, session_qid, {});
+            if (session) |session_qid| {
+                try charged.put(self.allocator, session_qid, {});
+                titles.getPtr(session_qid).?.* = heading;
+                summaries_used += summary_tokens;
+            }
             used += item_tokens;
             self.items.items[write_index] = item;
             write_index += 1;
@@ -8189,9 +8219,12 @@ const ThreadItems = struct {
     /// False when the scope has no summary to read: the context is then
     /// built as it was before there were any.
     active: bool = false,
-    /// `Title: summary` of each summarised session, by session qid, for the
-    /// session headers.
+    /// What the header of each summarised session says, by session qid:
+    /// `Title: summary`, or once `applySessionTokenBudget` has run, the
+    /// title alone for a session past the summaries' share of the budget.
     session_titles: std.StringHashMapUnmanaged([]const u8) = .empty,
+    /// The title alone, for the same sessions.
+    session_names: std.StringHashMapUnmanaged([]const u8) = .empty,
     arena_state: std.heap.ArenaAllocator,
 
     fn deinit(self: *ThreadItems) void {
@@ -8284,6 +8317,7 @@ const ShownSummary = struct {
     kind: SummaryKind,
     /// `Title: summary`.
     text: []const u8,
+    title: []const u8 = "",
     vector: []const i8,
     vector_model: ?[]const u8 = null,
     members: []const []const u8 = &.{},
@@ -8328,6 +8362,7 @@ fn parseShownSummary(arena: std.mem.Allocator, node: storage.Node) !?ShownSummar
         .qid = node.qid,
         .kind = kind,
         .text = text,
+        .title = stringField(&props, "title") orelse "",
         .vector = vector,
         .vector_model = optionalStringField(&props, "vectorModel"),
         .members = members.items,
@@ -9938,8 +9973,10 @@ fn writeSessionSection(
             if (session_titles) |titles| {
                 if (group.first_session_qid) |session_qid| {
                     if (titles.get(session_qid)) |title| {
-                        try out.writeAll(" | ");
-                        try writeItemText(out, title);
+                        if (title.len > 0) {
+                            try out.writeAll(" | ");
+                            try writeItemText(out, title);
+                        }
                     }
                 }
             }
@@ -15117,7 +15154,7 @@ test "retrieval shows the topics nearest the question and opens sessions through
 
     // With less room than the topic needs, it is shown with the facts
     // nearest the question, and says how many it has.
-    const tight = try threadRetrieve(&runtime, "How is my sourdough starter Bubbles doing?", 400);
+    const tight = try threadRetrieve(&runtime, "How is my sourdough starter Bubbles doing?", 380);
     defer allocator.free(tight);
     const tight_prompt = try resultStringField(allocator, tight, "prompt");
     defer allocator.free(tight_prompt);
@@ -15125,6 +15162,11 @@ test "retrieval shows the topics nearest the question and opens sessions through
     try std.testing.expect(std.mem.indexOf(u8, tight_prompt, "The user keeps a sourdough starter named Bubbles.\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, tight_prompt, "The user feeds the sourdough starter named Bubbles daily.\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, tight_prompt, "gave half of the sourdough starter") == null);
+    // The summaries on session headers have their share of the budget too,
+    // taken in the order the evidence ranks: the session reached past it is
+    // headed by its title alone.
+    try std.testing.expect(std.mem.indexOf(u8, tight_prompt, "## session day-12 2023-05-12 (Fri) | Looking after Bubbles: The user talked about the sourdough starter Bubbles.\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tight_prompt, "## session day-8 2023-05-08 (Mon) | Looking after Bubbles\n") != null);
 
     // A later conversation that only mentions a starter in passing: its
     // summary is about something else and none of its messages is behind a
