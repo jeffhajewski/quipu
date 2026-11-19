@@ -21,6 +21,7 @@
 const std = @import("std");
 const fact_extraction = @import("fact_extraction.zig");
 const patterns = @import("patterns.zig");
+const temporal = @import("temporal.zig");
 
 const Value = std.json.Value;
 
@@ -317,6 +318,168 @@ fn clamp(arena: std.mem.Allocator, value: []const u8, max_bytes: usize) ![]u8 {
 // ---------------------------------------------------------------------------
 // Tests
 
+// ---------------------------------------------------------------------------
+// Showing threads to a question
+
+/// Opens the threads section of a context.
+pub const threads_note = "(Background jobs grouped facts the user stated into threads by subject, oldest first. " ++
+    "Each line: the qid of the source message, the date it was said and how long ago that was, then the fact. " ++
+    "\"happened\" gives the event's date when it is not the date said; \"about\" gives a date worked out from a relative time (\"a month ago\").)";
+/// The heading over facts that belong to no thread.
+pub const loose_heading = "Other facts";
+/// The share of the context the threads section may use, in percent, and
+/// the share of that which facts from a time the question names may use.
+pub const threads_budget_percent: usize = 45;
+pub const named_time_percent: usize = 50;
+/// A topic or fact less than this near the question, as a share of the
+/// nearest one's cosine, is not about what was asked and is left out.
+pub const relevance_floor: f32 = 0.5;
+/// A loose fact is not added when fewer tokens than this would be left, and
+/// the section is closed when fewer than `closing_tokens` are.
+pub const loose_reserve_tokens: usize = 40;
+pub const closing_tokens: usize = 60;
+/// Sessions opened for their raw messages: the ones whose summary is nearest
+/// the question, and the ones the first facts shown were said in.
+pub const opened_by_summary: usize = 6;
+pub const opened_by_facts: usize = 10;
+
+/// One fact of a thread as the reader sees it.
+pub const ShownFact = struct {
+    /// The day it was said.
+    said: temporal.CivilDate,
+    text: []const u8,
+    /// The days its event covers, when the claim names a time.
+    event: ?temporal.Window = null,
+    planned: bool = false,
+};
+
+/// Where a fact stands among the facts of its thread: the day of its event,
+/// the middle of a longer one, or the day it was said.
+pub fn placedDay(fact: ShownFact) i64 {
+    const span = fact.event orelse return temporal.daysFromCivil(fact.said);
+    return @divFloor(temporal.daysFromCivil(span.start) + temporal.daysFromCivil(span.end), 2);
+}
+
+/// `2023-05-20 (Sat), 10 days ago: <text>`, then when the event was if that
+/// is not the day it was said: ` (happened 2023-05-13 (Sat), 17 days ago)`
+/// for a day, ` (happened 2023-04)` for a month, ` (about 2023-05-06 (Sat),
+/// 24 days ago)` for the middle of any other span. Without `current` the
+/// offsets are left out. A fact whose text names more than one date gets no
+/// event date: one date cannot stand for two events.
+pub fn writeFactLine(out: *std.Io.Writer, fact: ShownFact, current: ?temporal.CivilDate) !void {
+    try writeDay(out, fact.said, current);
+    try out.writeAll(": ");
+    try out.writeAll(fact.text);
+    const span = fact.event orelse return;
+    if (datesNamed(fact.text) > 1) return;
+    const verb: []const u8 = if (fact.planned) "planned for" else "happened";
+    const start = temporal.daysFromCivil(span.start);
+    const end = temporal.daysFromCivil(span.end);
+    if (start == end) {
+        if (span.start.eql(fact.said)) return;
+        try out.print(" ({s} ", .{verb});
+        try writeDay(out, span.start, current);
+        try out.writeByte(')');
+    } else if (span.start.year == span.end.year and span.start.month == 1 and span.start.day == 1 and span.end.month == 12 and span.end.day == 31) {
+        if (span.start.year == fact.said.year) return;
+        try out.print(" ({s} {d:0>4})", .{ verb, @as(u32, @intCast(span.start.year)) });
+    } else if (span.start.year == span.end.year and span.start.month == span.end.month and span.start.day == 1 and
+        span.end.day == temporal.daysInMonth(span.end.year, span.end.month))
+    {
+        if (span.start.year == fact.said.year and span.start.month == fact.said.month) return;
+        try out.print(" ({s} {d:0>4}-{d:0>2})", .{ verb, @as(u32, @intCast(span.start.year)), span.start.month });
+    } else {
+        const middle = temporal.civilFromDays(@divFloor(start + end, 2));
+        if (middle.eql(fact.said)) return;
+        try out.writeAll(if (fact.planned) " (planned for about " else " (about ");
+        try writeDay(out, middle, current);
+        try out.writeByte(')');
+    }
+}
+
+/// `2023-05-20 (Sat), 10 days ago`.
+pub fn writeDay(out: *std.Io.Writer, date: temporal.CivilDate, current: ?temporal.CivilDate) !void {
+    try out.print("{d:0>4}-{d:0>2}-{d:0>2} ({s})", .{ @as(u32, @intCast(@max(date.year, 0))), date.month, date.day, temporal.weekdayName(date)[0..3] });
+    if (current) |today| {
+        try out.writeAll(", ");
+        try temporal.writeOffset(out, date, today);
+    }
+}
+
+const month_names = [_][]const u8{ "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december" };
+
+/// How many different calendar days `text` names, as `May 13`, `May 13th`,
+/// `Sept. 3` or `2023-05-13`. A month with a year and no day is not a day.
+pub fn datesNamed(text: []const u8) usize {
+    var seen: [8][2]u8 = undefined;
+    var count: usize = 0;
+    var index: usize = 0;
+    while (index < text.len) {
+        if (!std.ascii.isAlphanumeric(text[index])) {
+            index += 1;
+            continue;
+        }
+        var end = index;
+        while (end < text.len and (std.ascii.isAlphanumeric(text[end]) or text[end] == '-')) end += 1;
+        const word = text[index..end];
+        var found: ?[2]u8 = isoDay(word);
+        if (found == null) {
+            if (monthOf(word)) |month| {
+                var at = end;
+                if (at < text.len and text[at] == '.') at += 1;
+                if (at < text.len and text[at] == ' ') {
+                    at += 1;
+                    var digits = at;
+                    while (digits < text.len and std.ascii.isDigit(text[digits])) digits += 1;
+                    var after = digits;
+                    while (after < text.len and std.ascii.isAlphabetic(text[after])) after += 1;
+                    const suffix = text[digits..after];
+                    const ordinal = suffix.len == 0 or std.mem.eql(u8, suffix, "st") or std.mem.eql(u8, suffix, "nd") or
+                        std.mem.eql(u8, suffix, "rd") or std.mem.eql(u8, suffix, "th");
+                    if (digits > at and digits - at <= 2 and ordinal) {
+                        const day = std.fmt.parseInt(u8, text[at..digits], 10) catch 0;
+                        if (day >= 1 and day <= 31) {
+                            found = .{ month, day };
+                            end = after;
+                        }
+                    }
+                }
+            }
+        }
+        if (found) |date| {
+            const known = for (seen[0..count]) |other| {
+                if (other[0] == date[0] and other[1] == date[1]) break true;
+            } else false;
+            if (!known and count < seen.len) {
+                seen[count] = date;
+                count += 1;
+            }
+        }
+        index = @max(end, index + 1);
+    }
+    return count;
+}
+
+fn monthOf(word: []const u8) ?u8 {
+    if (word.len < 3 or word.len > 9) return null;
+    var buffer: [9]u8 = undefined;
+    const lower = std.ascii.lowerString(&buffer, word);
+    for (month_names, 1..) |name, month| {
+        if (std.mem.eql(u8, lower, name) or std.mem.eql(u8, lower, name[0..3])) return @intCast(month);
+        if (month == 9 and std.mem.eql(u8, lower, "sept")) return 9;
+    }
+    return null;
+}
+
+fn isoDay(word: []const u8) ?[2]u8 {
+    if (word.len != 10 or word[4] != '-' or word[7] != '-') return null;
+    _ = std.fmt.parseInt(u16, word[0..4], 10) catch return null;
+    const month = std.fmt.parseInt(u8, word[5..7], 10) catch return null;
+    const day = std.fmt.parseInt(u8, word[8..10], 10) catch return null;
+    if (month < 1 or month > 12 or day < 1 or day > 31) return null;
+    return .{ month, day };
+}
+
 const testing = std.testing;
 
 /// Unit vectors in a plane at the given angles (degrees), quantised.
@@ -439,4 +602,84 @@ test "a summary reply is a title with a summary, or a refusal" {
     try testing.expectError(error.MalformedSummary, parseNamed(arena, "{\"summary\": \"no title key\"}"));
     const long = try parseNamed(arena, "{\"title\": \"" ++ "t" ** 300 ++ "\", \"summary\": \"s\"}");
     try testing.expectEqual(max_title_bytes, long.title.?.len);
+}
+
+fn factLine(fact: ShownFact, current: ?temporal.CivilDate) ![]u8 {
+    var writer: std.Io.Writer.Allocating = .init(testing.allocator);
+    errdefer writer.deinit();
+    try writeFactLine(&writer.writer, fact, current);
+    return writer.toOwnedSlice();
+}
+
+fn expectFactLine(expected: []const u8, fact: ShownFact, current: ?temporal.CivilDate) !void {
+    const line = try factLine(fact, current);
+    defer testing.allocator.free(line);
+    try testing.expectEqualStrings(expected, line);
+}
+
+test "a fact line gives the day said and the day of the event when they differ" {
+    const today = temporal.CivilDate{ .year = 2023, .month = 5, .day = 30 };
+    const said = temporal.CivilDate{ .year = 2023, .month = 5, .day = 20 };
+    const day = temporal.CivilDate{ .year = 2023, .month = 5, .day = 13 };
+
+    try expectFactLine("2023-05-20 (Sat), 10 days ago: The user adopted a cat.", .{ .said = said, .text = "The user adopted a cat." }, today);
+    try expectFactLine("2023-05-20 (Sat): The user adopted a cat.", .{ .said = said, .text = "The user adopted a cat." }, null);
+    // The event was on another day.
+    try expectFactLine(
+        "2023-05-20 (Sat), 10 days ago: The user adopted a cat on May 13, 2023. (happened 2023-05-13 (Sat), 17 days ago)",
+        .{ .said = said, .text = "The user adopted a cat on May 13, 2023.", .event = .{ .start = day, .end = day } },
+        today,
+    );
+    // The same day says nothing new.
+    try expectFactLine(
+        "2023-05-20 (Sat), 10 days ago: The user adopted a cat today.",
+        .{ .said = said, .text = "The user adopted a cat today.", .event = .{ .start = said, .end = said } },
+        today,
+    );
+    // A month, a year, and a span that is neither: its middle.
+    try expectFactLine(
+        "2023-05-20 (Sat), 10 days ago: The user moved in April. (happened 2023-04)",
+        .{ .said = said, .text = "The user moved in April.", .event = .{ .start = .{ .year = 2023, .month = 4, .day = 1 }, .end = .{ .year = 2023, .month = 4, .day = 30 } } },
+        today,
+    );
+    try expectFactLine(
+        "2023-05-20 (Sat), 10 days ago: The user graduated in 2019. (happened 2019)",
+        .{ .said = said, .text = "The user graduated in 2019.", .event = .{ .start = .{ .year = 2019, .month = 1, .day = 1 }, .end = .{ .year = 2019, .month = 12, .day = 31 } } },
+        today,
+    );
+    try expectFactLine(
+        "2023-05-20 (Sat), 10 days ago: The user started running two weeks ago. (about 2023-05-06 (Sat), 24 days ago)",
+        .{ .said = said, .text = "The user started running two weeks ago.", .event = .{ .start = .{ .year = 2023, .month = 5, .day = 4 }, .end = .{ .year = 2023, .month = 5, .day = 8 } } },
+        today,
+    );
+    // Something still to come.
+    try expectFactLine(
+        "2023-05-20 (Sat), 10 days ago: The user flies to Lisbon on June 2. (planned for 2023-06-02 (Fri), in 3 days)",
+        .{ .said = said, .text = "The user flies to Lisbon on June 2.", .event = .{ .start = .{ .year = 2023, .month = 6, .day = 2 }, .end = .{ .year = 2023, .month = 6, .day = 2 } }, .planned = true },
+        today,
+    );
+    // Two dates in one fact: neither is given as the date of the event.
+    try expectFactLine(
+        "2023-05-20 (Sat), 10 days ago: The user left on May 3 and came back on May 13.",
+        .{ .said = said, .text = "The user left on May 3 and came back on May 13.", .event = .{ .start = day, .end = day } },
+        today,
+    );
+}
+
+test "a fact is placed at its event when it names one" {
+    const said = temporal.CivilDate{ .year = 2023, .month = 5, .day = 20 };
+    try testing.expectEqual(temporal.daysFromCivil(said), placedDay(.{ .said = said, .text = "" }));
+    try testing.expectEqual(
+        temporal.daysFromCivil(.{ .year = 2023, .month = 5, .day = 6 }),
+        placedDay(.{ .said = said, .text = "", .event = .{ .start = .{ .year = 2023, .month = 5, .day = 4 }, .end = .{ .year = 2023, .month = 5, .day = 8 } } }),
+    );
+}
+
+test "the dates a text names are counted once each" {
+    try testing.expectEqual(@as(usize, 0), datesNamed("The user adopted a cat."));
+    try testing.expectEqual(@as(usize, 1), datesNamed("The user adopted a cat on May 13, 2023."));
+    try testing.expectEqual(@as(usize, 1), datesNamed("On May 13th (2023-05-13) the user adopted a cat."));
+    try testing.expectEqual(@as(usize, 2), datesNamed("The user left on Sept. 3 and came back on 2023-09-10."));
+    try testing.expectEqual(@as(usize, 0), datesNamed("The user moved in May 2023 and may 12 times have said so."[0..25]));
+    try testing.expectEqual(@as(usize, 0), datesNamed("The marching band played 12 songs in March."));
 }
