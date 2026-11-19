@@ -220,7 +220,7 @@
     },
     "timeAnchorsTrace": {
       "type": "object",
-      "description": "Present only when options.timeAnchors was true.",
+      "description": "Present when the question names a time (10 days ago, last Saturday, in January) and time.validAt is given: what people said inside that time is moved ahead of the other candidates, the prompt states the resolved date in a Time references line, and each session dated inside it says so in its header.",
       "required": ["windows", "items", "tokens"],
       "additionalProperties": false,
       "properties": {
@@ -465,7 +465,7 @@
             },
             "timeAnchors": {
               "type": "boolean",
-              "description": "memory.retrieve and memory.answer accept options.timeAnchors."
+              "description": "memory.retrieve and memory.answer resolve a time the question names and anchor the context on what was said then. Not an option."
             },
             "patterns": {
               "type": "object",
@@ -624,10 +624,6 @@
               "type": "boolean",
               "description": "Put the matching claims that consolidation found replaced, each with the claim that replaced it, ahead of the raw evidence, as a facts section of dated lines: (superseded, YYYY-MM-DD to YYYY-MM-DD) and (current, from YYYY-MM-DD). A claim with no replacement is not listed. The section uses at most 30% of the token budget, taken from the raw evidence; each fact is listed under the qid of the message it was drawn from. Default false: claims and updates take no part in the context."
             },
-            "timeAnchors": {
-              "type": "boolean",
-              "description": "When the question names a time (10 days ago, last Saturday, in January), move what people said inside that window ahead of the other candidates, most relevant first. A message is inside a window when it was written then or, with factKeys, when a claim drawn from it has an event date then. Only speakers' messages are anchored, at most 24 per window and half the token budget in all. Needs a parseable time.validAt. Default false."
-            },
             "queryExpansion": { "$ref": "#/$defs/queryExpansionMode" },
             "format": { "type": "string", "enum": ["prompt", "json"] }
           }
@@ -755,10 +751,6 @@
             "facts": {
               "type": "boolean",
               "description": "Put the matching claims that consolidation found replaced, each with the claim that replaced it, ahead of the raw evidence, as a facts section of dated lines: (superseded, YYYY-MM-DD to YYYY-MM-DD) and (current, from YYYY-MM-DD). A claim with no replacement is not listed. The section uses at most 30% of the token budget, taken from the raw evidence; each fact is listed under the qid of the message it was drawn from. Default false: claims and updates take no part in the context."
-            },
-            "timeAnchors": {
-              "type": "boolean",
-              "description": "When the question names a time (10 days ago, last Saturday, in January), move what people said inside that window ahead of the other candidates, most relevant first. A message is inside a window when it was written then or, with factKeys, when a claim drawn from it has an event date then. Only speakers' messages are anchored, at most 24 per window and half the token budget in all. Needs a parseable time.validAt. Default false."
             },
             "queryExpansion": { "$ref": "#/$defs/queryExpansionMode" },
             "format": { "type": "string", "enum": ["prompt", "json"] }

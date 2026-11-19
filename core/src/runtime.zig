@@ -40,7 +40,7 @@ const message_chunk_boundary_window = 200;
 const default_budget_tokens: i64 = 4096;
 /// Candidate items kept per retrieval; enough chunks to fill the default budget.
 const retrieval_candidate_limit: usize = 80;
-/// `options.timeAnchors`: how deep the search goes for items dated inside a
+/// Time anchors: how deep the search goes for items dated inside a
 /// window the question names, and how many of them each window may bring in.
 const time_anchor_hit_limit: usize = 1000;
 const time_anchor_items_per_window: usize = 24;
@@ -287,7 +287,7 @@ const RetrievalTrace = struct {
     queryExpansion: ?query_expansion.Trace = null,
     /// Present only when `options.facts` is true.
     facts: ?FactsTrace = null,
-    /// Present only when `options.timeAnchors` is true.
+    /// Present only when the question names a time that was searched by.
     timeAnchors: ?TimeAnchorsTrace = null,
     /// Present only when the scope has pattern nodes with a finding.
     patterns: ?PatternsTrace = null,
@@ -338,7 +338,7 @@ const FactsTrace = struct {
     tokens: usize = 0,
 };
 
-/// `options.timeAnchors`: what the times named in the question brought in.
+/// What the times named in the question brought in.
 const TimeAnchorsTrace = struct {
     /// Date windows resolved from the question.
     windows: usize = 0,
@@ -1377,7 +1377,6 @@ pub const Runtime = struct {
         const temporal_hints = if (options) |opts| boolField(&opts, "temporalHints") orelse false else false;
         const fact_keys = if (options) |opts| boolField(&opts, "factKeys") orelse false else false;
         const with_facts = if (options) |opts| boolField(&opts, "facts") orelse false else false;
-        const time_anchors = if (options) |opts| boolField(&opts, "timeAnchors") orelse false else false;
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
         };
@@ -1402,16 +1401,15 @@ pub const Runtime = struct {
             .include_debug = include_trace,
         }, fact_keys);
         defer results.deinit();
-        var time_anchors_trace: ?TimeAnchorsTrace = null;
-        if (time_anchors) {
-            time_anchors_trace = try self.applyTimeAnchors(allocator, &results, query, retrieve_mode, .{
-                .scope = scope,
-                .valid_at = valid_at,
-                .event_window = event_window,
-                .include_evidence = include_evidence,
-                .include_debug = include_trace,
-            }, fact_keys, @intCast(budget));
-        }
+        // A question that names a time is answered from what was said then.
+        var time_anchors_trace: ?TimeAnchorsTrace = try self.applyTimeAnchors(allocator, &results, query, retrieve_mode, .{
+            .scope = scope,
+            .valid_at = valid_at,
+            .event_window = event_window,
+            .include_evidence = include_evidence,
+            .include_debug = include_trace,
+        }, fact_keys, @intCast(budget));
+        if (time_anchors_trace.?.windows == 0) time_anchors_trace = null;
         if (needsIncludes(needs_value, "core")) {
             try self.appendCoreItems(allocator, &results, scope, include_evidence, include_trace);
         }
@@ -1458,12 +1456,15 @@ pub const Runtime = struct {
         const retrieval_id = try self.nextQid(allocator, "retr");
         defer allocator.free(retrieval_id);
         const hint_date = temporalHintDate(temporal_hints, valid_at);
-        const time_references = try timeReferencesForQuery(allocator, query, hint_date);
+        const question_date = temporalHintDate(true, valid_at);
+        const time_references = try timeReferencesForQuery(allocator, query, question_date);
         defer if (time_references) |text| allocator.free(text);
         const prompt = try promptFromContext(allocator, self.store, context.view(), .{
             .current_date = valid_at,
             .hint_date = hint_date,
             .time_references = time_references,
+            .question = query,
+            .question_date = question_date,
         });
         defer allocator.free(prompt);
         const token_estimate = estimatePromptTokens(prompt);
@@ -1569,7 +1570,6 @@ pub const Runtime = struct {
         const temporal_hints = if (options) |opts| boolField(&opts, "temporalHints") orelse false else false;
         const fact_keys = if (options) |opts| boolField(&opts, "factKeys") orelse false else false;
         const with_facts = if (options) |opts| boolField(&opts, "facts") orelse false else false;
-        const time_anchors = if (options) |opts| boolField(&opts, "timeAnchors") orelse false else false;
         const log_retrieval = if (options) |opts| boolField(&opts, "logRetrieval") orelse (boolField(&opts, "logTrace") orelse true) else true;
         const retrieve_mode = parseRetrieveMode(stringField(params, "mode"), self.store.capabilities()) orelse {
             return errorResponse(allocator, id, "invalid_request", "mode must be fts, vector, hybrid, or graph");
@@ -1595,16 +1595,15 @@ pub const Runtime = struct {
             .include_debug = include_trace,
         }, fact_keys);
         defer results.deinit();
-        var time_anchors_trace: ?TimeAnchorsTrace = null;
-        if (time_anchors) {
-            time_anchors_trace = try self.applyTimeAnchors(allocator, &results, query, retrieve_mode, .{
-                .scope = scope,
-                .valid_at = valid_at,
-                .event_window = event_window,
-                .include_evidence = include_evidence,
-                .include_debug = include_trace,
-            }, fact_keys, @intCast(budget));
-        }
+        // A question that names a time is answered from what was said then.
+        var time_anchors_trace: ?TimeAnchorsTrace = try self.applyTimeAnchors(allocator, &results, query, retrieve_mode, .{
+            .scope = scope,
+            .valid_at = valid_at,
+            .event_window = event_window,
+            .include_evidence = include_evidence,
+            .include_debug = include_trace,
+        }, fact_keys, @intCast(budget));
+        if (time_anchors_trace.?.windows == 0) time_anchors_trace = null;
         if (needsIncludes(needs_value, "core")) {
             try self.appendCoreItems(allocator, &results, scope, include_evidence, include_trace);
         }
@@ -1650,13 +1649,18 @@ pub const Runtime = struct {
 
         const retrieval_id = try self.nextQid(allocator, "retr");
         defer allocator.free(retrieval_id);
-        // The question date (and, with temporal hints, the query's resolved
+        // The question date (and the query's resolved
         // time references) travels in the reader's user turn, not inside the
         // untrusted memory block.
         const hint_date = temporalHintDate(temporal_hints, valid_at);
-        const time_references = try timeReferencesForQuery(allocator, query, hint_date);
+        const question_date = temporalHintDate(true, valid_at);
+        const time_references = try timeReferencesForQuery(allocator, query, question_date);
         defer if (time_references) |text| allocator.free(text);
-        const prompt = try promptFromContext(allocator, self.store, context.view(), .{ .hint_date = hint_date });
+        const prompt = try promptFromContext(allocator, self.store, context.view(), .{
+            .hint_date = hint_date,
+            .question = query,
+            .question_date = question_date,
+        });
         defer allocator.free(prompt);
         const token_estimate = estimatePromptTokens(prompt);
         const score_breakdowns = try buildScoreBreakdowns(allocator, results.items.items);
@@ -3222,7 +3226,7 @@ pub const Runtime = struct {
         return owned;
     }
 
-    /// `options.timeAnchors`: when the question names a time (`10 days ago`,
+    /// When the question names a time (`10 days ago`,
     /// `last Saturday`, `in January`), what people said inside that window is
     /// moved ahead of every other candidate, most relevant first. A question
     /// like "what did I buy 10 days ago?" says little about the purchase, so
@@ -7845,10 +7849,16 @@ const PromptOptions = struct {
     /// Temporal hints: each dated session header gains its offset from this
     /// date (`## session s07 2023-05-20 (Sat), 10 days ago`).
     hint_date: ?temporal.CivilDate = null,
-    /// Temporal hints: resolved time references from the query, rendered as a
+    /// Resolved time references from the query, rendered as a
     /// `Time references:` line after `Current date:` (retrieve only; the
     /// answer path puts them in the reader's user turn).
     time_references: ?[]const u8 = null,
+    /// The question and its trusted date. A session dated inside a time the
+    /// question names says so in its header (`## session s07 2023-05-20
+    /// (Sat): the question's "last Saturday"`), so the reader does not have
+    /// to do the date arithmetic to find it.
+    question: ?[]const u8 = null,
+    question_date: ?temporal.CivilDate = null,
 };
 
 /// Per-item rendering metadata read from the item's node. Every field is
@@ -7921,7 +7931,11 @@ fn renderPrompt(
     try writePromptSection(arena, out, "preferences", context.preferences);
     try writePromptSection(arena, out, "procedures", context.procedural);
     try writePromptSection(arena, out, "patterns", context.patterns);
-    try writeSessionSection(arena, out, entries, options.hint_date);
+    const named_times: []const temporal.NamedTime = if (options.question_date) |date|
+        try temporal.resolveNamedTimes(arena, options.question orelse "", date)
+    else
+        &.{};
+    try writeSessionSection(arena, out, entries, options.hint_date, named_times);
     try out.writeAll("\n</memory>");
     return writer.toOwnedSlice();
 }
@@ -7977,7 +7991,13 @@ fn derivedRendersBefore(items: []const MessageResult, left: usize, right: usize)
 /// repeats its date only when it differs from the session date. Items without
 /// a session go last under `## other`. With a `hint_date`, a dated header ends
 /// with its offset from that date (`, 10 days ago`).
-fn writeSessionSection(arena: std.mem.Allocator, out: *std.Io.Writer, entries: []const RenderEntry, hint_date: ?temporal.CivilDate) !void {
+fn writeSessionSection(
+    arena: std.mem.Allocator,
+    out: *std.Io.Writer,
+    entries: []const RenderEntry,
+    hint_date: ?temporal.CivilDate,
+    named_times: []const temporal.NamedTime,
+) !void {
     if (entries.len == 0) return;
     var groups = std.ArrayList(RenderGroup).empty;
     for (entries, 0..) |entry, index| {
@@ -8015,6 +8035,16 @@ fn writeSessionSection(arena: std.mem.Allocator, out: *std.Io.Writer, entries: [
                     if (hint_date) |current| {
                         try out.writeAll(", ");
                         try temporal.writeOffset(out, civil, current);
+                    }
+                    for (named_times) |time| {
+                        const window = time.window orelse continue;
+                        if (!temporal.windowContains(window, civil)) continue;
+                        try out.print(": {s} the question's \"{s}\"", .{ switch (time.relation(civil)) {
+                            .is => "this is",
+                            .near => "near",
+                            .within => "within",
+                        }, time.phrase });
+                        break;
                     }
                 } else |_| {
                     try out.print(" {s}", .{date});
@@ -9314,7 +9344,8 @@ test "runtime answer reasoning and temporal hints reach the reader and the trace
     const prompt = try resultStringField(std.testing.allocator, answer, "prompt");
     defer std.testing.allocator.free(prompt);
     try std.testing.expect(std.mem.startsWith(u8, prompt, "<memory>\n<sessions>\n## session s-early 2023-05-20 (Sat), 10 days ago\n"));
-    try expectInOrder(prompt, &.{ "## session s-late 2023-05-22 (Mon), 8 days ago\n", "] user: I adopted a cat named Miso.\n" });
+    // The session inside the week the question names says so.
+    try expectInOrder(prompt, &.{ "## session s-late 2023-05-22 (Mon), 8 days ago: within the question's \"last week\"\n", "] user: I adopted a cat named Miso.\n" });
     try std.testing.expect(std.mem.startsWith(
         u8,
         reader.last_user.?,
@@ -9378,7 +9409,9 @@ test "runtime retrieve renders temporal hints only when requested" {
     defer std.testing.allocator.free(plain);
     const plain_prompt = try resultStringField(std.testing.allocator, plain, "prompt");
     defer std.testing.allocator.free(plain_prompt);
-    try std.testing.expect(std.mem.startsWith(u8, plain_prompt, "Current date: 2023-08-28 (Monday)\n<memory>\n<sessions>\n## session s-early 2023-05-20 (Sat)\n"));
+    // Without the option the question's own time is still resolved; only
+    // the per-session offsets are left out.
+    try std.testing.expect(std.mem.startsWith(u8, plain_prompt, "Current date: 2023-08-28 (Monday)\nTime references: \"since the start of the year\" = 2023-01-01 to 2023-08-28\n<memory>\n<sessions>\n## session s-early 2023-05-20 (Sat)\n"));
 }
 
 test "runtime answer abstains without calling the reader when nothing is retrieved" {
@@ -12193,20 +12226,19 @@ test "time anchors bring in what was said on the day the question names" {
     defer allocator.free(reply);
 
     const question = "What kitchen appliance did I buy 10 days ago?";
-    const plain = try anchorPrompt(&runtime, question, "");
-    defer allocator.free(plain);
-    try std.testing.expect(std.mem.indexOf(u8, plain, "smoker") == null);
-
-    const anchored = try anchorPrompt(&runtime, question, ",\"timeAnchors\":true");
+    const anchored = try anchorPrompt(&runtime, question, "");
     defer allocator.free(anchored);
     try std.testing.expect(std.mem.indexOf(u8, anchored, "Just got a smoker today") != null);
+    // The reader is told which day that is and which session is from it.
+    try std.testing.expect(std.mem.indexOf(u8, anchored, "Time references: \"10 days ago\" = 2023-03-15 (Wed)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, anchored, "## session s-smoker 2023-03-15 (Wed): this is the question's \"10 days ago\"\n") != null);
     // The assistant's reply of that day is not what the person did.
     try std.testing.expect(std.mem.indexOf(u8, anchored, "pellet grills") == null);
 
     // The trace says what the anchors brought in.
     const traced = try runtime.dispatch(
         allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":\"t\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"What kitchen appliance did I buy 10 days ago?\",\"mode\":\"fts\",\"budgetTokens\":90,\"scope\":{\"projectId\":\"repo:anchors\"},\"time\":{\"validAt\":\"2023-03-25T09:00:00Z\"},\"options\":{\"logRetrieval\":false,\"logAudit\":false,\"includeDebug\":true,\"timeAnchors\":true}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"t\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"What kitchen appliance did I buy 10 days ago?\",\"mode\":\"fts\",\"budgetTokens\":90,\"scope\":{\"projectId\":\"repo:anchors\"},\"time\":{\"validAt\":\"2023-03-25T09:00:00Z\"},\"options\":{\"logRetrieval\":false,\"logAudit\":false,\"includeDebug\":true}}}",
     );
     defer allocator.free(traced);
     var parsed = try std.json.parseFromSlice(Value, allocator, traced, .{});
@@ -12216,13 +12248,13 @@ test "time anchors bring in what was said on the day the question names" {
     try std.testing.expectEqual(@as(i64, 1), anchors_trace.get("items").?.integer);
     try std.testing.expect(anchors_trace.get("tokens").?.integer > 0);
 
-    // A question that names no time is left as it was.
-    const untimed = "What kitchen appliance did I buy?";
-    const before = try anchorPrompt(&runtime, untimed, "");
-    defer allocator.free(before);
-    const after = try anchorPrompt(&runtime, untimed, ",\"timeAnchors\":true");
-    defer allocator.free(after);
-    try std.testing.expectEqualStrings(before, after);
+    // A question that names no time gets none of it.
+    const untimed = try anchorPrompt(&runtime, "What kitchen appliance did I buy?", "");
+    defer allocator.free(untimed);
+    try std.testing.expect(std.mem.indexOf(u8, untimed, "smoker") == null);
+    try std.testing.expect(std.mem.indexOf(u8, untimed, "Time references") == null);
+    try std.testing.expect(std.mem.indexOf(u8, untimed, "the question's") == null);
+    try std.testing.expect(std.mem.indexOf(u8, untimed, "\"timeAnchors\"") == null);
 }
 
 /// A store that embeds for the pattern tests whatever the build's store

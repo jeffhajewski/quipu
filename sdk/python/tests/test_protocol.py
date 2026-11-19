@@ -215,30 +215,30 @@ class ProtocolFixtureTests(unittest.TestCase):
         default = json.loads((FIXTURE_DIR / "memory.retrieve.success.json").read_text())
         self.assertNotIn("facts", default["response"]["result"]["trace"])
 
-    def test_time_anchors_option_and_fixture(self):
+    def test_a_time_the_question_names_is_resolved_with_no_option(self):
         defs = json.loads((SCHEMA_DIR / "methods.schema.json").read_text())["$defs"]
         for method in ("memoryRetrieveParams", "memoryAnswerParams"):
-            self.assertEqual(defs[method]["properties"]["options"]["properties"]["timeAnchors"]["type"], "boolean")
+            self.assertNotIn("timeAnchors", defs[method]["properties"]["options"]["properties"])
         capabilities = defs["systemHealthResult"]["properties"]["capabilities"]["properties"]
         self.assertEqual(capabilities["timeAnchors"]["type"], "boolean")
 
         for method in ("memory.retrieve", "memory.answer"):
             with self.subTest(method=method):
-                validate_rpc_params(method, {"query": "q", "options": {"timeAnchors": True}})
                 with self.assertRaises(QuipuProtocolError):
-                    validate_rpc_params(method, {"query": "q", "options": {"timeAnchors": "yes"}})
+                    validate_rpc_params(method, {"query": "q", "options": {"timeAnchors": True}})
 
         fixture = json.loads((FIXTURE_DIR / "memory.retrieve.timeAnchors.json").read_text())
-        self.assertTrue(fixture["request"]["params"]["options"]["timeAnchors"])
+        self.assertNotIn("timeAnchors", fixture["request"]["params"]["options"])
         result = fixture["response"]["result"]
-        # The message written on the day the question names is in the context;
-        # the assistant's reply of that day is not.
-        self.assertIn("## session s-smoker 2023-03-15 (Wed)", result["prompt"])
+        # The date is worked out for the reader, the session written that day
+        # says so, and its message is in the context.
+        self.assertIn('Time references: "10 days ago" = 2023-03-15 (Wed)\n', result["prompt"])
+        self.assertIn('## session s-smoker 2023-03-15 (Wed): this is the question\'s "10 days ago"\n', result["prompt"])
         self.assertIn("Just got a smoker today", result["prompt"])
-        self.assertNotIn("pellet grills", result["prompt"])
         self.assertEqual(result["trace"]["timeAnchors"], {"windows": 1, "items": 1, "tokens": 31})
         default = json.loads((FIXTURE_DIR / "memory.retrieve.success.json").read_text())
         self.assertNotIn("timeAnchors", default["response"]["result"]["trace"])
+        self.assertNotIn("the question's", default["response"]["result"]["prompt"])
 
     def test_pattern_nodes_are_part_of_every_context_with_no_option(self):
         defs = json.loads((SCHEMA_DIR / "methods.schema.json").read_text())["$defs"]

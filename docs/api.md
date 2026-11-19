@@ -62,9 +62,7 @@ Two more `memory.answer` options default to `false`:
   `reasoning` field before answering. The review is returned as
   `answerTrace.reasoning`, never in `answer`.
 - `options.temporalHints` appends each session header's offset from
-  `time.validAt` (`, 10 days ago`) and resolves the query's relative time
-  expressions on a `Time references:` line. `memory.retrieve` accepts it too
-  and renders that line in `prompt` after `Current date:`. See
+  `time.validAt` (`, 10 days ago`). `memory.retrieve` accepts it too. See
   [algorithms.md](algorithms.md#temporal-hints).
 
 `answerTrace` reports `readerMode` (`none`, `direct`, or `reasoning`),
@@ -91,13 +89,15 @@ is the message they were drawn from; a superseded one has
 `state: "superseded"` and `validTo` set. The trace gains a `facts` block. `Update` nodes are never returned as
 items. See [algorithms.md](algorithms.md#the-facts-section).
 
-`options.timeAnchors` (on `memory.retrieve` and `memory.answer`, default
-`false`) handles questions that name a time ("what did I buy 10 days ago?").
-The time is resolved against `time.validAt` to a window of days, and what
-people said inside that window is placed ahead of the other candidates, most
-relevant first, using at most half the token budget. A question that names no
-time is unaffected. The trace gains a `timeAnchors` block. See
-[algorithms.md](algorithms.md#time-anchors).
+A question that names a time ("what did I buy 10 days ago?", "who did I go
+with last Saturday?") needs no option. With `time.validAt` given, the time is
+resolved by date arithmetic to a window of days. What people said inside that
+window is placed ahead of the other candidates, most relevant first, using at
+most half the token budget; the resolved date is stated on a
+`Time references:` line (`"last Saturday" = 2023-03-04 (Sat)`) after
+`Current date:`; and each session dated inside the window says so in its
+header. A question that names no time is unaffected. The trace gains a
+`timeAnchors` block. See [algorithms.md](algorithms.md#time-anchors).
 
 Pattern nodes need no option. When the background work has built a node from
 occasions that recur (the same kind of thing told on six or more days), and

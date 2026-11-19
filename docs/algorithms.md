@@ -251,8 +251,12 @@ Current date: 2023-05-30 (Tuesday)          <- retrieve only, when time.validAt 
 ### Temporal hints
 
 `options.temporalHints` (on `memory.retrieve` and `memory.answer`, default
-`false`) adds two deterministic hints computed from `time.validAt`. Without a
-parseable `validAt`, nothing changes. The hints never affect retrieval.
+`false`) adds a deterministic hint computed from `time.validAt` to every
+session (item 1 below). Without a parseable `validAt`, nothing changes. The
+hint never affects retrieval. It is off by default because it cost a small
+reader answers on questions that name no time. Resolving the times the
+question itself names (item 2) does not depend on the option; see
+[Time anchors](#time-anchors).
 
 1. Each dated session header ends with its offset from the question date. The
    offset is in days under 60 days (`today`, `1 day ago`, `10 days ago`), then
@@ -266,7 +270,8 @@ parseable `validAt`, nothing changes. The hints never affect retrieval.
    ## session s40 2023-05-30 (Tue), 7 days ago
    ```
 
-2. A fixed phrase grammar (`core/src/temporal.zig`) resolves relative time
+2. With or without the option, a fixed phrase grammar
+   (`core/src/temporal.zig`) resolves relative time
    expressions in the query against the question date. The result is rendered
    as `Time references: "last month" = 2023-04-01 to 2023-04-30; ...` right
    after `Current date:`. In `memory.retrieve` it goes in `prompt`. In
@@ -366,7 +371,8 @@ without changing the default path:
   its own earlier replies as evidence, grounds recommendations in stated
   preferences, and checks the question's premise. It writes this review in a
   leading `reasoning` field before `answer`.
-- `options.temporalHints` adds session offsets and resolved time references
+- A time the question names is resolved on a `Time references:` line in
+  every case, and `options.temporalHints` adds session offsets
   (see [Temporal hints](#temporal-hints)).
 
 The reader must return
@@ -397,9 +403,9 @@ The runtime parses it, tolerating code fences, surrounding prose, an
 `answerTrace.strategy` only describes which path ran: `llm_reader`,
 `deterministic_fallback`, or `abstain`. `answerTrace.readerMode` is `none` when
 no reader was called, else `direct` or `reasoning`. `answerTrace.temporalHints`
-is true when hints were applied (requested, with a parseable `validAt`), and
-`answerTrace.timeReferences` holds the `Time references:` payload the reader
-received, if any. With `options.includeDebug`, the response also carries
+is true when session offsets were applied (requested, with a parseable
+`validAt`), and `answerTrace.timeReferences` holds the `Time references:`
+payload the reader received, if the question named a time. With `options.includeDebug`, the response also carries
 `prompt`, the exact memory context string the reader received. With temporal
 hints that includes the header offsets. The `Current date:` and
 `Time references:` lines are in the user turn, not in `prompt`.
@@ -714,38 +720,55 @@ request thread.
 
 ### Time anchors
 
-`options.timeAnchors` (on `memory.retrieve` and `memory.answer`, default
-`false`) is for questions that name a time instead of a topic: "what did I buy
-10 days ago?", "who did I go with last Saturday?". Such a question says little
-about the thing it asks for, so relevance alone often leaves the message out.
+A question can name a time instead of a topic: "what did I buy 10 days ago?",
+"who did I go with last Saturday?". It says little about the thing it asks
+for, so relevance alone often leaves the message out; and when the message is
+in the context, the reader has to work out which of a dozen dated sessions
+"last Saturday" was. The daemon does both by plain date arithmetic. There is
+no option; a question that names no time, or a request without a parseable
+`time.validAt`, gets exactly the context it would have had.
 
-- The relative time expressions in the question are resolved against
-  `time.validAt` with the grammar of the temporal hints. An exact day
-  (`yesterday`, `10 days ago`, `last Saturday`) is a one-day window. An
-  approximate one (`two weeks ago`) is widened by a seventh of its distance
-  from the question date, at least a day each way. A hedged count (`roughly
-  two weeks ago`, `about 10 days ago`, `two weeks ago or so`) is widened by a
-  third of its distance instead. A weekday in front of an approximate time
-  (`the Wednesday two months ago`) picks that weekday nearest to it, as one
-  day. Ranges (`past weekend`,
-  `in January`) are used as they are. `today` and windows wider than 92 days
-  are ignored.
-- The question is searched 1,000 hits deep in the request's mode. A message or
-  chunk is inside a window when it was written then. With `options.factKeys`,
-  a claim with an event date inside the window (the message said "yesterday")
-  brings in its source message; a planned event or a month-only date does not.
-- Only what a speaker said is anchored. The assistant's replies of that day
-  are long and do not say what the person did.
-- The anchored items are placed ahead of every other candidate, most relevant
-  first: at most 24 per window, and half the token budget in all. The rest of
-  the budget is filled as usual.
-- Without a parseable `time.validAt`, or a time in the question, the context
-  is byte-for-byte what it was. `trace.timeAnchors` reports `windows`, `items`
-  and `tokens`.
+- **Resolve.** The relative time expressions in the question are resolved
+  against `time.validAt` with a fixed phrase grammar
+  (`core/src/temporal.zig`). An exact day (`yesterday`, `10 days ago`, `last
+  Saturday`) is a one-day window. An approximate one (`two weeks ago`) is
+  widened by a seventh of its distance from the question date, at least a day
+  each way. A hedged count (`roughly two weeks ago`, `about 10 days ago`,
+  `two weeks ago or so`) is widened by a third of its distance instead. A
+  weekday in front of an approximate time (`the Wednesday two months ago`)
+  picks that weekday nearest to it, as one day. Ranges (`past weekend`, `in
+  January`) are used as they are. `today` and windows wider than 92 days are
+  resolved for the reader but not searched by.
+- **Bring in.** The question is searched 1,000 hits deep in the request's
+  mode. A message or chunk is inside a window when it was written then. With
+  `options.factKeys`, a claim with an event date inside the window (the
+  message said "yesterday") brings in its source message; a planned event or
+  a month-only date does not. Only what a speaker said is anchored: the
+  assistant's replies of that day are long and do not say what the person
+  did. The anchored items are placed ahead of every other candidate, most
+  relevant first: at most 24 per window, and half the token budget in all.
+  The rest of the budget is filled as usual, so a message that reports the
+  event some days later is still there.
+- **Tell the reader.** The resolved times go on a `Time references:` line
+  after `Current date:` (in `prompt` for `memory.retrieve`, in the reader's
+  user turn for `memory.answer`), and every session dated inside a window
+  says so in its header:
 
-On LongMemEval-S temporal-reasoning questions this raised gold-turn coverage
-at 4,096 tokens from 87–90% to 94–96%. Accuracy followed with a GPT-4o reader
-and not with GPT-4o-mini; see
+  ```text
+  Current date: 2023-03-09 (Thursday)
+  Time references: "last Saturday" = 2023-03-04 (Sat)
+  ...
+  ## session s46 2023-03-04 (Sat): this is the question's "last Saturday"
+  ## session s31 2023-04-20 (Thu): near the question's "two weeks ago"
+  ## session s39 2023-03-19 (Sun): within the question's "past weekend"
+  ```
+
+`trace.timeAnchors` reports `windows`, `items` and `tokens` when the question
+named a time that was searched by.
+
+On LongMemEval-S temporal-reasoning questions, bringing the messages in
+raised gold-turn coverage at 4,096 tokens from 87–90% to 94–96%. What the
+resolved date and the session marks add on top is in
 [sota-sprint-results.md](sota-sprint-results.md).
 
 ### The facts section

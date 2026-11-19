@@ -153,23 +153,23 @@ test("facts is a retrieve and answer option that lists dated current and superse
   assert.equal(result.trace.facts.superseded, 1);
 });
 
-test("timeAnchors is a retrieve and answer option that brings in what was said on the day named", () => {
+test("a time the question names is resolved for the reader, with no option", () => {
   const schema = JSON.parse(readFileSync(path.join(root, "protocol", "schemas", "methods.schema.json"), "utf8"));
   for (const def of ["memoryRetrieveParams", "memoryAnswerParams"]) {
-    assert.equal(schema.$defs[def].properties.options.properties.timeAnchors.type, "boolean");
+    assert.equal(schema.$defs[def].properties.options.properties.timeAnchors, undefined);
   }
   assert.equal(schema.$defs.systemHealthResult.properties.capabilities.properties.timeAnchors.type, "boolean");
 
   for (const method of ["memory.retrieve", "memory.answer"]) {
-    validateRpcParams(method, { query: "q", options: { timeAnchors: true } });
-    assert.throws(() => validateRpcParams(method, { query: "q", options: { timeAnchors: "yes" } }), QuipuProtocolError);
+    assert.throws(() => validateRpcParams(method, { query: "q", options: { timeAnchors: true } }), QuipuProtocolError);
   }
 
   const fixture = JSON.parse(readFileSync(path.join(fixtureDir, "memory.retrieve.timeAnchors.json"), "utf8"));
-  assert.equal(fixture.request.params.options.timeAnchors, true);
+  assert.equal(fixture.request.params.options.timeAnchors, undefined);
   const result = fixture.response.result;
+  assert.ok(result.prompt.includes('Time references: "10 days ago" = 2023-03-15 (Wed)\n'));
+  assert.ok(result.prompt.includes('## session s-smoker 2023-03-15 (Wed): this is the question\'s "10 days ago"\n'));
   assert.ok(result.prompt.includes("Just got a smoker today"));
-  assert.ok(!result.prompt.includes("pellet grills"));
   assert.deepEqual(result.trace.timeAnchors, { windows: 1, items: 1, tokens: 31 });
 });
 

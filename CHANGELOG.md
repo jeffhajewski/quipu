@@ -52,12 +52,18 @@
   items of type `fact` in
   `context.currentFacts`, and `trace.facts` counts them. `system.health`
   reports `capabilities.facts` and a real `workers.consolidator` state.
-- `options.timeAnchors` on `memory.retrieve` and `memory.answer` (default
-  `false`): when the question names a time ("10 days ago", "last Saturday",
-  "in January"), what people said inside that window is placed ahead of the
-  other candidates, within half the token budget. `trace.timeAnchors` counts
-  the windows and items, and `system.health` reports
-  `capabilities.timeAnchors`.
+- When the question names a time ("10 days ago", "last Saturday", "in
+  January") and `time.validAt` is given, `memory.retrieve` and
+  `memory.answer` resolve it by date arithmetic: what people said inside that
+  window is placed ahead of the other candidates, within half the token
+  budget; a `Time references:` line states the resolved date; and each
+  session dated inside the window says so in its header (`this is the
+  question's "last Saturday"`). A hedge ("roughly two weeks ago") widens the
+  window and a weekday ("the Wednesday two months ago") narrows it to a day.
+  There is no option: `options.timeAnchors`, which gated the first part while
+  it was being measured, is gone, and the `Time references:` line no longer
+  needs `options.temporalHints`. `trace.timeAnchors` counts the windows and
+  items, and `system.health` reports `capabilities.timeAnchors`.
 - Pattern nodes. After a conversation is extracted, a `pattern` job groups
   alike sentences that people wrote on different occasions and, for a group of
   six or more occasions, asks the extract model what the group is about, which
