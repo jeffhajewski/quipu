@@ -1631,6 +1631,164 @@ add about $0.02 of GPT-4o-mini calls per 500-message history, mostly the
 episode summaries. The day's runs cost about $13.50 after the $3.90 of
 iteration 8.
 
+## Iteration 10 (November 19): reading from the top, in the daemon
+
+Iteration 9's prototype is now the daemon's default behaviour, ported one
+step at a time and measured after each. There is no option anywhere in it.
+All runs: Lattice 0.18 store, hybrid search, GPT-4o-mini background jobs,
+GPT-4o reader and judge, `factKeys`, `facts` and `timeAnchors` as in
+iteration 8, budgets of 1,024 and 4,096 tokens.
+
+### The steps
+
+1. **The days of a claim's event.** A claim that names one period or counted
+   time stores the days its event may have happened on (`eventStart`,
+   `eventEnd`), worked out from its own words, and a question naming a time
+   matches claims by them. Nothing moved on the 133 temporal questions: 103
+   at 1K and 105 at 4K before and after (one win and one loss at 4K), and 80
+   and 86 with a GPT-4o-mini reader.
+2. **Summary nodes.** A background job writes a title and summary for every
+   conversation, groups the claims by their vectors, and names each group.
+   Over 70 histories of all categories it wrote 3,341 session summaries and
+   2,623 topics (21 more declined) from 11,206 claims: 5,985 GPT-4o-mini
+   calls, about $0.009 and 25 seconds per history. Retrieval did not read them yet, and the answers did not change
+   (109 of 110 identical on the tuning half).
+3. **Reading them first.** `memory.retrieve` and `memory.answer` compare the
+   question with every topic, session summary and claim, show the nearest
+   topics as threads of dated facts ahead of the raw text, and take raw
+   messages only from the sessions the summaries and facts point at.
+4. **A second reading.** The extract job sends the messages its first reading
+   drew no claim from to the model again, on their own.
+
+### What reading from the top did
+
+All seven categories, questions not used to design the retrieval except the
+dev half (see below):
+
+| Set | Budget | Raw search | Top-down | Wins / losses |
+| --- | ---: | ---: | ---: | --- |
+| Dev (70) | 1,024 | 59 | 59 | 5 / 5 |
+| Dev (70) | 4,096 | 57 | 62 | 7 / 2 |
+| Held-out (63) | 1,024 | 48 | 49 | 6 / 5 |
+| Held-out (63) | 4,096 | 44 | 47 | 7 / 4 |
+| Both (133) | 1,024 | 107 (80.5%) | 108 (81.2%) | 11 / 10 |
+| Both (133) | 4,096 | 101 (75.9%) | 109 (82.0%) | 14 / 6 |
+
+By category at 4,096 tokens, both sets (19 each): abstention 13 to 15,
+knowledge-update 15 to 16, multi-session 8 to 10, single-session-assistant 17
+to 18, single-session-preference 13 to 13, single-session-user 18 to 19,
+temporal 17 to 18. Every gold turn was in context for 111 of 114 answerable
+questions, up from 105. The prototype scored 114 at about 3,600 tokens; the
+daemon has no recall pass or restatement links yet.
+
+The 133 temporal questions:
+
+| Temporal set | Budget | Raw search | Top-down | Wins / losses |
+| --- | ---: | ---: | ---: | --- |
+| Tuning half (55, fitted on) | 1,024 | 44 | 47 | 6 / 3 |
+| Tuning half (55, fitted on) | 4,096 | 45 | 49 | 5 / 1 |
+| Frozen half (54) | 1,024 | 38 | 37 | 6 / 7 |
+| Frozen half (54) | 4,096 | 40 | 39 | 4 / 5 |
+| Earlier-seen (24) | 1,024 | 21 | 22 | 1 / 0 |
+| Earlier-seen (24) | 4,096 | 20 | 22 | 2 / 0 |
+| All (133) | 1,024 | 103 | 106 | 13 / 10 |
+| All (133) | 4,096 | 105 (78.9%) | 110 (82.7%) | 11 / 6 |
+
+The frozen half does not move, as in the prototype: its losses are again
+mostly questions that ask how long passed between two events.
+
+### What the small budget needed
+
+The first version was fitted on the tuning half and then run on the rest. At
+4,096 tokens it gained (dev 57 to 60, held-out 44 to 47). At 1,024 it lost
+four dev answers (59 to 55): the threads took their 45%, every session header
+carried a 60-token summary, the messages behind the facts were taken before
+search's own hits, and what was left had no room for the assistant's reply a
+question asked about (three single-session-assistant questions went from the
+gold turn in context to nothing). Three changes, fitted on the tuning half
+and dev:
+
+- a thread is shown only when its cosine with the question is at least 0.3
+  (190 of 194 threads that held an answer scored higher, and 523 of the 847
+  that held none), so a question near no topic gets no threads;
+- search's hits are taken before the messages behind the facts;
+- header summaries may take 15% of the budget, and sessions past that are
+  headed by their title alone.
+
+Dev went to 59 and 62. Held-out, which the changes were not fitted on, stayed
+at 49 and 47. Earlier, on the tuning half, a topic too large for the section
+had been skipped whole; showing its facts nearest the question, and leaving
+out anything less than half as near as the best match, took the tuning half
+from 43 and 49 to 47 and 50.
+
+### The second reading
+
+Of the 259 gold user turns of the temporal questions, 10 had no claim, so no
+thread could hold them. Reading the unclaimed messages again recovered 8: 1
+of 2 on the tuning half, where the prompt was written, and 7 of 8 on the
+rest. It reads about half of what people wrote a second time (6,496 of
+13,422 messages on the tuning half) and adds few claims (235 to 8,903),
+which on inspection are facts stated inside requests: a weekly game and its
+time, a workshop two weeks earlier, the date of a race. It costs about 39
+more calls and $0.004 per history.
+
+With it, against step 3:
+
+| Set | Budget | Step 3 | With the second reading | Wins / losses |
+| --- | ---: | ---: | ---: | --- |
+| Temporal, tuning half (55) | 4,096 | 49 | 50 | 1 / 0 |
+| Temporal, frozen half (54) | 4,096 | 39 | 43 | 4 / 0 |
+| Temporal, earlier-seen (24) | 4,096 | 22 | 23 | 1 / 0 |
+| Dev (70) | 4,096 | 62 | 64 | 2 / 0 |
+| Held-out (63) | 4,096 | 47 | 48 | 1 / 0 |
+| Temporal, all (133) | 1,024 | 106 | 106 | 4 / 4 |
+| Dev and held-out (133) | 1,024 | 108 | 108 | 1 / 1 |
+
+### Where the four steps leave the daemon
+
+| Set | Budget | Raw search | Steps 1 to 4 | Wins / losses |
+| --- | ---: | ---: | ---: | --- |
+| Dev and held-out (133) | 1,024 | 107 (80.5%) | 108 (81.2%) | 11 / 10 |
+| Dev and held-out (133) | 4,096 | 101 (75.9%) | 112 (84.2%) | 16 / 5 |
+| Temporal (133) | 1,024 | 103 (77.4%) | 106 (79.7%) | 10 / 7 |
+| Temporal (133) | 4,096 | 105 (78.9%) | 116 (87.2%) | 15 / 4 |
+
+By category at 4,096 tokens on dev and held-out (19 each, raw search
+first): abstention 13 to 16, knowledge-update 15 to 16, multi-session 8 to
+11, single-session-assistant 17 to 18, single-session-preference 13 to 14,
+single-session-user 18 to 19, temporal 17 to 18. The prototype's 114 is two
+answers away. The gain is at the larger budget: at 1,024 tokens the daemon
+answers as many questions as before, with different ones right.
+
+Of the 17 temporal answers still wrong at 4,096 tokens, 2 are missing a gold
+turn. Most of the rest are arithmetic or reading: an interval counted from
+today instead of between the two events ("how many days ago did I launch my
+website when I signed my first client"), "for six weeks now" not turned into
+a start date, a pre-order date taken as the day a thing was got.
+
+### Restatement links were not ported
+
+The fifth piece of the prototype linked a later claim to the earlier one it
+looks back on, about one link a history. Before porting it, the prototype was
+rerun with the links ignored at question time, on the same graphs and the
+same reader:
+
+| Set | With the links | Links ignored |
+| --- | ---: | ---: |
+| Temporal, tuning half (55) | 48 | 49 |
+| Temporal, frozen half (54) | 40 | 40 |
+| Temporal, earlier-seen (24) | 21 | 21 |
+| Dev (70) | 64 | 64 |
+| Held-out (63) | 50 | 49 |
+| All (266) | 223 | 223 |
+
+They change two answers in 266, one each way, so they stay out of the daemon.
+
+Limits: one run per arm, a GPT-4o reader only, and dev is now a set the
+retrieval was fitted on. Each question compares every summary and claim of
+the scope with the question, which is fine at 500 messages and will need an
+index beyond that.
+
 ## What we learned
 
 - **The reader is now the bottleneck, not retrieval.** At 4K, 93% of gold
@@ -1699,6 +1857,12 @@ $0.31 on answers and grading, and well under $1 on the GPT-4o-mini run and
 on the LongMemEval rerun, whose extraction and reader calls came from the
 cache ($0.02 of new spend on pattern jobs).
 
+Iteration 10 cost about $13: under $1 on the event-span and summary-job
+runs, whose reader calls mostly came from the cache, about $9 on the three
+versions of top-down retrieval over the five question sets and their
+baselines, about $3 on the second reading ($0.55 measuring claim coverage,
+$2.40 on answers), and $0.62 on the restatement ablation.
+
 Embeddings cost about $0.13 per uncached full slice. A GPT-4o-mini reader with
 the GPT-4o judge costs about $0.05–0.15 per arm.
 
@@ -1749,7 +1913,14 @@ the GPT-4o judge costs about $0.05–0.15 per arm.
   says it should not with `factKeys` off. On the dev and held-out runs that
   moved 3 answers in 266 rows (1 better, 2 worse). Find the cause: shared
   BM25 statistics and the shared vector index are the suspects.
-- Temporal reasoning with a GPT-4o reader is 78.9% at 4K, 7 points under the
+- Top-down retrieval gains at 4,096 tokens and only breaks even at 1,024
+  (iteration 10). It has been run with a GPT-4o reader only; GPT-4o-mini lost
+  answers to background-job output before and has to be checked. Each
+  question reads every summary and claim of its scope, which needs an index
+  over the stored vectors before large stores.
+- Temporal reasoning with a GPT-4o reader was 78.9% at 4K before iteration
+  10 and is 87.2% after it (see there); the rest of this item describes the
+  earlier state. It was 7 points under the
   best published GPT-4o result. Of the misses read in iteration 8, date
   arithmetic between two events (7) and many-event ordering that retrieval
   only partly covers (6) are the groups nothing yet addresses; a reader that
