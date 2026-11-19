@@ -526,8 +526,14 @@ def run_question(case: Mapping[str, Any], config: Mapping[str, Any], proxy: Any,
                         record["status"] = "error"
                         record["rows"] = failed_rows("consolidate", record["consolidation"]["error"])
                         return record
-                # Pattern jobs: every extraction queues one on a store that
-                # embeds, and a serving daemon runs them after it.
+                # Summary and pattern jobs: every extraction queues one of
+                # each on a store that embeds, and a serving daemon runs
+                # them after it, in this order.
+                record["summaries"] = run_summary_jobs(daemon, config, proxy, tag)
+                if "error" in record["summaries"]:
+                    record["status"] = "error"
+                    record["rows"] = failed_rows("summaries", record["summaries"]["error"])
+                    return record
                 record["patterns"] = run_pattern_jobs(daemon, config, proxy, tag)
                 if "error" in record["patterns"]:
                     record["status"] = "error"
@@ -679,13 +685,19 @@ def run_consolidation(daemon: Daemon, config: Mapping[str, Any], proxy: Any, tag
     return run_jobs(daemon, "memory.consolidate.run", config, proxy, tag)
 
 
+def run_summary_jobs(daemon: Daemon, config: Mapping[str, Any], proxy: Any, tag: str) -> dict[str, Any]:
+    """Run every pending summary job through ``memory.summaries.run``."""
+    return run_jobs(daemon, "memory.summaries.run", config, proxy, tag)
+
+
 def run_pattern_jobs(daemon: Daemon, config: Mapping[str, Any], proxy: Any, tag: str) -> dict[str, Any]:
     """Run every pending pattern job through ``memory.patterns.run``."""
     return run_jobs(daemon, "memory.patterns.run", config, proxy, tag)
 
 
-def summarize_patterns(records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
-    runs = [r["patterns"] for r in records if isinstance(r.get("patterns"), Mapping)]
+def summarize_patterns(records: Sequence[Mapping[str, Any]], key: str = "patterns") -> dict[str, Any] | None:
+    """Totals of the pattern runs, or of the summary runs under ``summaries``."""
+    runs = [r[key] for r in records if isinstance(r.get(key), Mapping)]
     if not runs:
         return None
     ok = [run for run in runs if "result" in run]
@@ -1104,6 +1116,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         **aggregate(rows, args.budgets), "ingest": summarize_ingest(records),
         "extraction": summarize_extraction(records),
         "consolidation": summarize_consolidation(records),
+        "summaries": summarize_patterns(records, "summaries"),
         "patterns": summarize_patterns(records),
         "spend": {"thisInvocationProxy": proxy_totals,
                   "judgeFreshUsdAllRows": judge_fresh, "judgeNominalUsdAllRows": judge_nominal,
