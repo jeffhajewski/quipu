@@ -1439,6 +1439,104 @@ cheap and inert there, not that they help.
 - A proposed outcome is not checked to be an outcome. Two regularities in
   eight journals were two chores mentioned in one sentence.
 
+## Iteration 8 (November 19): the time a question names
+
+### Where the temporal answers are lost
+
+The best temporal configuration so far (background jobs, time anchors, GPT-4o
+reader) gets 103 of 133 at 4,096 tokens. The 30 misses were read one by one:
+
+| What went wrong | Misses | Every gold turn in context |
+| --- | ---: | ---: |
+| The question names a relative time and asks what happened then | 11 | 11 |
+| Counting days, weeks, months or an age between events | 7 | 7 |
+| Putting two events in order | 2 | 2 |
+| Ordering or counting four to six events | 6 | 0 |
+| The answer was "not enough information" | 4 | – |
+
+Retrieval explains six. In the largest group the evidence is there and the
+reader does not connect it: "What did I do with Rachel on the Wednesday two
+months ago?", asked on 2023-04-01, with a session headed 2023-02-01 (Wed)
+that says "I just started taking ukulele lessons with my friend Rachel
+today", was answered "no information" (7 of the 11 were). For those 11
+questions the date computed mechanically from the phrase is the date of the
+session that holds the answer: to the day in nine, within three days in the
+other two (`four weeks ago`, `two weeks ago`).
+
+### Is it the reader?
+
+The tuning half (55 questions) was read again from byte-identical contexts by
+two newer models.
+
+| Reader, same contexts | 1,024 | 4,096 | Against GPT-4o at 4,096 |
+| --- | ---: | ---: | --- |
+| GPT-4o | 42 | 43 | – |
+| Claude Sonnet 5.5 | 42 | 48 | 7 wins, 2 losses |
+| GPT-5-mini | 43 | 44 | 6 wins, 5 losses |
+
+Of GPT-4o's six relative-time misses on this half, Sonnet 5.5 recovers five
+and GPT-5-mini four; neither recovers any of the three retrieval misses. So a
+newer reader does the date work GPT-4o does not, but a newer reader alone is
+not the fix: GPT-5-mini gives back five answers GPT-4o had (a 20-day gap read
+as "2 weeks and 6 days" where weeks were asked for). Mastra reports 95.5% on
+this category with GPT-5-mini; on Quipu's contexts the same reader gets 80%
+of this half, so most of that lead is in what the reader is handed.
+
+### Doing the arithmetic in the daemon
+
+The daemon already resolved the question's time phrase to bring messages in
+(`options.timeAnchors`, iteration 5) and never told the reader the result.
+Now, for any question that names a time, with no option:
+
+- the anchors apply (what was said inside the window goes first);
+- a `Time references:` line states the resolved date (`"last Saturday" =
+  2023-03-04 (Sat)`), which used to need `options.temporalHints`;
+- every session dated inside the window says so in its header (`this is the
+  question's "last Saturday"`, `near …`, `within …`);
+- a hedge (`roughly two weeks ago`) widens the window to a third of the
+  distance each way, and a weekday (`the Wednesday two months ago`) narrows
+  an approximate time to that day.
+
+See [algorithms.md](algorithms.md#time-anchors). The whole category was run on
+the build before the change and the build with it, same configuration
+(background extraction and consolidation, `factKeys`, `facts`), both readers:
+
+| Reader | Budget | Before | After | On the contexts that changed |
+| --- | ---: | ---: | ---: | --- |
+| GPT-4o | 1,024 | 100/133 (75.2%) | 103/133 (77.4%) | 21 changed: 3 wins, 0 losses |
+| GPT-4o | 4,096 | 103/133 (77.4%) | 105/133 (78.9%) | 20 changed: 3 wins, 0 losses |
+| GPT-4o-mini | 1,024 | 78/133 (58.6%) | 80/133 (60.2%) | 20 changed: 3 wins, 0 losses |
+| GPT-4o-mini | 4,096 | 81/133 (60.9%) | 86/133 (64.7%) | 20 changed: 5 wins, 0 losses |
+
+- **No answer was lost on a context that changed**: 14 wins and no losses
+  over the 81 changed rows. The two losses in the totals are on rows whose
+  context is byte-identical (the reader's own variation). About one context
+  in seven changes; the others are untouched.
+- **The gain is small and goes the same way on each sample**: tuning half
+  +2/+1 (GPT-4o at 1K/4K) and +1/+3 (GPT-4o-mini), frozen half +1/+1 and
+  +1/+2, the 24 earlier-seen questions unchanged (one context changed). The
+  change was designed after reading misses from all three samples, so none of
+  them is a clean hold-out; what protects the result is that the change is
+  date arithmetic with no tuned constant, and that it cost nothing.
+- **It helps the weaker reader more.** Of the six relative-time misses on the
+  tuning half at 4K, GPT-4o-mini now answers four and GPT-4o two.
+- **What GPT-4o still misses is not arithmetic.** In the four it still gets
+  wrong the right day is marked and the evidence is in a marked session:
+  "just saw them live … with my parents" under `this is the question's "last
+  Saturday"`, answered "no information about attending a music event on that
+  date". Sonnet 5.5 reads the same text correctly.
+- **The mark is coarse on this benchmark.** LongMemEval-S puts 9 to 11
+  sessions on one day, so a marked day is a third or more of the context.
+- With GPT-4o-mini the background jobs still cost answers on this category
+  (64.7% at 4K against 68.4% for the default configuration in iteration 5),
+  as measured there.
+
+Next to published GPT-4o results on this category: Zep 62.4%, Quipu 78.9%,
+Mastra observational memory 85.7%. The remaining gap is 9 answers in 133.
+
+This iteration cost about $3.90: $2.57 on the Sonnet 5.5 reader run, $0.29 on
+GPT-5-mini, and about $1.00 on the GPT-4o and GPT-4o-mini runs of both builds.
+
 ## What we learned
 
 - **The reader is now the bottleneck, not retrieval.** At 4K, 93% of gold
@@ -1557,11 +1655,14 @@ the GPT-4o judge costs about $0.05–0.15 per arm.
   says it should not with `factKeys` off. On the dev and held-out runs that
   moved 3 answers in 266 rows (1 better, 2 worse). Find the cause: shared
   BM25 statistics and the shared vector index are the suspects.
-- Temporal reasoning with a GPT-4o reader is 77.4% at 4K, 8 points under the
-  best published GPT-4o result. Most remaining errors have every gold turn in
-  context. A dated timeline section written by the background jobs is the
-  next thing to test, and it has to help GPT-4o-mini too: today the jobs help
-  GPT-4o on temporal questions and cost GPT-4o-mini answers.
+- Temporal reasoning with a GPT-4o reader is 78.9% at 4K, 7 points under the
+  best published GPT-4o result. Of the misses read in iteration 8, date
+  arithmetic between two events (7) and many-event ordering that retrieval
+  only partly covers (6) are the groups nothing yet addresses; a reader that
+  does not use marked evidence accounts for most of the rest. A dated
+  timeline section written by the background jobs is the next thing to test
+  for the arithmetic group, and it has to help GPT-4o-mini too: today the
+  jobs help GPT-4o on temporal questions and cost GPT-4o-mini answers.
 - The facts arm has been run on the whole knowledge-update category only. It
   has not been run on all 500 questions or with a stronger reader, and 11 of
   the 78 knowledge-update questions are still wrong at 4K.

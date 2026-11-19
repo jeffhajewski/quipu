@@ -136,10 +136,11 @@ Current external benchmark status:
   85.9% and 88.5% with background extraction, consolidation and
   `options.facts`. One category, not a benchmark score; same document.
 - LongMemEval-S temporal-reasoning category (all 133 questions, official
-  judge, GPT-4o reader, 4,096 tokens): 69.9% by default; 77.4% with
-  background extraction, consolidation, `options.factKeys`, `options.facts`
-  and `options.timeAnchors`. With a GPT-4o-mini reader the default is 68.4%
-  and the background jobs did not help. One category, not a benchmark score;
+  judge, GPT-4o reader, 4,096 tokens): 78.9% with background extraction,
+  consolidation, `options.factKeys` and `options.facts`, now that a time the
+  question names is resolved for the reader; 69.9% without the background
+  jobs before that change. With a GPT-4o-mini reader the default was 68.4%
+  and the background jobs cost answers. One category, not a benchmark score;
   same document.
 - Pattern questions on eight hand-written journals (24 questions, GPT-4o for
   the pattern jobs, the reader and the judge, 1,200 tokens): 6 of 8 planted
