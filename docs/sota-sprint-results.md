@@ -1919,7 +1919,7 @@ wrong event, the false premise, and five that are a misreading or need a
 step the daemon does not give, such as 7:00 less 15 minutes, a month
 compared with a day, or counting events before another one.
 
-### A relevance floor for raw messages, measured and not built
+### A relevance floor and a rerank for raw messages, measured and not kept
 
 Topics, session summaries and claims are already compared with the question
 by cosine and dropped under a floor. Raw messages are not: they come from
@@ -1934,13 +1934,41 @@ items, 305 from gold turns), embedding each raw item and the question:
 | 0.6 | 289 of 305 | 41% |
 | 0.7 | 265 of 305 | 58% |
 
-A floor at 0.5 would clear a quarter of the text that holds no answer and
-lose 2% of the items that do. Those are turns of multi-session and temporal
-questions worded far from the question, which the facts lead to anyway, so
-the floor belongs on search hits and not on a fact's message. It is not
-built: the store returns a message's score only when vector search finds
-it, so a hit from BM25 has none, and the daemon would have to keep a small
-vector on each message node as it does on claims.
+A floor at 0.5 looked as if it would clear a quarter of the text that holds
+no answer and lose 2% of the items that do, turns of multi-session and
+temporal questions worded far from the question, which the facts lead to
+anyway. So the floor went on search hits and not on a fact's message.
+
+Nothing new has to be stored for it. LatticeDB keeps every message's and
+chunk's vector in its index and reads one back with
+`lattice_node_get_vector`; the adapter interface had vector search and no
+way to ask for one node's vector, which is one method. With that, two
+versions of retrieval were run on the tuning half and dev (125 questions,
+correct at 1,024 and 4,096 tokens):
+
+| Version | GPT-4o-mini | GPT-4o | Gold turns missing from raw evidence, of 209 |
+| --- | --- | --- | --- |
+| Iteration 11 as committed | 100, 106 | 108, 115 | 48, 7 |
+| Search hits under 0.5 of the nearest raw message's cosine left out | 100, 104 | 108, 114 | 47, 6 |
+| Search hits in the order of their cosine, no floor | 99, 107 | 107, 114 | 58, 10 |
+
+The floor took out 9% of the raw items at 4,096 tokens and 6% of the
+context, and won no answer. Nothing took the room it cleared: at that
+budget the candidates run out before the budget does. Its one loss with a
+cause is the 27th of a list of 100 the assistant had given. The answer is
+in the second of three chunks of that reply, and the middle of a list is
+far from any question about the list, so the chunk went while its first
+chunk stayed. The table above missed this by counting a turn as kept when
+any chunk of it was. Scoring a chunk by its message's nearest chunk would
+mend that and leave a change that saves a few tokens and no answer.
+
+Ordering the hits by cosine is worse than the order they had. That order
+fuses BM25 with vector search by rank, and cosine alone throws the BM25
+half away: ten more gold turns fall outside 1,024 tokens. Neither is in
+the daemon. The summaries, claims and line of time are where comparing
+vectors with the question pays; among raw messages the fused rank already
+holds what the vectors know. The two diffs are kept outside the
+repository.
 
 Limits: one run per arm; dev was fitted on again; the line of time is
 chosen by the nearness of single facts to the whole question, so a question
@@ -2021,10 +2049,10 @@ baselines, about $3 on the second reading ($0.55 measuring claim coverage,
 $2.40 on answers), $0.62 on the restatement ablation, and $0.24 on the
 GPT-4o-mini reader runs.
 
-Iteration 11 cost about $4.90: four versions of the line of time on the
-tuning half and dev with both readers, a control, and the three untouched
-sets. Most reader calls for questions whose context did not change came
-from the cache.
+Iteration 11 cost about $7.50: $4.90 on four versions of the line of time
+on the tuning half and dev with both readers, a control, and the three
+untouched sets, and $2.60 on the raw floor and the rerank. Most reader
+calls for questions whose context did not change came from the cache.
 
 Embeddings cost about $0.13 per uncached full slice. A GPT-4o-mini reader with
 the GPT-4o judge costs about $0.05–0.15 per arm.
@@ -2087,9 +2115,8 @@ the GPT-4o judge costs about $0.05–0.15 per arm.
   there): a question that names a time and has several events on that day,
   many-event ordering that retrieval only partly covers, and steps the line
   does not give. With GPT-4o-mini it is 81.2%.
-- Raw messages have no relevance floor. One measured in iteration 11 would
-  drop a quarter of the text that holds no answer for 2% of the items that
-  do, and needs a small vector kept on each message node.
+- Raw messages have no relevance floor. One was tried in iteration 11, with
+  a rerank by cosine, and neither won an answer (see there).
 - The facts arm has been run on the whole knowledge-update category only. It
   has not been run on all 500 questions or with a stronger reader, and 11 of
   the 78 knowledge-update questions are still wrong at 4K.
