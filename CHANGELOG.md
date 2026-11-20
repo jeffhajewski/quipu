@@ -97,6 +97,12 @@
   others. The extract job result gains `recallMessages` and
   `recallAssertions`. There is no option; it adds about one call per
   conversation.
+- More claims know when their event was. A claim the model left undated is
+  dated by the one calendar day its wording names ("on February 20th") or,
+  for "just" before a past verb, by the day it was said. "For six weeks
+  now" is resolved like "for the past six weeks", and what has gone on for
+  a stretch up to the day said has that stretch as its event span and is
+  ordered by where it began.
 - Retrieval reads the summary nodes first. When a scope has them,
   `memory.retrieve` and `memory.answer` compare the question with every
   topic summary, session summary and claim, and show the nearest topics in

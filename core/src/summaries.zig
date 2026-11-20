@@ -362,10 +362,19 @@ pub const ShownFact = struct {
 };
 
 /// Where a fact stands among the facts of its thread: the day of its event,
-/// the middle of a longer one, or the day it was said.
+/// the middle of a longer one, or the day it was said. A stretch that runs
+/// up to the day it was said ("for six weeks now") stands where it began.
 pub fn placedDay(fact: ShownFact) i64 {
     const span = fact.event orelse return temporal.daysFromCivil(fact.said);
+    if (soFar(fact)) return temporal.daysFromCivil(span.start);
     return @divFloor(temporal.daysFromCivil(span.start) + temporal.daysFromCivil(span.end), 2);
+}
+
+/// Whether the fact's event is a stretch of more than a day that ends on the
+/// day it was said.
+fn soFar(fact: ShownFact) bool {
+    const span = fact.event orelse return false;
+    return !fact.planned and span.end.eql(fact.said) and !span.start.eql(span.end);
 }
 
 /// `2023-05-20 (Sat), 10 days ago: <text>`, then when the event was if that
@@ -680,6 +689,10 @@ test "a fact is placed at its event when it names one" {
     try testing.expectEqual(
         temporal.daysFromCivil(.{ .year = 2023, .month = 5, .day = 6 }),
         placedDay(.{ .said = said, .text = "", .event = .{ .start = .{ .year = 2023, .month = 5, .day = 4 }, .end = .{ .year = 2023, .month = 5, .day = 8 } } }),
+    );    // A stretch up to the day it was said stands where it began.
+    try testing.expectEqual(
+        temporal.daysFromCivil(.{ .year = 2023, .month = 4, .day = 8 }),
+        placedDay(.{ .said = said, .text = "", .event = .{ .start = .{ .year = 2023, .month = 4, .day = 8 }, .end = said } }),
     );
 }
 

@@ -502,7 +502,8 @@ pub const StatedTimes = struct {
 /// last|this weekend; last|previous|this|next week|month|year; last <Month>;
 /// N weeks|months|years ago (as `around ...`, no finer than the unit).
 /// Kept, with the dates after them in brackets: stretches that end or start
-/// on the day of speaking (past|last|previous N <units>, the last|past <unit>,
+/// on the day of speaking (past|last|previous N <units>, for N <units> now,
+/// the last|past <unit>,
 /// earlier this <unit>, [the] next N <units>, the next <unit>), any phrase
 /// in the possessive or behind an article ("yesterday's meeting", "the
 /// previous week"), and a loose count: a few|several|a couple [of] <units>
@@ -574,6 +575,14 @@ pub fn resolveStatedTimes(allocator: std.mem.Allocator, text: []const u8, curren
         };
         when = phrase.covers(current);
         counted = phrase == .around;
+        // "for the past two weeks", "for six weeks now": something that has
+        // gone on since the stretch began, which is when it is placed.
+        switch (phrase) {
+            .span => |value| if (value.end.eql(current) and !value.start.eql(current) and saidFor(tokens.items, first)) {
+                when = .{ .start = value.start, .end = value.end };
+            },
+            else => {},
+        }
         const bracketed = found.keeps_words or phrase == .span or possessive > 0 or (before != null and isDeterminer(before.?));
         if (bracketed) {
             try out.writer.writeAll(text[cursor .. end + possessive]);
@@ -624,6 +633,109 @@ pub fn resolveStatedTimes(allocator: std.mem.Allocator, text: []const u8, curren
         .when = if (one) when else null,
         .counted = one and counted and when != null,
     };
+}
+
+/// Whether the phrase at `first` is governed by "for": "for the past two
+/// weeks", "for about six weeks now".
+fn saidFor(tokens: []const []const u8, first: usize) bool {
+    var i = first;
+    var skipped: usize = 0;
+    while (i > 0 and skipped < 2 and anyWordAt(tokens, i - 1, &.{ "the", "about", "almost", "nearly", "over", "around", "roughly" })) : (skipped += 1) i -= 1;
+    return i > 0 and wordAt(tokens, i - 1, "for");
+}
+
+/// The one calendar day a statement names outright ("on February 20th",
+/// "March 3, 2023"), or null when it names none or more than one. A day
+/// with no year is taken in the year that puts it nearest `said`.
+pub fn explicitDay(text: []const u8, said: CivilDate) ?CivilDate {
+    var found: ?CivilDate = null;
+    var index: usize = 0;
+    while (index < text.len) {
+        if (!std.ascii.isAlphabetic(text[index]) or (index > 0 and std.ascii.isAlphanumeric(text[index - 1]))) {
+            index += 1;
+            continue;
+        }
+        var end = index;
+        while (end < text.len and std.ascii.isAlphabetic(text[end])) end += 1;
+        const word = [_][]const u8{text[index..end]};
+        index = end;
+        const month = monthAt(&word, 0, true) orelse continue;
+        var at = end;
+        if (at < text.len and text[at] == '.') at += 1;
+        if (at >= text.len or text[at] != ' ') continue;
+        at += 1;
+        var digits = at;
+        while (digits < text.len and std.ascii.isDigit(text[digits])) digits += 1;
+        if (digits == at or digits - at > 2) continue;
+        var after = digits;
+        while (after < text.len and std.ascii.isAlphabetic(text[after])) after += 1;
+        const suffix = text[digits..after];
+        if (suffix.len != 0 and !std.ascii.eqlIgnoreCase(suffix, "st") and !std.ascii.eqlIgnoreCase(suffix, "nd") and
+            !std.ascii.eqlIgnoreCase(suffix, "rd") and !std.ascii.eqlIgnoreCase(suffix, "th")) continue;
+        if (after < text.len and std.ascii.isDigit(text[after])) continue;
+        const day = std.fmt.parseInt(u8, text[at..digits], 10) catch continue;
+        // ", 2023" or " 2023".
+        var year_at = after;
+        if (year_at < text.len and text[year_at] == ',') year_at += 1;
+        if (year_at < text.len and text[year_at] == ' ') year_at += 1;
+        var year_end = year_at;
+        while (year_end < text.len and std.ascii.isDigit(text[year_end])) year_end += 1;
+        var date = CivilDate{ .year = said.year, .month = month, .day = day };
+        if (year_end - year_at == 4 and (year_end == text.len or !std.ascii.isAlphanumeric(text[year_end]))) {
+            date.year = std.fmt.parseInt(i32, text[year_at..year_end], 10) catch continue;
+            if (day < 1 or day > daysInMonth(date.year, month)) continue;
+        } else {
+            var best: ?CivilDate = null;
+            for ([_]i32{ said.year - 1, said.year, said.year + 1 }) |year| {
+                if (day < 1 or day > daysInMonth(year, month)) continue;
+                const candidate = CivilDate{ .year = year, .month = month, .day = day };
+                if (best == null or @abs(daysFromCivil(candidate) - daysFromCivil(said)) < @abs(daysFromCivil(best.?) - daysFromCivil(said))) best = candidate;
+            }
+            date = best orelse continue;
+        }
+        if (!writable(date)) continue;
+        if (found) |other| {
+            if (!other.eql(date)) return null;
+        }
+        found = date;
+        index = after;
+    }
+    return found;
+}
+
+/// Whether a statement says something has only now happened: "just" before
+/// a verb in the past ("just launched", "just got back").
+pub fn saysJust(text: []const u8) bool {
+    const irregular = [_][]const u8{
+        "got",  "came", "went",  "saw",  "had",  "did",   "made",  "took",  "bought", "began",  "ran",    "met",
+        "won",  "left", "found", "read", "sold", "wrote", "gave",  "heard", "spent",  "paid",   "sent",   "built",
+        "lost", "broke", "flew", "drove", "ate", "became", "brought", "held", "told",  "taught", "caught", "hit",
+    };
+    const linking = [_][]const u8{ "is", "are", "am", "was", "were", "be", "been", "feels", "feel", "felt", "seems", "seem", "not" };
+    var index: usize = 0;
+    var previous: []const u8 = "";
+    var before: []const u8 = "";
+    while (index < text.len) {
+        while (index < text.len and !std.ascii.isAlphanumeric(text[index])) index += 1;
+        const start = index;
+        while (index < text.len and std.ascii.isAlphanumeric(text[index])) index += 1;
+        const word = text[start..index];
+        defer {
+            before = previous;
+            previous = word;
+        }
+        // "is just tired" describes; it reports nothing that happened.
+        const describes = for (linking) |verb| {
+            if (std.ascii.eqlIgnoreCase(before, verb)) break true;
+        } else false;
+        if (std.ascii.eqlIgnoreCase(previous, "just") and !describes) {
+            if (word.len > 3 and std.ascii.endsWithIgnoreCase(word, "ed")) return true;
+            for (irregular) |verb| {
+                if (std.ascii.eqlIgnoreCase(word, verb)) return true;
+            }
+        }
+    }
+    return false;
 }
 
 fn tokenOffset(text: []const u8, token: []const u8) usize {
@@ -709,6 +821,7 @@ fn matchStatedAt(tokens: []const []const u8, i: usize, current: CivilDate) ?Stat
     if (statedDay(tokens, i, current)) |found| return found;
     if (statedAgo(tokens, i, current)) |found| return found;
     const stretch = matchRollingCount(tokens, i, current) orelse
+        matchCountNow(tokens, i, current) orelse
         matchTheLastUnit(tokens, i, current) orelse
         matchEarlierThis(tokens, i, current) orelse
         matchComing(tokens, i, current);
@@ -1026,6 +1139,19 @@ fn matchRollingCount(tokens: []const []const u8, i: usize, current: CivilDate) ?
     return .{ .len = 3, .value = between(shiftBack(current, unit, count), current) };
 }
 
+/// for [about|almost|nearly|over|around|roughly] N days|weeks|months|years
+/// now ("for six weeks now", "for a year now"): a stretch that began that
+/// long ago and runs to the day of speaking. Matches from the count.
+fn matchCountNow(tokens: []const []const u8, i: usize, current: CivilDate) ?Match {
+    if (i == 0) return null;
+    const hedged = anyWordAt(tokens, i - 1, &.{ "about", "almost", "nearly", "over", "around", "roughly" });
+    if (!wordAt(tokens, if (hedged) (if (i >= 2) i - 2 else return null) else i - 1, "for")) return null;
+    const count = countAt(tokens, i, true) orelse return null;
+    const unit = unitAt(tokens, i + 1) orelse return null;
+    if (!wordAt(tokens, i + 2, "now")) return null;
+    return .{ .len = 3, .value = between(shiftBack(current, unit, count), current) };
+}
+
 /// the last week|month|year (as in "in the last month"): a window ending
 /// today, unlike the calendar period "last month". Not before "of"/"in"
 /// ("the last week of March").
@@ -1290,6 +1416,10 @@ test "stated times keep their words where replacing them would not read" {
     const now = "2023-05-09T10:00:00Z";
     try expectStated("The user has gone to bed at 11:30 PM for the past two weeks.", now, "The user has gone to bed at 11:30 PM for the past two weeks (April 25 to May 9, 2023).", null);
     try expectStated("The user has run 40 km in the last month.", now, "The user has run 40 km in the last month (April 9 to May 9, 2023).", null);
+    try expectStated("The user has taken guitar lessons for six weeks now.", now, "The user has taken guitar lessons for six weeks now (March 28 to May 9, 2023).", null);
+    try expectStated("The user has lived in Leeds for about a year now.", now, "The user has lived in Leeds for about a year now (May 9, 2022 to May 9, 2023).", null);
+    // Not a stretch so far: time that is left, not time that has passed.
+    try expectStated("The user has three weeks now to finish the draft.", now, null, null);
     try expectStated("The user missed yesterday's meeting.", now, "The user missed yesterday's (Monday, May 8, 2023) meeting.", "2023-05-08");
     try expectStated("The user was ill the previous week.", now, "The user was ill the previous week (the week of May 1 to May 7, 2023).", null);
     try expectStated("The user has been unwell since yesterday.", now, "The user has been unwell since Monday, May 8, 2023.", "2023-05-08");
@@ -1333,6 +1463,36 @@ fn expectWhen(text: []const u8, current: []const u8, expected: ?[2][]const u8, c
     try std.testing.expect(testDate(want[1]).eql(stated.when.?.end));
 }
 
+test "the one day a statement names outright" {
+    const said = testDate("2023-02-03T10:00:00Z");
+    const expect = struct {
+        fn day(text: []const u8, on: CivilDate, want: ?[]const u8) !void {
+            const got = explicitDay(text, on);
+            if (want) |date| try std.testing.expect(testDate(date).eql(got.?)) else try std.testing.expectEqual(@as(?CivilDate, null), got);
+        }
+    }.day;
+    try expect("The user got a new pair of Adidas running shoes on January 10th.", said, "2023-01-10");
+    try expect("The user saw the dentist on Sept. 3, 2021.", said, "2021-09-03");
+    try expect("The user said so on March 3 and again on March 3rd.", said, "2023-03-03");
+    // The year that puts it nearest the day it was said.
+    try expect("The user flew home on December 28.", said, "2022-12-28");
+    try expect("The user flies to Lisbon on June 3rd.", said, "2023-06-03");
+    // Two days, a month alone, the verb "may" and a number that is no day.
+    try expect("The user pre-ordered it on January 28th, and it arrived on February 25th.", said, null);
+    try expect("The user moved in January 2023.", said, null);
+    try expect("The user may 5 times a week go running.", said, "2023-05-05");
+    try expect("The user paid March 2500 dollars.", said, null);
+    try expect("The user has no plans.", said, null);
+}
+
+test "just before a verb in the past says it has only now happened" {
+    try std.testing.expect(saysJust("The user just launched their website."));
+    try std.testing.expect(saysJust("The user just got back from a music festival in Brooklyn."));
+    try std.testing.expect(!saysJust("The user just wants a quiet weekend."));
+    try std.testing.expect(!saysJust("The user launched their website."));
+    try std.testing.expect(!saysJust("The user is just tired."));
+}
+
 test "a loose count keeps its words and gains a date" {
     // 2023-05-09 is a Tuesday.
     const now = "2023-05-09T10:00:00Z";
@@ -1360,6 +1520,9 @@ test "one stated time gives the days the event covers" {
     try expectWhen("The user called a plumber a few days ago.", now, .{ "2023-05-05", "2023-05-07" }, true);
     // A stretch up to today, two times, or a time that cannot be placed: none.
     try expectWhen("The user has run 40 km in the last month.", now, null, false);
+    // What has gone on "for" a stretch up to now is placed by the stretch.
+    try expectWhen("The user has gone to bed at 11:30 PM for the past two weeks.", now, .{ "2023-04-25", "2023-05-09" }, false);
+    try expectWhen("The user has taken guitar lessons for about six weeks now.", now, .{ "2023-03-28", "2023-05-09" }, false);
     try expectWhen("The user met Dana yesterday and leaves tomorrow.", now, null, false);
     try expectWhen("The user recently adopted a beagle.", now, null, false);
 }

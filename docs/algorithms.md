@@ -561,7 +561,8 @@ Either way a job is processed like this:
      to May 7, 2023", "next month" becomes "in June 2023", "two weeks ago"
      becomes "around April 25, 2023" (no finer than the unit counted in).
    - A stretch up to or from the day of speaking keeps its words and gains
-     its dates: "for the past two weeks (April 25 to May 9, 2023)".
+     its dates: "for the past two weeks (April 25 to May 9, 2023)", "for six
+     weeks now (March 28 to May 9, 2023)".
    - A loose count keeps its words and gains a date: "a few weeks ago (around
      April 18, 2023)". A few, several and a couple are read as three, five
      and two.
@@ -591,8 +592,11 @@ Either way a job is processed like this:
    seventh of the distance to the day said either way, at least a day; a
    third when the count is hedged or loose ("about two weeks ago", "a few
    weeks ago"). That is the window a question naming the same time gets
-   (`temporal.resolveNamedTimes`). A stretch that ends or starts on the day
-   said ("for the past two weeks") is not an event time. The model's
+   (`temporal.resolveNamedTimes`). What has gone on for a stretch up to the
+   day said ("for the past two weeks", "for six weeks now") has the stretch
+   as its span, and stands where the stretch began when facts are put in
+   order. A stretch that only bounds when something happened ("in the last
+   month") or that starts on the day said is not an event time. The model's
    `eventDate` is kept beside a span only when they agree, meaning one lies
    inside the other; otherwise it is dropped (`eventDatesCorrected`). A day
    from the model inside a named week or month narrows the span to that day.
@@ -601,6 +605,17 @@ Either way a job is processed like this:
    `eventSpans` counts the claims with a span. On 21,288 claims from 133
    LongMemEval-S histories, 1,633 (7.7%) had an event date before spans;
    about 670 more name one period or counted time.
+
+   A claim left with no span, where the model gave no date and no relative
+   time was resolved, is dated by its own wording when that is plain. If it
+   names exactly one calendar day ("on February 20th", "March 3, 2023"), that
+   day is its `eventDate` and span, in the year that puts it nearest the day
+   said when it gives none. Otherwise, if it reports something as having
+   only now happened, "just" before a verb in the past ("just launched",
+   "just got back"), it is dated the day it was said. A date of the model's
+   that step 5 refused is not brought back this way. On 20,678 claims from
+   125 histories these two rules and the "for" stretches raised the claims
+   with a span from 2,321 (11.2%) to 3,043 (14.7%).
 7. Write each accepted claim as an `Assertion` node with
    `{kind: "assertion", text, statedText, searchText, quote, eventDate,
    eventStart, eventEnd, planned,

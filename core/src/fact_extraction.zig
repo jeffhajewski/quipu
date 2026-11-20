@@ -356,6 +356,7 @@ pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: [
             else => false,
         };
         var event_date: ?[]const u8 = null;
+        var date_rejected = false;
         switch (object.get("eventDate") orelse .null) {
             .null => {},
             .string => |value| if (value.len > 0) {
@@ -363,11 +364,12 @@ pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: [
                 if (validEventDate(value, session, planned)) {
                     event_date = value;
                 } else {
-                    counts.eventDatesRejected += 1;
+                    date_rejected = true;
                 }
             },
-            else => counts.eventDatesRejected += 1,
+            else => date_rejected = true,
         }
+        if (date_rejected) counts.eventDatesRejected += 1;
         var resolved_text: ?[]const u8 = null;
         var resolved_when: ?NamedSpan = null;
         if (try resolveTimes(allocator, &owned, text, messages[located].created_at)) |resolved| {
@@ -400,6 +402,20 @@ pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: [
                 span = named.window;
             }
             if (named.after_said) planned = true;
+        }
+        if (span == null and !date_rejected) {
+            // The model dated nothing and no relative time was resolved: a
+            // day the model's own wording names outright, or "just" for the
+            // day it was said.
+            if (temporal.parseIsoDate(messages[located].created_at orelse "") catch null) |said| {
+                const day: ?temporal.CivilDate = temporal.explicitDay(text, said) orelse if (temporal.saysJust(text)) said else null;
+                if (day) |date| {
+                    span = .{ .start = date, .end = date };
+                    event_date = try ownDate(allocator, &owned, date);
+                    if (temporal.daysFromCivil(date) > temporal.daysFromCivil(said)) planned = true;
+                    counts.eventDatesDerived += 1;
+                }
+            }
         }
         const event_start = if (span) |days| try ownDate(allocator, &owned, days.start) else null;
         const event_end = if (span) |days| try ownDate(allocator, &owned, days.end) else null;
@@ -776,6 +792,45 @@ test "grounding rejects malformed and implausible event dates but keeps the clai
     try testing.expectEqual(@as(usize, 4), result.grounding.counts.eventDatesRejected);
     try testing.expectEqual(@as(usize, 2), result.grounding.counts.eventDates);
     try testing.expectEqual(@as(usize, 1), result.grounding.counts.planned);
+}
+
+test "grounding dates a claim the model left undated by the day it names, by just, and by a stretch so far" {
+    // The messages are dated 2023-05-22, a Monday.
+    const result = try groundReply(
+        \\{"assertions":[
+        \\{"text":"The user adopted a cat on May 20th.","messageIndex":0,"quote":"adopted a cat"},
+        \\{"text":"The user takes Miso to the groomer on June 3rd.","messageIndex":0,"quote":"named Miso"},
+        \\{"text":"The user just named her cat.","messageIndex":2,"quote":"I named her Miso"},
+        \\{"text":"The user has fed Miso soup for two weeks now.","messageIndex":2,"quote":"because of the soup"},
+        \\{"text":"The user moves on May 30.","messageIndex":0,"quote":"I adopted a cat","eventDate":"2023-05-30"},
+        \\{"text":"The user just wants a cat.","messageIndex":0,"quote":"a cat named Miso"}
+        \\]}
+    );
+    defer result.parsed.deinit();
+    defer result.grounding.deinit(testing.allocator);
+    const claims = result.grounding.claims;
+    try testing.expectEqual(@as(usize, 6), claims.len);
+
+    // A day the model's wording names, in the year nearest the message.
+    try testing.expectEqualStrings("2023-05-20", claims[0].event_date.?);
+    try testing.expectEqualStrings("2023-05-20", claims[0].event_start.?);
+    try testing.expect(!claims[0].planned);
+    // After the message, it is a plan.
+    try testing.expectEqualStrings("2023-06-03", claims[1].event_start.?);
+    try testing.expect(claims[1].planned);
+    // "just" before a past verb: the day it was said.
+    try testing.expectEqualStrings("2023-05-22", claims[2].event_start.?);
+    try testing.expectEqualStrings("2023-05-22", claims[2].event_end.?);
+    // What has gone on for a stretch up to now covers the stretch.
+    try testing.expectEqualStrings("The user has fed Miso soup for two weeks now (May 8 to May 22, 2023).", claims[3].text);
+    try testing.expectEqualStrings("2023-05-08", claims[3].event_start.?);
+    try testing.expectEqualStrings("2023-05-22", claims[3].event_end.?);
+    try testing.expectEqual(@as(?[]const u8, null), claims[3].event_date);
+    // A date of the model's that was refused is not brought back.
+    try testing.expectEqual(@as(?[]const u8, null), claims[4].event_start);
+    try testing.expectEqual(@as(usize, 1), result.grounding.counts.eventDatesRejected);
+    // "just" that reports nothing.
+    try testing.expectEqual(@as(?[]const u8, null), claims[5].event_start);
 }
 
 test "grounding writes relative times as dates and dates the claim by them" {
