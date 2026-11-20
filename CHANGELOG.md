@@ -97,6 +97,12 @@
   others. The extract job result gains `recallMessages` and
   `recallAssertions`. There is no option; it adds about one call per
   conversation.
+- The threads section sets the dated facts nearest the question, up to
+  four, in the order they happened ahead of the topics, and under them a
+  line gives the time between each pair (`2023-03-20 to 2023-04-10 is 21
+  days (3 weeks)`), so which came first and how long after is read off
+  instead of worked out. Only claims with an event span are placed, and
+  nothing is counted from an event of two weeks or more. There is no option.
 - More claims know when their event was. A claim the model left undated is
   dated by the one calendar day its wording names ("on February 20th") or,
   for "just" before a past verb, by the day it was said. "For six weeks

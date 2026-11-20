@@ -1004,6 +1004,26 @@ leaves out `current_facts`.
    topic that does not fit whole is shown with the claims nearest the
    question that do, and its heading says how many of its facts those are.
    Claims in no topic come last under `## Other facts`.
+
+   Between the named times and the topics comes the line of time. A reader
+   given two dated facts still has to say which came first and how long
+   lay between them, and a small model gets that wrong with both dates in
+   front of it, or answers with one fact's "28 days ago". So the dated
+   claims nearest the question are taken out of their topics and set in the
+   order they happened, and under them one line gives the time from each to
+   the others, to be read off. A claim is eligible when it has an event
+   span, is not planned, did not happen after `time.validAt`, and scores at
+   least 0.8 of the nearest eligible claim's cosine (and 0.3); at most four
+   are taken, in at most 40% of the section. Claims with no event span stay
+   in their topics: one would stand on the day it was said, which is not
+   when anything happened. The counting line gives every pair of days:
+   `2023-03-20 to 2023-04-10 is 21 days (3 weeks)`, with weeks from a week
+   up and months from 60 days. A count is `about` when an end is the middle
+   of a counted time ("two weeks ago") or the start of a stretch ("for six
+   weeks now"). Nothing is counted from or to an event of two weeks or
+   more (a month, a year), or between an event and a day inside it. When no
+   pair can be counted, because the claims share a day or only one is
+   eligible, there is no line of time and the claims stay in their topics.
 4. **Open sessions.** Raw evidence is taken only from sessions that are
    opened: the six whose summaries are nearest the question, every session
    dated inside a time the question names, and the sessions of the first ten
@@ -1027,9 +1047,12 @@ leaves out `current_facts`.
 (Background jobs grouped facts the user stated into threads by subject, ...)
 ## Said on or about 2023-05-20 (Sat): the question's "last Saturday"
 [q_msg_41] 2023-05-20 (Sat), 10 days ago: The user picked up the road bike from the shop.
+## Nearest the question, in the order they happened
+[q_msg_30] 2023-05-16 (Tue), 14 days ago: The user dropped the road bike at the shop on Monday, May 15, 2023. (happened 2023-05-15 (Mon), 15 days ago)
+[q_msg_47] 2023-05-22 (Mon), 8 days ago: The user changed the pedals on Monday, May 22, 2023.
+Time between them: 2023-05-15 to 2023-05-22 is 7 days (1 week).
 ## Road bike upkeep: The user had the brakes looked at and then changed the pedals.
 [q_msg_12] 2023-05-02 (Tue), 28 days ago: The user bought the road bike in March. (happened 2023-03)
-[q_msg_30] 2023-05-16 (Tue), 14 days ago: The user dropped the road bike at the shop yesterday. (happened 2023-05-15 (Mon), 15 days ago)
 ## Other facts
 [q_msg_55] 2023-05-24 (Wed), 6 days ago: The user is riding a sportive in July. (planned for 2023-07)
 </threads>

@@ -3675,6 +3675,59 @@ pub const Runtime = struct {
             used += cost;
         }
 
+        // The facts nearest the question on one line of time, whatever
+        // their topics, with the time between them counted: which came
+        // first, and how long after, is read off and not worked out.
+        timeline: {
+            const today: ?i64 = if (current) |date| temporal.daysFromCivil(date) else null;
+            var near = std.ArrayList(u32).empty;
+            for (claims.items, 0..) |claim, index| {
+                // Only what is known to have happened on a day stands on it:
+                // a fact with no event would stand where it was said.
+                if (claim.shown or claim.planned or claim.event == null or claim.score < summaries.relevance_min) continue;
+                if (today != null and claim.placed() > today.?) continue;
+                try near.append(arena, @intCast(index));
+            }
+            if (near.items.len < 2) break :timeline;
+            std.mem.sort(u32, near.items, claims.items, ShownClaim.nearerQuestion);
+            const best = claims.items[near.items[0]].score;
+            const share = limit * summaries.timeline_percent / 100;
+            const heading_tokens = estimatePromptTokens(summaries.timeline_heading) + 4;
+            var kept = std.ArrayList(u32).empty;
+            var between: ?[]const u8 = null;
+            var cost = heading_tokens;
+            for (near.items) |index| {
+                if (kept.items.len == summaries.timeline_facts) break;
+                if (claims.items[index].score < best * summaries.timeline_floor) break;
+                // With this fact: the lines, and the line that counts
+                // between them.
+                var trial = try arena.dupe(u32, kept.items);
+                trial = try arena.realloc(trial, trial.len + 1);
+                trial[trial.len - 1] = index;
+                std.mem.sort(u32, trial, claims.items, ShownClaim.happenedBefore);
+                var trial_cost = heading_tokens;
+                const facts = try arena.alloc(summaries.ShownFact, trial.len);
+                for (trial, facts) |member, *fact| {
+                    fact.* = claims.items[member].fact();
+                    trial_cost += try claims.items[member].lineTokens(arena, current);
+                }
+                var writer: std.Io.Writer.Allocating = .init(arena);
+                const counted = try summaries.writeBetween(&writer.writer, facts);
+                if (counted) trial_cost += estimatePromptTokens(writer.written()) + 1;
+                if (trial_cost > share or used + trial_cost > limit) break;
+                kept.clearRetainingCapacity();
+                try kept.appendSlice(arena, trial);
+                between = if (counted) writer.written() else null;
+                cost = trial_cost;
+            }
+            // Facts of one day have nothing between them to count, and are
+            // left to their topics.
+            if (between == null) break :timeline;
+            for (kept.items) |index| claims.items[index].shown = true;
+            try blocks.append(arena, .{ .heading = summaries.timeline_heading, .members = kept.items, .between = between });
+            used += cost;
+        }
+
         var loose = std.ArrayList(u32).empty;
         const nearest = if (candidates.items.len > 0) candidates.items[0].score else 0;
         for (candidates.items) |candidate| {
@@ -3746,9 +3799,11 @@ pub const Runtime = struct {
                     .heading = block.heading,
                     .lines = lines,
                 }, claims.items, block.members, filter);
-            } else for (block.members) |index| {
-                // A fact outside a topic is an item of its own.
+            } else for (block.members, 0..) |index, position| {
+                // A fact outside a topic is an item of its own. The last of
+                // a timeline carries the line that counts between them.
                 const claim = claims.items[index];
+                const between: ?[]const u8 = if (position + 1 == block.members.len) block.between else null;
                 try appendThreadItem(allocator, &found.items, .{
                     .qid = claim.qid,
                     .type = "assertion",
@@ -3756,7 +3811,7 @@ pub const Runtime = struct {
                     .score = claim.score,
                     .valid_from = claim.created_at,
                     .heading = block.heading,
-                    .lines = &.{claim.rendered.?},
+                    .lines = if (between) |line| &.{ claim.rendered.?, line } else &.{claim.rendered.?},
                 }, claims.items, &.{index}, filter);
             }
         }
@@ -8367,6 +8422,9 @@ const ThreadBlockPlan = struct {
     topic: ?usize = null,
     score: f32 = 0,
     members: []const u32,
+    /// For a timeline, the line after its facts that gives the time between
+    /// them.
+    between: ?[]const u8 = null,
 };
 
 /// A topic, or a fact in no topic, competing for the threads section.
@@ -8488,8 +8546,12 @@ const ShownClaim = struct {
         return estimatePromptTokens(try self.line(arena, current)) + 1;
     }
 
+    fn fact(self: ShownClaim) summaries.ShownFact {
+        return .{ .said = self.said, .text = self.text, .event = self.event, .planned = self.planned };
+    }
+
     fn placed(self: ShownClaim) i64 {
-        return summaries.placedDay(.{ .said = self.said, .text = self.text, .event = self.event });
+        return summaries.placedDay(self.fact());
     }
 
     fn happenedBefore(claims: []ShownClaim, left: u32, right: u32) bool {
@@ -14993,6 +15055,9 @@ const SummaryTestModel = struct {
         .{ "I feed", "{\"assertions\":[{\"text\":\"The user feeds the sourdough starter named Bubbles daily.\",\"messageIndex\":0,\"quote\":\"I feed Bubbles\"}]}" },
         .{ "ferry", "{\"assertions\":[{\"text\":\"The user booked a ferry to Zanzibar for August.\",\"messageIndex\":0,\"quote\":\"I booked a ferry to Zanzibar\"}]}" },
         .{ "I gave half", "{\"assertions\":[{\"text\":\"The user gave half of the sourdough starter named Bubbles away.\",\"messageIndex\":0,\"quote\":\"I gave half of Bubbles\"}]}" },
+        .{ "I took a baking class", "{\"assertions\":[{\"text\":\"The user took a baking class at the culinary school yesterday.\",\"messageIndex\":0,\"quote\":\"I took a baking class\"}]}" },
+        .{ "I baked a birthday cake", "{\"assertions\":[{\"text\":\"The user baked a birthday cake for a friend today.\",\"messageIndex\":0,\"quote\":\"I baked a birthday cake\"}]}" },
+        .{ "I love the baking class", "{\"assertions\":[{\"text\":\"The user loves the baking class and the birthday cake.\",\"messageIndex\":0,\"quote\":\"I love the baking class\"}]}" },
     };
 
     fn endpoint(self: *SummaryTestModel) providers.ProviderEndpoint {
@@ -15292,6 +15357,63 @@ fn threadRetrieve(runtime: *Runtime, query: []const u8, budget: usize) ![]u8 {
     );
     defer allocator.free(request);
     return runtime.dispatch(allocator, request);
+}
+
+test "retrieval sets the dated facts nearest the question in order and counts the time between them" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = SummaryTestModel{};
+    defer model.deinit();
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{ .extract_provider = model.endpoint() });
+    defer runtime.deinit();
+
+    // Said in the other order than they happened, with a fact about both
+    // that names no time.
+    const cake = try rememberStarterDay(&runtime, 14, "I baked a birthday cake for my friend today.");
+    defer allocator.free(cake);
+    const love = try rememberStarterDay(&runtime, 15, "I love the baking class and the birthday cake.");
+    defer allocator.free(love);
+    const class = try rememberStarterDay(&runtime, 16, "I took a baking class at the culinary school yesterday.");
+    defer allocator.free(class);
+    _ = try runtime.runExtractJobs(allocator, "test", 20, 1);
+    _ = try runtime.runSummaryJobs(allocator, "test", 100);
+
+    const response = try threadRetrieve(&runtime, "How long before the baking class at the culinary school was the birthday cake baked for a friend?", 2000);
+    defer allocator.free(response);
+    const prompt = try resultStringField(allocator, response, "prompt");
+    defer allocator.free(prompt);
+    // The two facts that happened on a day, the earlier first, and under
+    // them the days from one to the other. The reader is given the count.
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "## " ++ summaries.timeline_heading ++ "\n" ++
+            "[{s}] 2023-05-14 (Sun), 16 days ago: The user baked a birthday cake for a friend on Sunday, May 14, 2023.\n" ++
+            "[{s}] 2023-05-16 (Tue), 14 days ago: The user took a baking class at the culinary school on Monday, May 15, 2023. (happened 2023-05-15 (Mon), 15 days ago)\n" ++
+            "Time between them: 2023-05-14 to 2023-05-15 is 1 day.\n",
+        .{ cake, class },
+    );
+    defer allocator.free(expected);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, expected) != null);
+    // The fact with no day of its own is shown, outside the line of time.
+    const undated = try std.fmt.allocPrint(allocator, "[{s}] 2023-05-15 (Mon), 15 days ago: The user loves the baking class and the birthday cake.", .{love});
+    defer allocator.free(undated);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, undated) != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, undated).? > std.mem.indexOf(u8, prompt, "Time between them").?);
+
+    // Each fact of the line is an item; the count is part of the last one.
+    var parsed = try std.json.parseFromSlice(Value, allocator, response, .{});
+    defer parsed.deinit();
+    const threads = parsed.value.object.get("result").?.object.get("context").?.object.get("threads").?.array.items;
+    try std.testing.expectEqualStrings("assertion", threads[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings("The user baked a birthday cake for a friend on Sunday, May 14, 2023.", threads[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings(class, threads[1].object.get("evidence").?.array.items[0].object.get("qid").?.string);
+
+    // A question about one of them has no second day to count to.
+    const one = try threadRetrieve(&runtime, "Where was the baking class I took at the culinary school?", 2000);
+    defer allocator.free(one);
+    try std.testing.expect(std.mem.indexOf(u8, one, summaries.timeline_heading) == null);
 }
 
 test "retrieval shows the topics nearest the question and opens sessions through the summaries" {
