@@ -1814,6 +1814,138 @@ Limits: one run per arm, and dev is now a set the retrieval was fitted on. Each 
 the scope with the question, which is fine at 500 messages and will need an
 index beyond that.
 
+## Iteration 11 (November 20): the time between two facts
+
+### What the remaining temporal misses are
+
+After iteration 10 a GPT-4o reader had 17 of the 133 temporal answers wrong
+at 4,096 tokens. Read one by one:
+
+| Group | Count | Example |
+| --- | ---: | --- |
+| Arithmetic or order, both facts in context | 6 | "How many days ago did I launch my website when I signed my first client?" answered from today, 43, not between the two, 19 |
+| A named time, the fact in context, another event chosen or none | 5 | "the music event last Saturday": the reader took a festival mentioned that day, not the concert attended |
+| A gold turn missing | 2 | the order of six museums with four in context |
+| The benchmark or the judge | 3 | a reference of 15 weeks for 81 days; "30 days" judged wrong against "30 days"; a distractor session where the user is 20 |
+| A false premise answered | 1 | |
+
+With GPT-4o-mini the first group is much larger. Of its 28 misses, about a
+dozen are a wrong "which came first" with both dates in the answer ("the coffee maker
+around May 4, 2023 came first, the mixer was in April 2023") or an interval
+read off one fact's "28 days ago" where the two facts were 21 days apart.
+The dates were right. The reader was left to compare and subtract.
+
+### A line of time
+
+The daemon now does that. The dated facts nearest the question are taken out
+of their topics, set in the order they happened at the head of the threads
+section, and followed by one line that gives the days between each pair:
+
+```text
+## Nearest the question, in the order they happened
+[q_msg_458] 2022-03-21 (Mon), 25 days ago: The user took an amazing baking class ... (happened 2022-03-20 (Sun), 26 days ago)
+[q_msg_1185] 2022-04-10 (Sun), 5 days ago: The user just baked a chocolate cake for a friend's birthday party ...
+Time between them: 2022-03-20 to 2022-04-10 is 21 days (3 weeks).
+```
+
+It took four versions, each run on the tuning half of the temporal set
+(55, correct at 1,024 and 4,096 tokens; before: GPT-4o-mini 43 and 45,
+GPT-4o 47 and 50):
+
+| Version | GPT-4o-mini | GPT-4o | What went wrong |
+| --- | --- | --- | --- |
+| Six nearest facts, a "then, N days later" line between each two | 41, 47 | 48, 49 | Two events with a third between them left the reader a sum, and it got it wrong more often than the subtraction |
+| One line with every pair | 46, 47 | 48, 49 | Facts with no event ("is considering flying with Delta") stood on the day they were said and were counted from |
+| Only facts with an event span | 44, 48 | 47, 50 | Six dated facts reach down to a wedding and a coffee table; a month counted as its middle day gave "about 30 days" between February and March |
+| Four facts, each at least 0.8 as near as the nearest; no count from a month or a year | 45, 47 | 49, 51 | |
+
+The 0.8 and the four come from where the facts that hold an answer stand
+among those shown: on the tuning half 89 of 103 are among the four nearest
+and 89 score at least 0.8 of the nearest.
+
+Restricting the line to dated facts showed how many claims that happened on
+a stated day had no event date. Three rules, none using a model, date them
+at extraction: a claim the model left undated takes the one calendar day its
+wording names ("recently got a Samsung Galaxy S22 on February 20th"); "just"
+before a past verb takes the day it was said; and what has gone on "for six
+weeks now" or "for the past three weeks" has that stretch as its span and
+stands where it began. On the 20,678 claims of the tuning half and dev the
+claims with an event span rose from 2,321 to 3,043.
+
+### Results
+
+Against iteration 10, both changes together:
+
+| Set | Reader | 1,024 | 4,096 | Wins / losses |
+| --- | --- | --- | --- | --- |
+| Temporal (133) | GPT-4o | 106 to 110 (82.7%) | 116 to 118 (88.7%) | 4 / 0 and 4 / 2 |
+| Temporal (133) | GPT-4o-mini | 95 to 100 (75.2%) | 105 to 108 (81.2%) | 7 / 2 and 5 / 2 |
+| Dev and held-out (133) | GPT-4o | 108 to 107 | 112 to 112 | 0 / 1 and 1 / 1 |
+| Dev and held-out (133) | GPT-4o-mini | 101 to 104 | 102 to 105 | 4 / 1 and 4 / 1 |
+
+The versions were chosen on the tuning half and dev. On the sets not looked
+at until the last version was fixed:
+
+| Set | GPT-4o-mini 1,024 | GPT-4o-mini 4,096 | GPT-4o 1,024 | GPT-4o 4,096 |
+| --- | --- | --- | --- | --- |
+| Temporal, frozen half (54) | 33 to 35 | 43 to 42 | 38 to 40 | 43 to 45 |
+| Temporal, earlier-seen (24) | 19 to 20 | 17 to 19 | 21 to 21 | 23 to 22 |
+| Held-out (63) | 46 to 49 | 43 to 46 | 48 to 48 | 48 to 48 |
+
+A control with the event-date rules and no line of time separates the two
+on the tuning half and dev (125 questions). The rules alone change one
+answer in 500, a loss at 1,024 tokens for both readers on the same
+question, where a longer fact line pushed the last fact out of the
+section. The line of time on top of them wins 8 answers and loses none
+(GPT-4o-mini 97 to 100 and 104 to 106, GPT-4o 106 to 108 and 114 to 115).
+About 30% of contexts get a line of time; the rest have fewer than two
+dated facts near the question on different days.
+
+Of the six arithmetic misses GPT-4o had, three are now right at 4,096
+tokens. Two read the count or the order off the line of time (the website
+and the first client, 19 days; which device came first). The third, "how
+long had I been taking guitar lessons when I bought the amp", has no line
+of time: "for six weeks now" is written out as April 13 to May 25 in the
+claim, and the reader subtracts from that. One of the three still wrong
+shows the limit of the approach. Asked "how many days ago did I attend a
+baking class when I made my friend's birthday cake", GPT-4o has
+"2022-03-20 to 2022-04-10 is 21 days" in front of it and answers 26, the
+days from the class to today: it reads the question differently, and no
+count changes that.
+
+Fifteen temporal answers are still wrong at 4,096: the three benchmark
+cases, the two with a gold turn missing, four where a named time picks the
+wrong event, the false premise, and five that are a misreading or need a
+step the daemon does not give, such as 7:00 less 15 minutes, a month
+compared with a day, or counting events before another one.
+
+### A relevance floor for raw messages, measured and not built
+
+Topics, session summaries and claims are already compared with the question
+by cosine and dropped under a floor. Raw messages are not: they come from
+BM25 and vector search fused by rank and fill what budget is left. On 188
+contexts at 4,096 tokens (dev, held-out and the tuning half; 3,562 raw
+items, 305 from gold turns), embedding each raw item and the question:
+
+| Floor, as a share of the nearest raw item's cosine | Gold items kept | Other text dropped |
+| ---: | --- | ---: |
+| 0.4 | 302 of 305 | 14% |
+| 0.5 | 299 of 305 | 26% |
+| 0.6 | 289 of 305 | 41% |
+| 0.7 | 265 of 305 | 58% |
+
+A floor at 0.5 would clear a quarter of the text that holds no answer and
+lose 2% of the items that do. Those are turns of multi-session and temporal
+questions worded far from the question, which the facts lead to anyway, so
+the floor belongs on search hits and not on a fact's message. It is not
+built: the store returns a message's score only when vector search finds
+it, so a hit from BM25 has none, and the daemon would have to keep a small
+vector on each message node as it does on claims.
+
+Limits: one run per arm; dev was fitted on again; the line of time is
+chosen by the nearness of single facts to the whole question, so a question
+that names two events in different words can have only one of them on it.
+
 ## What we learned
 
 - **The reader is now the bottleneck, not retrieval.** At 4K, 93% of gold
@@ -1889,6 +2021,11 @@ baselines, about $3 on the second reading ($0.55 measuring claim coverage,
 $2.40 on answers), $0.62 on the restatement ablation, and $0.24 on the
 GPT-4o-mini reader runs.
 
+Iteration 11 cost about $4.90: four versions of the line of time on the
+tuning half and dev with both readers, a control, and the three untouched
+sets. Most reader calls for questions whose context did not change came
+from the cache.
+
 Embeddings cost about $0.13 per uncached full slice. A GPT-4o-mini reader with
 the GPT-4o judge costs about $0.05–0.15 per arm.
 
@@ -1945,15 +2082,14 @@ the GPT-4o judge costs about $0.05–0.15 per arm.
   question reads every summary and claim of its scope, which needs an index
   over the stored vectors before large stores.
 - Temporal reasoning with a GPT-4o reader was 78.9% at 4K before iteration
-  10 and is 87.2% after it (see there); the rest of this item describes the
-  earlier state. It was 7 points under the
-  best published GPT-4o result. Of the misses read in iteration 8, date
-  arithmetic between two events (7) and many-event ordering that retrieval
-  only partly covers (6) are the groups nothing yet addresses; a reader that
-  does not use marked evidence accounts for most of the rest. A dated
-  timeline section written by the background jobs is the next thing to test
-  for the arithmetic group, and it has to help GPT-4o-mini too: today the
-  jobs help GPT-4o on temporal questions and cost GPT-4o-mini answers.
+  10, 87.2% after it and 88.7% after iteration 11, whose line of time took
+  the date arithmetic between two events off the reader. What is left (see
+  there): a question that names a time and has several events on that day,
+  many-event ordering that retrieval only partly covers, and steps the line
+  does not give. With GPT-4o-mini it is 81.2%.
+- Raw messages have no relevance floor. One measured in iteration 11 would
+  drop a quarter of the text that holds no answer for 2% of the items that
+  do, and needs a small vector kept on each message node.
 - The facts arm has been run on the whole knowledge-update category only. It
   has not been run on all 500 questions or with a stronger reader, and 11 of
   the 78 knowledge-update questions are still wrong at 4K.
