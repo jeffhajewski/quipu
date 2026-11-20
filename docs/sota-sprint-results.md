@@ -1766,6 +1766,32 @@ today instead of between the two events ("how many days ago did I launch my
 website when I signed my first client"), "for six weeks now" not turned into
 a start date, a pre-order date taken as the day a thing was got.
 
+### A GPT-4o-mini reader
+
+Background-job output had cost GPT-4o-mini answers on temporal questions
+before (see the open items), so
+the same binaries were run with it as the reader, GPT-4o still judging:
+
+| Set | Budget | Raw search | Steps 1 to 4 | Wins / losses |
+| --- | ---: | ---: | ---: | --- |
+| Dev (70) | 1,024 | 49 | 55 | 9 / 3 |
+| Dev (70) | 4,096 | 50 | 59 | 12 / 3 |
+| Held-out (63) | 1,024 | 44 | 46 | 7 / 5 |
+| Held-out (63) | 4,096 | 45 | 43 | 2 / 4 |
+| Dev and held-out (133) | 1,024 | 93 (69.9%) | 101 (75.9%) | 16 / 8 |
+| Dev and held-out (133) | 4,096 | 95 (71.4%) | 102 (76.7%) | 14 / 7 |
+| Temporal, tuning half (55) | 4,096 | 36 | 45 | 12 / 3 |
+| Temporal, frozen half (54) | 4,096 | 31 | 43 | 14 / 2 |
+| Temporal, earlier-seen (24) | 4,096 | 19 | 17 | 1 / 3 |
+| Temporal (133) | 1,024 | 80 (60.2%) | 95 (71.4%) | 28 / 13 |
+| Temporal (133) | 4,096 | 86 (64.7%) | 105 (78.9%) | 27 / 8 |
+
+The smaller reader gains more than GPT-4o does, and at both budgets: dated
+fact lines do the date work it was getting wrong from raw text. Held-out at
+4,096 tokens is the one cell that fell, by two answers (abstention 13 to 11
+over both sets: with more of the person's facts in view it answers questions
+it should decline).
+
 ### Restatement links were not ported
 
 The fifth piece of the prototype linked a later claim to the earlier one it
@@ -1784,8 +1810,7 @@ same reader:
 
 They change two answers in 266, one each way, so they stay out of the daemon.
 
-Limits: one run per arm, a GPT-4o reader only, and dev is now a set the
-retrieval was fitted on. Each question compares every summary and claim of
+Limits: one run per arm, and dev is now a set the retrieval was fitted on. Each question compares every summary and claim of
 the scope with the question, which is fine at 500 messages and will need an
 index beyond that.
 
@@ -1861,7 +1886,8 @@ Iteration 10 cost about $13: under $1 on the event-span and summary-job
 runs, whose reader calls mostly came from the cache, about $9 on the three
 versions of top-down retrieval over the five question sets and their
 baselines, about $3 on the second reading ($0.55 measuring claim coverage,
-$2.40 on answers), and $0.62 on the restatement ablation.
+$2.40 on answers), $0.62 on the restatement ablation, and $0.24 on the
+GPT-4o-mini reader runs.
 
 Embeddings cost about $0.13 per uncached full slice. A GPT-4o-mini reader with
 the GPT-4o judge costs about $0.05–0.15 per arm.
@@ -1913,9 +1939,9 @@ the GPT-4o judge costs about $0.05–0.15 per arm.
   says it should not with `factKeys` off. On the dev and held-out runs that
   moved 3 answers in 266 rows (1 better, 2 worse). Find the cause: shared
   BM25 statistics and the shared vector index are the suspects.
-- Top-down retrieval gains at 4,096 tokens and only breaks even at 1,024
-  (iteration 10). It has been run with a GPT-4o reader only; GPT-4o-mini lost
-  answers to background-job output before and has to be checked. Each
+- With a GPT-4o reader, top-down retrieval gains at 4,096 tokens and only
+  breaks even at 1,024 (iteration 10); with GPT-4o-mini it gains at both but
+  abstains less well. Each
   question reads every summary and claim of its scope, which needs an index
   over the stored vectors before large stores.
 - Temporal reasoning with a GPT-4o reader was 78.9% at 4K before iteration
