@@ -2091,6 +2091,23 @@ with the small reader is therefore within what a rebuild alone does. The
 comparisons above were made on stores with the same qids, where only the
 contexts a change touched could move. This cost $0.94.
 
+The tie-break was a flaw of its own, not only a source of noise. Every
+message of a session carries the session's time in these runs, so every
+fact of a session tied and was listed by a hash. Counting adjacent fact
+lines with the same said-day and no event note, the later line came from an
+earlier message in 259 of 763 pairs (34%) at 4,096 tokens and 53 of 141
+(38%) at 1,024, in 53 and 39 of the 55 contexts; before the session change
+it was 287 of 764 and 57 of 142. Facts said at the same time are now ordered
+by message and then by the quote's place in the message. The same count is
+then 53 of 758 (7%) and 16 of 140 (11%), and the pairs left that were read
+are facts placed on another day by an event date the count does not see (a
+plan for the weekend listed after what was said that day). Gold turns in
+context are unchanged (9 and 2 missing). GPT-4o scores 50 and 51, as before
+the session change; GPT-4o-mini 46 and 45, where it was 45 and 44 on the
+session build and 46 and 47 before it. That is no measurable gain from
+order on this half, and no loss. Whether a rebuild now moves the wording
+less has not been measured. This cost $0.85.
+
 ## What we learned
 
 - **The reader is now the bottleneck, not retrieval.** At 4K, 93% of gold
