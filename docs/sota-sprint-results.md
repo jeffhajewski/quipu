@@ -2072,6 +2072,25 @@ One named-time miss is left: a fact said the day before a "two weeks ago"
 window opens. Widening the window was not tried; on the fitting sets the
 session asked about is at the nominal date every time.
 
+### A rebuilt store is a different draw
+
+After this iteration `memory.remember` was changed to store calls that share
+a `sessionId` as one session (the evals send each session in one call, so
+they never showed that every call started a new one). The change does not
+touch retrieval, but it renumbers every qid, and a store rebuilt with
+different qids is not the same store: claim qids are hashes of their
+message's qid, same-day facts tie-break on them, and a topic whose facts
+are listed in another order gets its summary written again by the model.
+
+On the tuning half (55 questions) the rebuilt store has the same gold turns
+in context (9 missing of 105 at 1,024 where there were 10, 2 at 4,096 both
+times), and 92 of 110 contexts differ in wording or order. GPT-4o goes from
+50 to 50 and 51 to 50. GPT-4o-mini goes from 46 to 45 and 47 to 44, each
+change a different reading of the same facts. A difference of three on 55
+with the small reader is therefore within what a rebuild alone does. The
+comparisons above were made on stores with the same qids, where only the
+contexts a change touched could move. This cost $0.94.
+
 ## What we learned
 
 - **The reader is now the bottleneck, not retrieval.** At 4K, 93% of gold
