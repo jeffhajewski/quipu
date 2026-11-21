@@ -202,8 +202,10 @@ const Unit = enum { day, week, month, year };
 /// last|previous|past weekend; last <weekday>; last <Month>; since the
 /// start|beginning of the year/month/week; since <Month>; earlier this
 /// year/month/week; in|during <Month> [of] [year]; <Month> <year>;
-/// in|during <year>. Weeks start on Monday. A bare month is its most recent
-/// occurrence not after the current month.
+/// in|during <year>; <Month> <day> [year] and <day>th of <Month> [year]; a
+/// holiday of `Holiday`. Weeks start on Monday. A bare month is its most
+/// recent occurrence not after the current month, and a calendar day or a
+/// holiday with no year is its most recent occurrence not after today.
 pub fn resolveTimeReferences(allocator: std.mem.Allocator, query: []const u8, current: CivilDate) !?[]u8 {
     if (!writable(current)) return null;
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -309,7 +311,10 @@ pub fn resolveNamedTimes(arena: std.mem.Allocator, query: []const u8, current: C
             else => {},
         };
 
-        const phrase = try std.mem.join(arena, " ", tokens.items[first..end]);
+        // The question's own words, so "Valentine's day" keeps its apostrophe.
+        const phrase_start = @intFromPtr(tokens.items[first].ptr) - @intFromPtr(query.ptr);
+        const last_word = tokens.items[end - 1];
+        const phrase = try arena.dupe(u8, query[phrase_start .. @intFromPtr(last_word.ptr) - @intFromPtr(query.ptr) + last_word.len]);
         const repeated = for (named.items) |seen| {
             if (std.ascii.eqlIgnoreCase(seen.phrase, phrase)) break true;
         } else false;
@@ -970,7 +975,9 @@ fn matchAt(tokens: []const []const u8, i: usize, current: CivilDate) ?Match {
         matchLastWeekday(tokens, i, current) orelse
         matchLastMonthName(tokens, i, current) orelse
         matchInMonthOrYear(tokens, i, current) orelse
-        matchMonthYear(tokens, i);
+        matchMonthYear(tokens, i) orelse
+        matchMonthDay(tokens, i, current) orelse
+        matchHoliday(tokens, i, current);
 }
 
 fn wordAt(tokens: []const []const u8, i: usize, expected: []const u8) bool {
@@ -1232,6 +1239,7 @@ fn matchInMonthOrYear(tokens: []const []const u8, i: usize, current: CivilDate) 
         return .{ .len = 2, .value = between(.{ .year = year, .month = 1, .day = 1 }, .{ .year = year, .month = 12, .day = 31 }) };
     }
     const month = monthAt(tokens, i + 1, true) orelse return null;
+    if (matchMonthDay(tokens, i + 1, current)) |found| return .{ .len = found.len + 1, .value = found.value };
     if (yearAt(tokens, i + 2)) |year| return .{ .len = 3, .value = monthRange(year, month) };
     if (wordAt(tokens, i + 2, "of")) {
         if (yearAt(tokens, i + 3)) |year| return .{ .len = 4, .value = monthRange(year, month) };
@@ -1244,6 +1252,132 @@ fn matchMonthYear(tokens: []const []const u8, i: usize) ?Match {
     const month = monthAt(tokens, i, true) orelse return null;
     const year = yearAt(tokens, i + 1) orelse return null;
     return .{ .len = 2, .value = monthRange(year, month) };
+}
+
+/// A day of the month as a question writes it: `14`, `14th`, `3rd`. With
+/// `ordinal` only the forms with an ending count.
+fn monthDayAt(tokens: []const []const u8, i: usize, ordinal: bool) ?u8 {
+    if (i >= tokens.len) return null;
+    const word = tokens[i];
+    var digits: usize = 0;
+    while (digits < word.len and std.ascii.isDigit(word[digits])) digits += 1;
+    if (digits == 0 or digits > 2) return null;
+    const ending = word[digits..];
+    if (ending.len == 0) {
+        if (ordinal) return null;
+    } else if (!std.ascii.eqlIgnoreCase(ending, "st") and !std.ascii.eqlIgnoreCase(ending, "nd") and
+        !std.ascii.eqlIgnoreCase(ending, "rd") and !std.ascii.eqlIgnoreCase(ending, "th")) return null;
+    const day = std.fmt.parseInt(u8, word[0..digits], 10) catch return null;
+    return if (day >= 1 and day <= 31) day else null;
+}
+
+/// The latest `month`/`day` that is not after `current`, or the one in
+/// `year` when the question gave it. Null for a day the month does not have.
+fn recentDay(current: CivilDate, month: u8, day: u8, year: ?i32) ?CivilDate {
+    if (year) |given| {
+        if (day > daysInMonth(given, month)) return null;
+        return .{ .year = given, .month = month, .day = day };
+    }
+    for ([_]i32{ current.year, current.year - 1, current.year - 2, current.year - 3, current.year - 4 }) |candidate| {
+        if (day > daysInMonth(candidate, month)) continue;
+        const date = CivilDate{ .year = candidate, .month = month, .day = day };
+        if (daysFromCivil(date) <= daysFromCivil(current)) return date;
+    }
+    return null;
+}
+
+/// <Month> <day> [year] ("February 14th", "March 3 2023") and <day>th of
+/// <Month> [year] ("the 14th of February").
+fn matchMonthDay(tokens: []const []const u8, i: usize, current: CivilDate) ?Match {
+    if (monthAt(tokens, i, true)) |month| {
+        const day = monthDayAt(tokens, i + 1, false) orelse return null;
+        const year = yearAt(tokens, i + 2);
+        const date = recentDay(current, month, day, year) orelse return null;
+        return .{ .len = if (year == null) 2 else 3, .value = .{ .day = date } };
+    }
+    const day = monthDayAt(tokens, i, true) orelse return null;
+    if (!wordAt(tokens, i + 1, "of")) return null;
+    const month = monthAt(tokens, i + 2, true) orelse return null;
+    const year = yearAt(tokens, i + 3);
+    const date = recentDay(current, month, day, year) orelse return null;
+    return .{ .len = if (year == null) 3 else 4, .value = .{ .day = date } };
+}
+
+/// The holidays a question or a statement may name a day by. Only ones that
+/// fall on the same day wherever the name is used: Thanksgiving, Easter,
+/// Mother's Day and Labour Day are on different days in different countries
+/// and are left to the words around them.
+const Holiday = enum {
+    new_years_day,
+    valentines_day,
+    st_patricks_day,
+    halloween,
+    black_friday,
+    cyber_monday,
+    christmas_eve,
+    christmas,
+    new_years_eve,
+
+    fn in(self: Holiday, year: i32) CivilDate {
+        return switch (self) {
+            .new_years_day => .{ .year = year, .month = 1, .day = 1 },
+            .valentines_day => .{ .year = year, .month = 2, .day = 14 },
+            .st_patricks_day => .{ .year = year, .month = 3, .day = 17 },
+            .halloween => .{ .year = year, .month = 10, .day = 31 },
+            // The day after the fourth Thursday of November, and the Monday after.
+            .black_friday, .cyber_monday => day: {
+                const first = CivilDate{ .year = year, .month = 11, .day = 1 };
+                const to_thursday = @mod(@as(i64, 3) - isoWeekday(first), 7);
+                break :day addDays(first, to_thursday + 21 + @as(i64, if (self == .black_friday) 1 else 4));
+            },
+            .christmas_eve => .{ .year = year, .month = 12, .day = 24 },
+            .christmas => .{ .year = year, .month = 12, .day = 25 },
+            .new_years_eve => .{ .year = year, .month = 12, .day = 31 },
+        };
+    }
+};
+
+const HolidayName = struct { len: usize, holiday: Holiday };
+
+/// A holiday's name at `i`. An apostrophe splits a word, so "Valentine's
+/// Day" arrives as `Valentine`, `s`, `Day`.
+fn holidayAt(tokens: []const []const u8, i: usize) ?HolidayName {
+    const possessive = struct {
+        /// `<name>'s <last>`, `<name>s <last>` or `<name> <last>`: the words taken.
+        fn of(words: []const []const u8, at: usize, name: []const u8, plural: []const u8, last: []const u8) ?usize {
+            if (wordAt(words, at, plural)) return if (wordAt(words, at + 1, last)) 2 else null;
+            if (!wordAt(words, at, name)) return null;
+            if (wordAt(words, at + 1, "s") and wordAt(words, at + 2, last)) return 3;
+            return if (wordAt(words, at + 1, last)) 2 else null;
+        }
+    }.of;
+    if (possessive(tokens, i, "valentine", "valentines", "day")) |len| return .{ .len = len, .holiday = .valentines_day };
+    if (anyWordAt(tokens, i, &.{ "st", "saint" })) {
+        if (possessive(tokens, i + 1, "patrick", "patricks", "day")) |len| return .{ .len = len + 1, .holiday = .st_patricks_day };
+    }
+    if (wordAt(tokens, i, "halloween")) return .{ .len = 1, .holiday = .halloween };
+    if (wordAt(tokens, i, "black") and wordAt(tokens, i + 1, "friday")) return .{ .len = 2, .holiday = .black_friday };
+    if (wordAt(tokens, i, "cyber") and wordAt(tokens, i + 1, "monday")) return .{ .len = 2, .holiday = .cyber_monday };
+    if (anyWordAt(tokens, i, &.{ "christmas", "xmas" })) {
+        if (wordAt(tokens, i + 1, "eve")) return .{ .len = 2, .holiday = .christmas_eve };
+        return .{ .len = if (wordAt(tokens, i + 1, "day")) 2 else 1, .holiday = .christmas };
+    }
+    if (wordAt(tokens, i, "new")) {
+        if (possessive(tokens, i + 1, "year", "years", "eve")) |len| return .{ .len = len + 1, .holiday = .new_years_eve };
+        if (possessive(tokens, i + 1, "year", "years", "day")) |len| return .{ .len = len + 1, .holiday = .new_years_day };
+    }
+    return null;
+}
+
+/// A holiday in a question: its latest occurrence not after `current`.
+/// "On Halloween" is that day; "for Christmas" or "over Halloween" is around
+/// it.
+fn matchHoliday(tokens: []const []const u8, i: usize, current: CivilDate) ?Match {
+    const found = holidayAt(tokens, i) orelse return null;
+    const this_year = found.holiday.in(current.year);
+    const date = if (daysFromCivil(this_year) <= daysFromCivil(current)) this_year else found.holiday.in(current.year - 1);
+    const exact = i > 0 and wordAt(tokens, i - 1, "on");
+    return .{ .len = found.len, .value = if (exact) .{ .day = date } else .{ .around = date } };
 }
 
 fn testDate(text: []const u8) CivilDate {
@@ -1350,6 +1484,30 @@ test "time references resolve windows, weekdays and named months" {
     try expectReferences("What did I buy last February?", "2024-02-10", "\"last February\" = 2023-02-01 to 2023-02-28");
     try expectReferences("What happened December 2022?", "2023-05-30", "\"December 2022\" = 2022-12-01 to 2022-12-31");
     try expectReferences("What happened in 2022?", "2023-05-30", "\"in 2022\" = 2022-01-01 to 2022-12-31");
+}
+
+test "time references resolve calendar days and holidays" {
+    // A day with no year is the latest one not after today.
+    try expectReferences("What did I do on February 14th?", "2023-03-02", "\"February 14th\" = 2023-02-14 (Tue)");
+    try expectReferences("What did I do on the 3rd of March?", "2023-03-02", "\"3rd of March\" = 2022-03-03 (Thu)");
+    try expectReferences("What happened on March 3, 2022?", "2023-05-30", "\"March 3, 2022\" = 2022-03-03 (Thu)");
+    try expectReferences("What did I book in June 12?", "2023-07-01", "\"in June 12\" = 2023-06-12 (Mon)");
+    try expectReferences("What happened on February 30th?", "2023-05-30", null);
+    try expectReferences("What did I do in March 2023?", "2023-05-30", "\"in March 2023\" = 2023-03-01 to 2023-03-31");
+    // A holiday is a day when something happened on it and about then otherwise.
+    try expectReferences("What was the airline that I flied with on Valentine's day?", "2023-03-02", "\"Valentine's day\" = 2023-02-14 (Tue)");
+    try expectReferences("What did I get for Christmas?", "2023-03-02", "\"Christmas\" = around 2022-12-25 (Sun)");
+    try expectReferences("What did I buy on Black Friday?", "2023-12-10", "\"Black Friday\" = 2023-11-24 (Fri)");
+    try expectReferences("What did I order on Cyber Monday?", "2023-01-10", "\"Cyber Monday\" = 2022-11-28 (Mon)");
+    try expectReferences("Where was I on New Year's Eve?", "2023-03-02", "\"New Year's Eve\" = 2022-12-31 (Sat)");
+    try expectReferences("Who came over on New Years Day?", "2023-03-02", "\"New Years Day\" = 2023-01-01 (Sun)");
+    try expectReferences("Who did I see on Christmas Eve and on St. Patrick's Day?", "2023-03-20", "\"Christmas Eve\" = 2022-12-24 (Sat); \"St. Patrick's Day\" = 2023-03-17 (Fri)");
+    try expectReferences("What did I wear on Halloween?", "2023-10-30", "\"Halloween\" = 2022-10-31 (Mon)");
+    // Names that are not a day everywhere, and a year that is not a holiday.
+    try expectReferences("What did I cook for Thanksgiving?", "2023-12-10", null);
+    try expectReferences("What are my plans for the new year?", "2023-12-10", null);
+    try expectWindows("Which airline did I fly on Valentine's day?", "2023-03-02", &.{.{ "2023-02-14", "2023-02-14" }});
+    try expectWindows("What did I get for Christmas?", "2023-03-02", &.{.{ "2022-12-16", "2023-01-03" }});
 }
 
 test "time references skip non-temporal wording and repeats" {

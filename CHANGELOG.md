@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A question can name a holiday or a calendar day. "On Valentine's Day",
+  "on Black Friday", "for Christmas", "on February 14th" and "the 3rd of
+  March" resolve like "last Saturday": the day goes on the `Time
+  references` line, what was said then is brought in, and sessions from
+  then are marked. Only holidays on the same day everywhere are known;
+  Thanksgiving, Easter and Mother's Day are not.
 - `memory.forget` lists the rebuild jobs it queues in `jobsQueued`. The
   field was always empty, though a forget that removes a summary or a
   pattern node queues a job to rebuild the scope's from what remains.

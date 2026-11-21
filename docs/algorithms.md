@@ -308,6 +308,17 @@ question itself names (item 2) does not depend on the option; see
    | `last <Month>` | the most recent such month before the current month |
    | `in/during <Month>` | the most recent such month not after the current month |
    | `in/during <Month> [of] <year>`, `<Month> <year>`, `in <year>` | that month or year |
+   | `<Month> <day> [<year>]`, `<day>th of <Month> [<year>]` | that day; with no year, the most recent one not after today |
+   | `on <holiday>` | that day, the most recent one not after today |
+   | `<holiday>` after any other word ("for Christmas") | `around` that day |
+
+   The holidays are the ones that fall on the same day wherever the name is
+   used: New Year's Day, Valentine's Day, St. Patrick's Day, Halloween, Black
+   Friday (the day after the fourth Thursday of November), Cyber Monday,
+   Christmas Eve, Christmas (also `Christmas Day`, `Xmas`) and New Year's
+   Eve. Thanksgiving, Easter, Mother's Day and Labour Day are on different
+   days in different countries and are not resolved. The phrase is quoted as
+   the question wrote it, apostrophes included.
 
    `last/this/past` + unit is not resolved before `of` ("the last week of
    June"). Month-end and leap-year arithmetic is exact. For example,
