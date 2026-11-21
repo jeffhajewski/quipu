@@ -6,7 +6,7 @@ See [../SPEC.md](../SPEC.md) for the full design. This file tracks implemented p
 
 `memory.retrieve` returns both a rendered prompt and a structured context packet. The in-memory core currently supports:
 
-- `needs` filtering for `core`, `current_facts`, `procedural`, `recent_episodes`, and `raw`.
+- `needs` filtering for `core`, `current_facts`, `preferences`, `procedural`, `recent_episodes`, and `raw`.
 - `budgetTokens` truncation with `token_budget_truncated` warnings.
 - `time.validAt` for temporal facts and procedures.
 - `time.eventWindowStart` / `time.eventWindowEnd` for timestamped raw and derived memories.
@@ -137,8 +137,8 @@ the backend advertises that capability. `hybrid` uses reciprocal-rank fusion
 over lexical and vector hits. `graph` expands lexical/hybrid seeds through
 resolved entity edges before applying the normal runtime filters.
 
-`Assertion` nodes are hidden from search results unless `labels` includes
-`"Assertion"`; such results have type `assertion`.
+`Entity`, `Assertion` and `Update` nodes are hidden from search results
+unless `labels` names the label; an `Assertion` result has type `assertion`.
 
 `system.health.result.storage` reports backend capability flags, including
 `backend`, `durable`, `fullText`, `vector`, `vectorDimensions`, and

@@ -31,7 +31,7 @@ vector ranks with reciprocal-rank fusion (k = 60) before the runtime applies
 scope, deleted-state, label, and temporal filters.
 
 `graph` mode starts from the same lexical or hybrid seed set, expands through
-stored `Entity` nodes connected by `MENTIONS` / `MENTIONED_IN` edges, then
+stored `Entity` nodes connected by `MENTIONS` edges, then
 applies the normal runtime filters. Entity nodes are indexed by their canonical
 name and aliases (`searchText`) for seeding, but are hidden from retrieval
 results unless callers explicitly request the `Entity` label. `Assertion`
@@ -476,7 +476,8 @@ runs at write time. The jobs run in one of two ways:
 Either way a job is processed like this:
 
 1. Lease the job and load the messages people wrote, in order: every role
-   except `assistant`, `system` and `tool`, skipping forgotten ones. A chunked
+   except `assistant`, `system`, `tool`, `function` and `developer`,
+   skipping forgotten ones. A chunked
    message is reassembled from its chunks, so the model sees the full text.
    The assistant's replies are not sent. If no message remains, the job
    succeeds without a call.

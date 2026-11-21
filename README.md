@@ -388,11 +388,12 @@ Still in progress:
 - Release artifacts for Quipu itself.
 - Full migration runner and compatibility checks.
 - Learned scoring beyond deterministic RRF/graph boosts and the optional reranker.
-- LLM-backed consolidation beyond knowledge updates and pattern nodes
-  (summaries, reflections, procedures). Extraction, the opt-in update
-  consolidation (`--consolidate on`, read back with `options.facts`) and
-  pattern nodes run as a background worker when the daemon is started with
-  `--background on`; entity resolution still runs only on request.
+- LLM-backed consolidation beyond knowledge updates, summaries and pattern
+  nodes (reflections, procedures). Extraction, the opt-in update
+  consolidation (`--consolidate on`, read back with `options.facts`),
+  summaries and pattern nodes run as a background worker when the daemon is
+  started with `--background on`; entity resolution still runs only on
+  request.
 - Judge scoring for LoCoMo publication.
 - MemoryAgentBench adapter.
 - Richer host integrations.
@@ -477,6 +478,7 @@ Public JSON-RPC methods:
 - `system.health`
 - `memory.remember`
 - `memory.retrieve`
+- `memory.answer`
 - `memory.search`
 - `memory.inspect`
 - `memory.forget`

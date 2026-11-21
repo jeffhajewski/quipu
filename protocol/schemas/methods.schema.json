@@ -642,7 +642,7 @@
             },
             "temporalHints": {
               "type": "boolean",
-              "description": "Append each session header's offset from time.validAt and a Time references line resolving the query's relative dates. Default false."
+              "description": "Append each session header's offset from time.validAt. The Time references line that resolves the query's relative dates does not depend on this option: it is written whenever time.validAt is a parseable date. Default false."
             },
             "factKeys": {
               "type": "boolean",

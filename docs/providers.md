@@ -214,7 +214,8 @@ started with `--background on`) sends each pending
 `extract` job's messages to a chat model and stores grounded claims as
 `Assertion` nodes (see
 [algorithms.md](algorithms.md#llm-fact-extraction)). Only what people wrote is
-sent: messages with the role `assistant`, `system` or `tool` are not. The
+sent: messages with the role `assistant`, `system`, `tool`, `function` or
+`developer` are not. The
 extract provider resolves like the answer and entity providers:
 
 | Flag | Environment | Fallback |
