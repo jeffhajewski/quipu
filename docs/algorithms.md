@@ -909,7 +909,10 @@ scope are settled by one pass.
 
 One pass brings the summaries of one scope up to date:
 
-1. **Sessions.** Every conversation with a stored message gets one summary.
+1. **Sessions.** Every `Session` node with a stored message gets one summary.
+   A `Session` node is one `memory.remember` call: a conversation sent over
+   several calls with one `sessionId` has one node, and so one summary, per
+   call.
    The model is given the conversation in order, each message cut to 700
    bytes when a person wrote it and 220 when the assistant did, and the whole
    to 24,000 bytes with the middle left out, and returns a title of at most
@@ -952,7 +955,8 @@ same topic as a stored node when it holds at least half of that node's
 claims, and it then keeps the node's qid; a node no group matches is marked
 `superseded`. A pass over a scope with nothing new makes no call. Replies are
 validated: a reply that cannot be read is retried once and then left for the
-next pass, and a summary is never stored without its vector, so when the
+next pass, and a summary with a title is never stored without its vector
+(one the model declined to name has no text and no vector), so when the
 embedding provider does not answer the jobs go back unspent, as they do when
 the chat model does not. A summary whose message was forgotten while the
 pass's calls were out is not written.
@@ -1132,7 +1136,9 @@ One pass rebuilds the pattern nodes of one scope:
    with anything and is made again on the next pass. A pass embeds at most 64
    new messages, and a store with a backlog is indexed over several passes
    before anything is grouped.
-2. **Occasions.** One conversation on one day is one occasion.
+2. **Occasions.** One conversation on one day is one occasion. A
+   conversation here is one `Session` node, the messages of one
+   `memory.remember` call.
 3. **Groups.** Two sentences from different occasions are linked when their
    cosine is at least 0.65, and linked sentences form a group. Groups whose
    occasions largely coincide are merged, so the sentence that names a

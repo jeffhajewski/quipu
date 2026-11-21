@@ -689,6 +689,15 @@ last_accessed_at_ms: int | null
 
 ### 7.5 Labels
 
+Sections 7.5 to 7.7 are the design. The runtime writes 23 labels and 11
+edge types today: a subset of the ones below, and some the design does not
+name (the labels `Chunk`, `Procedure`, `Core`, `Assertion`, `Update`,
+`Pattern`, `SentenceIndex`, `Idempotency` and `Schema`, and the edges
+`HAS_CHUNK` and `RELATED_TO`). Scope is four properties on each node, not `Tenant`, `User`,
+`Agent` and `Project` nodes joined by `PART_OF`.
+[docs/data-model.md](docs/data-model.md) lists what is written today, with
+every property.
+
 Primary labels:
 
 ```text

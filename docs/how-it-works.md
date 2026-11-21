@@ -3,7 +3,8 @@
 This is the map. It follows one message through the daemon, lists the
 retrieval pipeline in the order the code runs it, and names the jobs, streams
 and words the other documents use. [algorithms.md](algorithms.md) holds the
-detail of each mechanism; this page links to it instead of repeating it.
+detail of each mechanism and [data-model.md](data-model.md) every label, edge
+and property; this page links to them instead of repeating them.
 
 ## Orientation
 
