@@ -1040,7 +1040,15 @@ leaves out `current_facts`.
    so only the claims at least 0.7 as near as the nearest are taken. On 13
    questions that keeps 67 of 288 lines and every claim an answer was in,
    which scored 0.89 or more. Then the topics in rank order, each
-   under its title and summary with its claims in the order they happened. A
+   under its title and summary with its claims in the order they happened:
+   by the day the event is placed on, then by when the claim was said
+   (`createdAt`). Claims said at the same time, as every message of one
+   `memory.remember` call often is, keep the order they were said in: by
+   message (message qids are numbered as they are written), then by where
+   the quote starts in the message (`quoteStart`). A claim's own qid is a
+   hash and is only the last resort, for two claims on the same span or
+   claims stored before `quoteStart` was kept. The summary job lists a
+   topic's facts for the model by the same rule. A
    topic that does not fit whole is shown with the claims nearest the
    question that do, and its heading says how many of its facts those are.
    Claims in no topic come last under `## Other facts`.

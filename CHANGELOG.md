@@ -10,6 +10,15 @@
   response is now the same for those calls, and `messageIndex` runs across
   them. A call with no `sessionId` is still a session of its own, and
   sessions already stored one per call are left as they are.
+- Facts said at the same time keep the order they were said in. A topic's
+  facts, and the facts the summary job hands the model, are ordered by when
+  they happened and then by when they were said; facts with the same
+  `createdAt`, as all the messages of one call often have, used to fall back
+  to the claim's qid, which is a hash, so they came out in an arbitrary
+  order that changed whenever message qids did. They are now ordered by
+  message and then by the quote's place in the message, which a claim
+  records as `quoteStart`. Claims already stored have no `quoteStart` and
+  fall back to the qid only against another claim from the same message.
 - A question can name a holiday or a calendar day. "On Valentine's Day",
   "on Black Friday", "for Christmas", "on February 14th" and "the 3rd of
   March" resolve like "last Saturday": the day goes on the `Time

@@ -329,6 +329,9 @@ job rewrites the same nodes.
   back to `text`.
 - `quote`: the span of the message the claim rests on, exactly as the message
   has it.
+- `quoteStart`: the byte offset of the quote in the message. It gives the
+  order two claims from one message were said in. Absent on claims written
+  before it was kept.
 - `eventDate`: `YYYY-MM-DD` or `YYYY-MM`, the day or month the event happened;
   null when absent or rejected.
 - `eventStart`, `eventEnd`: the first and last day the event may have

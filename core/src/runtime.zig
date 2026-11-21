@@ -4943,6 +4943,9 @@ pub const Runtime = struct {
             // pulls in everything said that month.
             .searchText = stated_text,
             .quote = quote,
+            // Where the quote starts in the message: the order two facts
+            // from one message were said in.
+            .quoteStart = std.mem.indexOf(u8, source.content, claim.quote),
             .eventDate = claim.event_date,
             .eventStart = claim.event_start,
             .eventEnd = claim.event_end,
@@ -7223,6 +7226,8 @@ const SummaryClaim = struct {
     index_text: []const u8,
     created_at: ?[]const u8,
     message_qid: []const u8,
+    /// Where the claim's quote starts in its message, when stored.
+    quote_start: ?i64 = null,
     /// Empty until the claim has been embedded.
     vector: []const i8 = &.{},
     vector_model: ?[]const u8 = null,
@@ -7234,11 +7239,7 @@ const SummaryClaim = struct {
             .gt => return false,
             .eq => {},
         }
-        switch (std.mem.order(u8, left.message_qid, right.message_qid)) {
-            .lt => return true,
-            .gt => return false,
-            .eq => {},
-        }
+        if (saidOrder(left.message_qid, left.quote_start, right.message_qid, right.quote_start)) |said| return said == .lt;
         return std.mem.order(u8, left.qid, right.qid) == .lt;
     }
 };
@@ -7265,6 +7266,7 @@ fn parseSummaryClaim(arena: std.mem.Allocator, node: storage.Node) !?SummaryClai
         .index_text = index_text,
         .created_at = optionalStringField(&props, "createdAt"),
         .message_qid = message_qid,
+        .quote_start = integerField(&props, "quoteStart"),
         .vector_model = optionalStringField(&props, "vectorModel"),
         .properties_json = node.properties_json,
     };
@@ -8598,6 +8600,8 @@ const ShownClaim = struct {
     created_at: []const u8,
     said: temporal.CivilDate,
     message_qid: []const u8,
+    /// Where the claim's quote starts in its message, when stored.
+    quote_start: ?i64 = null,
     session_qid: ?[]const u8 = null,
     event: ?temporal.Window = null,
     planned: bool = false,
@@ -8643,6 +8647,7 @@ const ShownClaim = struct {
     fn saidBefore(claims: []ShownClaim, left: u32, right: u32) bool {
         const order = std.mem.order(u8, claims[left].created_at, claims[right].created_at);
         if (order != .eq) return order == .lt;
+        if (saidOrder(claims[left].message_qid, claims[left].quote_start, claims[right].message_qid, claims[right].quote_start)) |said| return said == .lt;
         return naturalQidOrder(claims[left].qid, claims[right].qid) == .lt;
     }
 
@@ -8673,6 +8678,7 @@ fn parseShownClaim(arena: std.mem.Allocator, node: storage.Node) !?ShownClaim {
         .created_at = created_at,
         .said = said,
         .message_qid = stringField(&props, "sourceMessageQid") orelse return null,
+        .quote_start = integerField(&props, "quoteStart"),
         .session_qid = optionalStringField(&props, "sessionQid"),
         .planned = boolField(&props, "planned") orelse false,
         .vector_model = optionalStringField(&props, "vectorModel"),
@@ -10319,6 +10325,19 @@ fn orderOptionalInt(left: ?i64, right: ?i64) ?std.math.Order {
     if (right == null) return .lt;
     const order = std.math.order(left.?, right.?);
     return if (order == .eq) null else order;
+}
+
+/// The order two facts were said in when their messages carry the same
+/// time, as every message of a call often does: the earlier message first
+/// (message qids are numbered as they are written), then the earlier place
+/// in the message. Null when that does not tell them apart. A claim's own
+/// qid is a hash and says nothing of order.
+fn saidOrder(left_message: []const u8, left_start: ?i64, right_message: []const u8, right_start: ?i64) ?std.math.Order {
+    const by_message = naturalQidOrder(left_message, right_message);
+    if (by_message != .eq) return by_message;
+    const left = left_start orelse return null;
+    const right = right_start orelse return null;
+    return if (left == right) null else std.math.order(left, right);
 }
 
 /// Natural order: digit runs compare numerically, so `q_msg_9` sorts before
@@ -12241,6 +12260,35 @@ test "runtime llm expansion failures fall back to the original query with a warn
     defer std.testing.allocator.free(unavailable);
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "\"query_expansion_failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "\"error\":\"ProviderUnavailable\"") != null);
+}
+
+test "facts said at the same time keep the order they were said in" {
+    // One call often gives every message the same time. The ninth message
+    // comes before the tenth, a fact early in a message before one late in
+    // it, and the hash a claim has for a qid decides nothing it need not.
+    var shown = [_]ShownClaim{
+        .{ .qid = "q_asrt_1", .text = "c", .created_at = "2023-05-20T09:00:00Z", .said = .{ .year = 2023, .month = 5, .day = 20 }, .message_qid = "q_msg_10", .quote_start = 4 },
+        .{ .qid = "q_asrt_2", .text = "b", .created_at = "2023-05-20T09:00:00Z", .said = .{ .year = 2023, .month = 5, .day = 20 }, .message_qid = "q_msg_9", .quote_start = 40 },
+        .{ .qid = "q_asrt_3", .text = "a", .created_at = "2023-05-20T09:00:00Z", .said = .{ .year = 2023, .month = 5, .day = 20 }, .message_qid = "q_msg_9", .quote_start = 2 },
+        .{ .qid = "q_asrt_9", .text = "first", .created_at = "2023-05-19T09:00:00Z", .said = .{ .year = 2023, .month = 5, .day = 19 }, .message_qid = "q_msg_30" },
+    };
+    var order = [_]u32{ 0, 1, 2, 3 };
+    std.mem.sort(u32, &order, @as([]ShownClaim, &shown), ShownClaim.saidBefore);
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 3, 2, 1, 0 }, &order);
+
+    // The summary job lists a topic's facts by the same rule.
+    var listed = [_]SummaryClaim{
+        .{ .qid = "q_asrt_1", .text = "c", .index_text = "c", .created_at = "2023-05-20T09:00:00Z", .message_qid = "q_msg_10", .quote_start = 4, .properties_json = "{}" },
+        .{ .qid = "q_asrt_2", .text = "b", .index_text = "b", .created_at = "2023-05-20T09:00:00Z", .message_qid = "q_msg_9", .quote_start = 40, .properties_json = "{}" },
+        .{ .qid = "q_asrt_3", .text = "a", .index_text = "a", .created_at = "2023-05-20T09:00:00Z", .message_qid = "q_msg_9", .quote_start = 2, .properties_json = "{}" },
+    };
+    std.mem.sort(SummaryClaim, &listed, {}, SummaryClaim.before);
+    try std.testing.expectEqualStrings("a", listed[0].text);
+    try std.testing.expectEqualStrings("b", listed[1].text);
+    try std.testing.expectEqualStrings("c", listed[2].text);
+
+    // A claim stored before its place was kept falls back to its qid.
+    try std.testing.expectEqual(@as(?std.math.Order, null), saidOrder("q_msg_9", null, "q_msg_9", 7));
 }
 
 test "calls that name the same session write into one session" {
