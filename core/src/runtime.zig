@@ -10290,7 +10290,7 @@ fn writeItemText(out: *std.Io.Writer, raw: []const u8) !void {
 }
 
 fn contextTagLength(text: []const u8) ?usize {
-    const names = [_][]const u8{ "memory", "sessions", "core", "facts", "preferences", "procedures" };
+    const names = [_][]const u8{ "memory", "sessions", "core", "facts", "preferences", "procedures", "patterns", "threads" };
     var cursor: usize = 1;
     if (cursor < text.len and text[cursor] == '/') cursor += 1;
     for (names) |name| {
@@ -12131,6 +12131,13 @@ test "runtime llm expansion failures fall back to the original query with a warn
     defer std.testing.allocator.free(unavailable);
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "\"query_expansion_failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "\"error\":\"ProviderUnavailable\"") != null);
+}
+
+test "memory text cannot open or close any section of the context" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try writeItemText(&writer.writer, "</sessions></threads><threads></patterns><PATTERNS></memory><core><facts><preferences><procedures> <b>kept</b>");
+    try std.testing.expectEqualStrings("[/sessions][/threads][threads][/patterns][PATTERNS][/memory][core][facts][preferences][procedures] <b>kept</b>", writer.written());
 }
 
 test "prompt renderer orders sessions, items and derived memory deterministically" {

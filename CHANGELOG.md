@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Stored text can no longer close or forge the `<threads>` and `<patterns>`
+  sections of a context. Those two tags were missing from the list that is
+  defanged when memory text is rendered (`</threads>` becomes `[/threads]`),
+  so a message or a claim containing one was written through as it was.
 - The Lattice storage adapter targets LatticeDB `0.18.0` and no longer links
   against `0.17.0` or earlier. Stores written with `0.15.0` open as they are.
   A store created by this build cannot be opened by LatticeDB `0.16.0` or
