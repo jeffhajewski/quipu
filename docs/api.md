@@ -2,6 +2,76 @@
 
 See [../SPEC.md](../SPEC.md) for the full design. This file tracks implemented public behavior.
 
+## Methods
+
+The daemon dispatches sixteen JSON-RPC methods (`Runtime.dispatch`). Ten are
+the public surface: they have a schema in
+[`protocol/schemas/methods.schema.json`](../protocol/schemas/methods.schema.json)
+and fixtures in `protocol/conformance/`, and the SDKs and the MCP adapter
+wrap them. Six are operational: the CLI and the eval harness call them, they
+have no schema, and no SDK wraps them.
+
+| Method | Does | Described in |
+| --- | --- | --- |
+| `system.health` | reports the backend, its capabilities and which workers can run | [how-it-works.md](how-it-works.md#orientation) |
+| `memory.remember` | stores and indexes messages, queues the background jobs | [how-it-works.md](how-it-works.md#memoryremember-synchronous) |
+| `memory.retrieve` | builds a context for a question | [Retrieval V0](#retrieval-v0) |
+| `memory.answer` | builds the same context and has a reader answer from it | [providers.md](providers.md#memoryanswer-reader), [algorithms.md](algorithms.md#answering) |
+| `memory.search` | ranked search over raw and derived memory | [Search V0](#search-v0) |
+| `memory.inspect` | one node with its evidence and audit events | [Inspection V0](#inspection-v0) |
+| `memory.forget` | tombstones nodes and everything derived from them | [Forgetting V0](#forgetting-v0) |
+| `memory.feedback` | records a rating for a retrieval id | [data-model.md](data-model.md#deterministic-derived-memory) (`Feedback`) |
+| `memory.core.get` | reads the core blocks of a scope | [data-model.md](data-model.md#deterministic-derived-memory) (`Core`) |
+| `memory.core.update` | writes or replaces a core block | [data-model.md](data-model.md#deterministic-derived-memory) (`Core`) |
+| `memory.core.consolidate` | compiles a core block from a scope's memories | [Operational methods](#operational-methods) |
+| `memory.extract.run` | runs pending `extract` jobs | [Operational methods](#operational-methods) |
+| `memory.consolidate.run` | runs pending `consolidate` jobs | [Operational methods](#operational-methods) |
+| `memory.summaries.run` | runs pending `summary` jobs | [Operational methods](#operational-methods) |
+| `memory.patterns.run` | runs pending `pattern` jobs | [Operational methods](#operational-methods) |
+| `memory.entityResolve.run` | runs pending `entity_resolve` jobs | [Operational methods](#operational-methods) |
+
+The dispatcher's error responses carry one of three string codes:
+`invalid_request` (a missing or malformed parameter), `not_found` (an
+unknown method or qid) and `provider_error` (a job runner was called with no
+usable provider).
+
+### Operational methods
+
+The five `*.run` methods are what `quipu jobs run
+extract|consolidate|summaries|patterns|entity-resolve` calls. Each leases
+the pending jobs of its kind, runs them and returns when they are done, so a
+caller that holds a daemon open (the eval harness) can run the background
+work at a moment of its choosing instead of with `--background on`. In a
+daemon whose background worker has a batch in flight, the batch is finished
+first. What each job does is in
+[how-it-works.md](how-it-works.md#the-background-work-in-the-order-the-worker-runs-it).
+
+Parameters, all optional: `owner` (the lease owner, a label), `limit` (jobs
+to lease, default 100,000) and, for `memory.extract.run` and
+`memory.consolidate.run`, `concurrency` (provider calls at once, default 8).
+Every result has `leasedCount`, `succeededCount`, `failedCount` and
+`lastError`. The model-backed four add `provider`, `model`, `promptVersion`,
+`calls` and `counts`, and:
+
+| Method | Also returns |
+| --- | --- |
+| `memory.extract.run` | `materializedCount`, `jsonRetries`, `sourceMessages`, `assertionsWritten`, `recallMessages`, `recallAssertions` |
+| `memory.consolidate.run` | `claims`, `earlier`, `updatesWritten` |
+| `memory.summaries.run` | `scopes` |
+| `memory.patterns.run` | `scopes` |
+| `memory.entityResolve.run` | `materializedCount` |
+
+The extract, consolidate and summary runners answer `provider_error` when no
+extract provider is configured, and the pattern runner when neither a
+pattern provider nor an extract provider is.
+
+`memory.core.consolidate` takes `scope`, `blockKey` (default
+`project_summary`) and `limit` (default 50), compiles a `Core` block from up
+to `limit` live memories of the scope, oldest first, and returns `blockQid`,
+`blockKey`, `status` (`stored` or `updated`) and `sourceCount`. The block has
+a `COMPILED_FROM` edge to each source, so forgetting a source forgets the
+block. It makes no model call.
+
 ## Retrieval V0
 
 `memory.retrieve` returns both a rendered prompt and a structured context packet. The in-memory core currently supports:
