@@ -1974,6 +1974,104 @@ Limits: one run per arm; dev was fitted on again; the line of time is
 chosen by the nearness of single facts to the whole question, so a question
 that names two events in different words can have only one of them on it.
 
+## Iteration 12 (November 21): a time the question names
+
+Five of the temporal misses left after iteration 11 named a time ("the
+music event last Saturday", "four weeks ago", "on Valentine's day") and had
+the fact in context. Read one by one, they had three causes:
+
+- **The block was everything said that day.** For a time the question
+  names, the threads section listed every claim said or dated in the
+  window: 22 lines on average, and at 1,024 tokens whichever came first.
+  For "the music event last Saturday" the concert the user attended that
+  day was one of 24 lines, behind "went to a festival recently".
+- **Said then and happened then were one list.** A milestone mentioned
+  exactly four weeks ago stood beside a contract signed that week, and the
+  heading called both "said on or about".
+- **The time was not resolved.** "Valentine's day" is not a weekday or a
+  count of weeks, so the question had no window at all.
+
+### What changed
+
+- The question grammar resolves calendar days ("February 14th", "the 3rd of
+  March") and the holidays that fall on the same day everywhere, to the most
+  recent one not after today.
+- A claim the model left undated is dated by a day written as `2023-03-04`
+  in its text, which the extraction model writes when it resolves a
+  relative time, and by a holiday something happened on.
+- The block is two. `## Happened on or about <window>` holds the claims
+  whose event falls in the window, taken first; `## Said on or about
+  <window>` holds the claims with no event that were said in it, and only
+  those at least 0.7 as near the question as the nearest claim of the
+  window. An event span ends no later than the day its claim was said, so
+  "a lecture this month", said on the 11th, counts for a window over the
+  1st to the 11th.
+
+The 0.7 was fitted on the tuning half and dev, where 13 of 125 questions get
+a block: the claim an answer was in is always within the four nearest and
+at 0.89 or more of the nearest, and 0.7 keeps 67 of 288 lines. Over all
+five sets 31 of 266 questions now get a block (28 before), and at 4,096
+tokens the blocks hold 223 lines where they held 574.
+
+### Results
+
+Against iteration 11, all of it together:
+
+| Set | Reader | 1,024 | 4,096 | Wins / losses |
+| --- | --- | --- | --- | --- |
+| Temporal (133) | GPT-4o | 110 to 113 (85.0%) | 118 to 118 (88.7%) | 4 / 1 and 3 / 3 |
+| Temporal (133) | GPT-4o-mini | 100 to 103 (77.4%) | 108 to 109 (82.0%) | 4 / 1 and 1 / 0 |
+| Dev and held-out (133) | GPT-4o | 107 to 107 | 112 to 112 | none |
+| Dev and held-out (133) | GPT-4o-mini | 104 to 102 | 105 to 105 | 0 / 2 and none |
+
+By set, the tuning half and dev being the ones fitted on:
+
+| Set | GPT-4o-mini 1,024 | GPT-4o-mini 4,096 | GPT-4o 1,024 | GPT-4o 4,096 |
+| --- | --- | --- | --- | --- |
+| Temporal, tuning half (55) | 45 to 46 | 47 to 47 | 49 to 50 | 51 to 51 |
+| Dev (70) | 55 to 55 | 59 to 59 | 59 to 59 | 64 to 64 |
+| Temporal, frozen half (54) | 35 to 37 | 42 to 43 | 40 to 42 | 45 to 45 |
+| Temporal, earlier-seen (24) | 20 to 20 | 19 to 19 | 21 to 21 | 22 to 22 |
+| Held-out (63) | 49 to 47 | 46 to 46 | 48 to 48 | 48 to 48 |
+
+The frozen half and the earlier-seen set are not blind here. Four of their
+questions were among the five misses read to design the change, and the
+rule that ends a span at the day said was written after reading one of
+them again in this iteration's first confirmation run (the museum visit,
+below). Held-out was not read before its run.
+
+Every win is a question that names a time, and in each the fact is now in
+the first block or alone in it: the concert of last Saturday, the contract
+signed four weeks ago, the sculpting tools bought four weeks ago (one line
+where there were twelve), the first barbecue in June, the museum lecture
+two months ago, and the Valentine's day flight, which had no window before.
+
+The losses, read one by one, are not the block's:
+
+- "I received a piece of jewelry last Saturday from whom?" (GPT-4o, 4,096).
+  The fact is a crystal chandelier from an aunt. It was one of twenty lines
+  and the reader answered with it; it is now alone under "Happened on"
+  and the reader says no jewelry is mentioned, which is true.
+- The museum visit two months ago (GPT-4o, 4,096). Before, the reader said
+  the memory does not say, pointing at two other visits, and was judged
+  right; now it names the right visit, says the memory does not say whether
+  a friend came, and is judged wrong. The reference infers "no" from
+  nothing being said.
+- Three answers changed on contexts that hold the same facts and differ by
+  an event date shown on a line or by which raw messages fill the rest: six
+  weeks counted for February 1 to March 1, a January workshop called
+  December on an abstention question, and an answer that gives "7 days
+  after" and then counts from today. A fourth is the same wrong answer in
+  both runs, judged right before.
+- One is the line of time's (GPT-4o-mini, 1,024). Two charity events 32
+  days apart now both carry a date, so they are set on the line with the
+  count between them, and the reader gives that for "how many months since
+  I did two charity events on consecutive days".
+
+One named-time miss is left: a fact said the day before a "two weeks ago"
+window opens. Widening the window was not tried; on the fitting sets the
+session asked about is at the nominal date every time.
+
 ## What we learned
 
 - **The reader is now the bottleneck, not retrieval.** At 4K, 93% of gold
@@ -2054,6 +2152,10 @@ on the tuning half and dev with both readers, a control, and the three
 untouched sets, and $2.60 on the raw floor and the rerank. Most reader
 calls for questions whose context did not change came from the cache.
 
+Iteration 12 cost about $1: three versions of the named-time block with
+both readers, the last two on all five sets. Few contexts changed, so most
+reader calls came from the cache.
+
 Embeddings cost about $0.13 per uncached full slice. A GPT-4o-mini reader with
 the GPT-4o judge costs about $0.05–0.15 per arm.
 
@@ -2111,10 +2213,13 @@ the GPT-4o judge costs about $0.05–0.15 per arm.
   over the stored vectors before large stores.
 - Temporal reasoning with a GPT-4o reader was 78.9% at 4K before iteration
   10, 87.2% after it and 88.7% after iteration 11, whose line of time took
-  the date arithmetic between two events off the reader. What is left (see
-  there): a question that names a time and has several events on that day,
-  many-event ordering that retrieval only partly covers, and steps the line
-  does not give. With GPT-4o-mini it is 81.2%.
+  the date arithmetic between two events off the reader. Iteration 12 set
+  what happened in a time the question names apart from what was said then,
+  which moved the 1,024-token figure from 82.7% to 85.0% and left 4,096 at
+  88.7%. What is left: many-event ordering that retrieval only partly
+  covers, steps the line of time does not give, and a line of time that
+  answers a different question than the one asked. With GPT-4o-mini it is
+  82.0%.
 - Raw messages have no relevance floor. One was tried in iteration 11, with
   a rerank by cosine, and neither won an answer (see there).
 - The facts arm has been run on the whole knowledge-update category only. It
