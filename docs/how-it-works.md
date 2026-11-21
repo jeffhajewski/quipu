@@ -52,10 +52,11 @@ on its own; the call is not wrapped in one transaction.
    `status: "duplicate"` and writes nothing. Each message's `role` and
    non-empty `content` are checked as it is written, so a bad message later
    in the array fails the call after the earlier ones were stored.
-2. **Containers.** A new `Session` node (`q_sess_<n>`, holding `sessionId`
-   and the scope) and a new `Turn` node (`q_turn_<n>`), joined by
-   `Session -[HAS_TURN]-> Turn`. This happens on every call, whatever
-   `sessionId` says.
+2. **Containers.** The `Session` node the call belongs to and a new `Turn`
+   node (`q_turn_<n>`), joined by `Session -[HAS_TURN]-> Turn`. A call with
+   a `sessionId` joins the session of that id in its scope, or starts it
+   (`q_sess_<hash of scope and id>`); a call with none is a session of its
+   own (`q_sess_<n>`). See [Sessions and scope](#sessions-and-scope).
 3. **Embedding prefetch.** On a Lattice store with an OpenAI-compatible
    embedding provider, the texts that will be vector-indexed (unchunked
    messages, chunks, deterministic extractions) are embedded in batched
@@ -425,22 +426,31 @@ materialize` can still turn its entries into jobs.
 
 ## Sessions and scope
 
-**Sessions.** Every `memory.remember` call writes a new `Session` node and a
-new `Turn` node, whatever `sessionId` it passes; no lookup joins two calls.
-`sessionId` is copied onto the session, its messages, chunks and claims, and
-two places read it:
+**Sessions.** A session is one conversation, and `sessionId` is the
+caller's name for it. Every `memory.remember` call writes a new `Turn`.
+The `Session` it hangs from depends on the id (`Runtime.openSession`):
 
-- The prompt groups raw lines by `sessionId`, falling back to the session
-  qid (`writeSessionSection`). Calls that share a `sessionId` render under
-  one header, and that header carries the summary of the group's first
-  `Session` node only.
-- Session summaries are made per `Session` node (`planSessionSummaries`
-  groups messages by `sessionQid`).
+- With a `sessionId`, the session's qid is a hash of the scope and the id,
+  so the node is found without a search. The first call writes it and every
+  later call with the same id and the same scope adds a turn to it. The
+  node counts its messages (`messageCount`), and a later call's messages
+  are numbered on from there, so `messageIndex` orders the whole session.
+- The scope is part of the name: the same id under another scope, or with a
+  scope field more or fewer, is another session.
+- A forgotten session is not reopened. The next call with its id starts a
+  new session, which the calls after that join.
+- With no `sessionId` every call is a session of its own, and nothing can
+  join it later.
 
-Everything else keys on the `Session` node too: an extract job reads one
-call's messages, consolidation compares a claim only with claims from
-another `sessionQid`, and a pattern occasion is one `sessionQid` on one day.
-Two calls with the same `sessionId` are two conversations to all of these.
+Everything downstream keys on the `Session` node: a session summary covers
+all of its turns and is written again when a call adds to it, consolidation
+compares a claim only with claims from another session, a pattern occasion
+is one session on one day, and the prompt gives the session one header. An
+extract job still reads one turn, the messages of one call.
+
+Stores written before sessions were joined keep one `Session` node per
+call (`q_sess_<n>`). Those nodes are left as they are, and the prompt still
+groups their lines by `sessionId`.
 
 **Idempotency.** The key is global, not scoped, and a duplicate returns only
 the first message qid of the original call.
@@ -508,9 +518,10 @@ were in flight does not write a claim whose message is now forgotten.
   message.
 - **turn**: the `Turn` node of one remember call; it holds the call's
   messages, tool calls and observations. One extract job reads one turn.
-- **session**: the `Session` node of one remember call, with one turn.
-- **sessionId**: the caller's label, stored on the session and its nodes.
-  It groups lines in the prompt and nothing else.
+- **session**: a `Session` node: one conversation, with a turn for every
+  remember call that named it.
+- **sessionId**: the caller's name for a session. With the scope it
+  identifies the `Session` node; a call without one is its own session.
 - **conversation**: not a node. The code and the prompts use it for one
   `Session` node.
 - **scope**: `tenantId`, `userId`, `agentId`, `projectId`; an unset field

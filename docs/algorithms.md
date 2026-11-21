@@ -45,7 +45,7 @@ chunked message reached through an entity contributes its chunks.
 
 `memory.remember` stores every message as a `Message` node with `sessionQid`,
 `sessionId` (caller-provided, nullable), `turnQid`, and `messageIndex` (0-based
-position in the call). A message longer than 1,200 bytes is also split into
+position in the session, counted across the calls that name it). A message longer than 1,200 bytes is also split into
 `Chunk` nodes (`kind: "chunk"`, `content`, `role`, `createdAt`, `messageQid`,
 `chunkIndex`, `chunkCount`, the session/turn fields, scope, and
 `privacyClass`), linked by `Message -[HAS_CHUNK]-> Chunk` and
@@ -239,8 +239,11 @@ Current date: 2023-05-30 (Tuesday)          <- retrieve only, when time.validAt 
 - Raw evidence (messages, chunks, episodes, observations) is grouped by
   session. The header shows the caller's `sessionId` when present, otherwise
   the session qid, plus the session's earliest ISO date and weekday. Sessions
-  are ordered chronologically. Items within a session are ordered by session
-  qid, `messageIndex`, `chunkIndex`, then `createdAt`. A line repeats its date
+  are ordered chronologically, and sessions with the same date in the order
+  they were first remembered (by turn qid, which is numbered as it is
+  written; a session's qid is a hash and says nothing of order). Items
+  within a session are ordered by turn, `messageIndex`, `chunkIndex`, then
+  `createdAt`. A line repeats its date
   only when it differs from the session date. Items without a session go last
   under `## other`.
 - Message and chunk items supply role, date, session, and index metadata
@@ -928,9 +931,10 @@ scope are settled by one pass.
 One pass brings the summaries of one scope up to date:
 
 1. **Sessions.** Every `Session` node with a stored message gets one summary.
-   A `Session` node is one `memory.remember` call: a conversation sent over
-   several calls with one `sessionId` has one node, and so one summary, per
-   call.
+   A `Session` node is one conversation: every `memory.remember` call with
+   the same `sessionId` and scope adds a turn to it, and its summary is
+   written again when a call adds messages. A call with no `sessionId` is a
+   session of its own.
    The model is given the conversation in order, each message cut to 700
    bytes when a person wrote it and 220 when the assistant did, and the whole
    to 24,000 bytes with the middle left out, and returns a title of at most
@@ -1170,8 +1174,8 @@ One pass rebuilds the pattern nodes of one scope:
    new messages, and a store with a backlog is indexed over several passes
    before anything is grouped.
 2. **Occasions.** One conversation on one day is one occasion. A
-   conversation here is one `Session` node, the messages of one
-   `memory.remember` call.
+   conversation is one `Session` node: the calls that share a `sessionId`
+   and scope, or one call that has none.
 3. **Groups.** Two sentences from different occasions are linked when their
    cosine is at least 0.65, and linked sentences form a group. Groups whose
    occasions largely coincide are merged, so the sentence that names a

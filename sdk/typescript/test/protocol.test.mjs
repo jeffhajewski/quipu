@@ -222,7 +222,7 @@ test("summary nodes are read first by every retrieve and answer, with no option"
   assert.ok(result.prompt.indexOf("<threads>\n") >= 0);
   assert.ok(result.prompt.indexOf("<threads>\n") < result.prompt.indexOf("<sessions>\n"));
   assert.ok(result.prompt.includes("\n## Sourdough starter Bubbles: The user keeps a starter named Bubbles and looks after it.\n"));
-  assert.ok(result.prompt.includes("[q_msg_25] 2023-05-12 (Fri), 18 days ago: The user gave half of the sourdough starter named Bubbles away.\n"));
+  assert.ok(result.prompt.includes("[q_msg_21] 2023-05-12 (Fri), 18 days ago: The user gave half of the sourdough starter named Bubbles away.\n"));
   // Each session opened is headed by its summary.
   assert.ok(result.prompt.includes("## session day-12 2023-05-12 (Fri) | Looking after Bubbles: The user talked about the sourdough starter Bubbles.\n"));
 
@@ -230,7 +230,7 @@ test("summary nodes are read first by every retrieve and answer, with no option"
   const topic = result.context.threads[0];
   assert.equal(topic.type, "summary");
   // Every fact shown under the topic is evidence: its message, quoting the fact.
-  assert.deepEqual(topic.evidence.map((evidence) => evidence.qid), ["q_msg_4", "q_msg_11", "q_msg_25"]);
+  assert.deepEqual(topic.evidence.map((evidence) => evidence.qid), ["q_msg_3", "q_msg_9", "q_msg_21"]);
   for (const evidence of topic.evidence) {
     assert.ok(evidence.quote.includes("Bubbles"));
     assert.ok(result.items.some((item) => item.qid === evidence.qid));

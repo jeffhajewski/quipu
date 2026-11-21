@@ -547,7 +547,10 @@
       "required": ["messages"],
       "additionalProperties": false,
       "properties": {
-        "sessionId": { "type": "string" },
+        "sessionId": {
+          "type": "string",
+          "description": "The caller's name for the conversation. Calls with the same sessionId and scope are stored as turns of one session; a call without one is a session of its own."
+        },
         "scope": { "$ref": "#/$defs/scope" },
         "messages": {
           "type": "array",

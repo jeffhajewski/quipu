@@ -102,6 +102,9 @@ const expansion_leaders_per_query: usize = 2;
 const audit_page_size: usize = 1000;
 /// Related cards a new memory card links to.
 const related_card_limit: usize = 8;
+/// How many times one `sessionId` can be forgotten and used again in a
+/// scope before a call with it stops joining a session.
+const max_session_generations: usize = 16;
 
 const Scope = struct {
     tenant_id: ?[]const u8 = null,
@@ -1208,15 +1211,19 @@ pub const Runtime = struct {
         }
 
         const scope = parseScope(params);
-        const session_qid = try self.nextQid(allocator, "sess");
+        const session_id = stringField(params, "sessionId");
+        // A call that names a session the scope already has adds a turn to
+        // it; its messages are numbered on from the ones stored.
+        const session = try self.openSession(allocator, scope, session_id);
+        const session_qid = session.qid;
         defer allocator.free(session_qid);
         const turn_qid = try self.nextQid(allocator, "turn");
         defer allocator.free(turn_qid);
 
-        const session_id = stringField(params, "sessionId");
         const session_props = try stringifyAlloc(allocator, .{
             .kind = "session",
             .sessionId = session_id,
+            .messageCount = session.message_count + messages.items.len,
             .tenantId = scope.tenant_id,
             .userId = scope.user_id,
             .agentId = scope.agent_id,
@@ -1253,7 +1260,7 @@ pub const Runtime = struct {
         try self.prefetchRememberEmbeddings(allocator, messages.items, extract_enabled);
         defer self.store.clearPrefetchedEmbeddings();
 
-        for (messages.items, 0..) |message_value, message_index| {
+        for (messages.items, session.message_count..) |message_value, message_index| {
             const message = objectValue(message_value) orelse {
                 return errorResponse(allocator, id, "invalid_request", "each message must be an object");
             };
@@ -2647,6 +2654,44 @@ pub const Runtime = struct {
             },
         };
         return stringifyAlloc(allocator, response);
+    }
+
+    const OpenSession = struct {
+        /// Owned by the caller.
+        qid: []u8,
+        /// Messages the session already holds.
+        message_count: usize = 0,
+    };
+
+    /// The `Session` node a `memory.remember` call writes into. A call with
+    /// a `sessionId` gets the session of that id in its scope: the qid is a
+    /// hash of the scope and the id, so the session is found without a
+    /// search and every call that names it lands on one node. A forgotten
+    /// session is not reopened: the id then names a new session, which later
+    /// calls join. A call with no `sessionId` is a session of its own.
+    fn openSession(self: *Runtime, allocator: std.mem.Allocator, scope: Scope, session_id: ?[]const u8) !OpenSession {
+        const external = session_id orelse return .{ .qid = try self.nextQid(allocator, "sess") };
+        if (external.len == 0) return .{ .qid = try self.nextQid(allocator, "sess") };
+        const scope_key = try scopeKey(allocator, scope);
+        defer allocator.free(scope_key);
+        var generation: usize = 0;
+        while (generation < max_session_generations) : (generation += 1) {
+            const key = if (generation == 0)
+                try std.fmt.allocPrint(allocator, "{s}\x1f{s}", .{ scope_key, external })
+            else
+                try std.fmt.allocPrint(allocator, "{s}\x1f{s}\x1f{d}", .{ scope_key, external, generation });
+            defer allocator.free(key);
+            const qid = try hashQid(allocator, "sess", key);
+            errdefer allocator.free(qid);
+            const node = (try self.store.getNode(allocator, qid)) orelse return .{ .qid = qid };
+            defer self.store.freeNode(allocator, node);
+            if (!try propertyBool(allocator, node.properties_json, "deleted")) {
+                const stored = (try readOptionalPropertyInt(allocator, node.properties_json, "messageCount")) orelse 0;
+                return .{ .qid = qid, .message_count = if (stored > 0) @intCast(stored) else 0 };
+            }
+            allocator.free(qid);
+        }
+        return .{ .qid = try self.nextQid(allocator, "sess") };
     }
 
     fn putEdge(self: *Runtime, allocator: std.mem.Allocator, from_qid: []const u8, to_qid: []const u8, edge_type: []const u8) !void {
@@ -9953,6 +9998,10 @@ const RenderMeta = struct {
     created_at: ?[]const u8 = null,
     session_qid: ?[]const u8 = null,
     session_id: ?[]const u8 = null,
+    /// The `memory.remember` call the line came in with. Turn qids are
+    /// numbered as they are written, so they give the order things were
+    /// remembered in; a session's qid does not.
+    turn_qid: ?[]const u8 = null,
     message_index: ?i64 = null,
     chunk_index: ?i64 = null,
     chunk_count: ?i64 = null,
@@ -9968,6 +10017,8 @@ const RenderGroup = struct {
     key: ?[]const u8,
     members: std.ArrayList(usize) = .empty,
     date: ?[]const u8 = null,
+    /// The earliest turn among the group's lines, and that turn's session.
+    first_turn_qid: ?[]const u8 = null,
     first_session_qid: ?[]const u8 = null,
     first_rank: usize,
 };
@@ -10125,9 +10176,16 @@ fn writeSessionSection(
         if (entry.meta.created_at) |created_at| {
             if (group.date == null or std.mem.order(u8, created_at, group.date.?) == .lt) group.date = created_at;
         }
-        if (entry.meta.session_qid) |session_qid| {
-            if (group.first_session_qid == null or naturalQidOrder(session_qid, group.first_session_qid.?) == .lt) {
-                group.first_session_qid = session_qid;
+        if (entry.meta.turn_qid) |turn_qid| {
+            if (group.first_turn_qid == null or naturalQidOrder(turn_qid, group.first_turn_qid.?) == .lt) {
+                group.first_turn_qid = turn_qid;
+                if (entry.meta.session_qid) |session_qid| group.first_session_qid = session_qid;
+            }
+        } else if (group.first_turn_qid == null) {
+            if (entry.meta.session_qid) |session_qid| {
+                if (group.first_session_qid == null or naturalQidOrder(session_qid, group.first_session_qid.?) == .lt) {
+                    group.first_session_qid = session_qid;
+                }
             }
         }
     }
@@ -10219,6 +10277,7 @@ fn writeSessionSection(
 fn entryRendersBefore(entries: []const RenderEntry, left_index: usize, right_index: usize) bool {
     const left = entries[left_index];
     const right = entries[right_index];
+    if (orderOptionalQid(left.meta.turn_qid, right.meta.turn_qid)) |order| return order == .lt;
     if (orderOptionalQid(left.meta.session_qid, right.meta.session_qid)) |order| return order == .lt;
     if (orderOptionalInt(left.meta.message_index, right.meta.message_index)) |order| return order == .lt;
     if (orderOptionalInt(left.meta.chunk_index, right.meta.chunk_index)) |order| return order == .lt;
@@ -10231,6 +10290,7 @@ fn entryRendersBefore(entries: []const RenderEntry, left_index: usize, right_ind
 fn groupRendersBefore(_: void, left: RenderGroup, right: RenderGroup) bool {
     if ((left.key == null) != (right.key == null)) return right.key == null;
     if (orderOptionalString(left.date, right.date)) |order| return order == .lt;
+    if (orderOptionalQid(left.first_turn_qid, right.first_turn_qid)) |order| return order == .lt;
     if (orderOptionalQid(left.first_session_qid, right.first_session_qid)) |order| return order == .lt;
     if (orderOptionalString(left.key, right.key)) |order| return order == .lt;
     return left.first_rank < right.first_rank;
@@ -10360,6 +10420,7 @@ fn loadRenderMeta(
         meta.role = source.role;
         meta.created_at = source.created_at orelse item.validFrom;
         meta.session_id = source.session_id;
+        meta.turn_qid = source.turn_qid;
         meta.session_qid = source.session_qid orelse
             sessionQidFromTurn(arena, store, source.turn_qid) orelse
             sessionQidFromEdges(arena, store, source.message_qid);
@@ -10373,6 +10434,7 @@ fn loadRenderMeta(
         meta.role = jsonObjectString(props, "role") orelse meta.role;
         meta.created_at = jsonObjectString(props, "createdAt") orelse jsonObjectString(props, "eventTime") orelse item.validFrom;
         meta.session_id = jsonObjectString(props, "sessionId");
+        meta.turn_qid = jsonObjectString(props, "turnQid");
         meta.message_index = jsonObjectInt(props, "messageIndex");
         meta.chunk_index = jsonObjectInt(props, "chunkIndex");
         meta.chunk_count = jsonObjectInt(props, "chunkCount");
@@ -12181,6 +12243,90 @@ test "runtime llm expansion failures fall back to the original query with a warn
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "\"error\":\"ProviderUnavailable\"") != null);
 }
 
+test "calls that name the same session write into one session" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    const store = harness.adapter();
+    var runtime = Runtime.init(store, harness.health());
+    defer runtime.deinit();
+
+    const remember = struct {
+        fn call(rt: *Runtime, scope: []const u8, session: []const u8, first: []const u8, second: []const u8) ![]u8 {
+            const request = try std.fmt.allocPrint(
+                std.testing.allocator,
+                "{{\"jsonrpc\":\"2.0\",\"id\":\"r\",\"method\":\"memory.remember\",\"params\":{{\"scope\":{{\"userId\":\"{s}\"}}{s},\"extract\":false,\"messages\":[{{\"role\":\"user\",\"content\":\"{s}\"}},{{\"role\":\"assistant\",\"content\":\"{s}\"}}]}}}}",
+                .{ scope, session, first, second },
+            );
+            defer std.testing.allocator.free(request);
+            const response = try rt.dispatch(std.testing.allocator, request);
+            defer std.testing.allocator.free(response);
+            return resultStringField(std.testing.allocator, response, "sessionQid");
+        }
+    }.call;
+    const named = ",\"sessionId\":\"trip\"";
+
+    // Two calls, one conversation: one Session node with a turn per call.
+    const first = try remember(&runtime, "ana", named, "I am planning a trip to Lisbon.", "When do you leave?");
+    defer allocator.free(first);
+    const second = try remember(&runtime, "ana", named, "On the ninth of May.", "Noted.");
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings(first, second);
+    const turns = try store.findEdges(allocator, .{ .from_qid = first, .edge_type = "HAS_TURN" });
+    defer store.freeEdges(allocator, turns);
+    try std.testing.expectEqual(@as(usize, 2), turns.len);
+    const session = (try store.getNode(allocator, first)).?;
+    defer store.freeNode(allocator, session);
+    try std.testing.expect(std.mem.indexOf(u8, session.properties_json, "\"messageCount\":4") != null);
+
+    // The second call's messages are numbered on from the first's, so the
+    // session reads in the order it was said.
+    var indexes = std.ArrayList(i64).empty;
+    defer indexes.deinit(allocator);
+    var messages = store.iterateNodes(allocator, .{ .label = "Message" });
+    defer messages.deinit();
+    while (try messages.next()) |message_qid| {
+        const node = (try store.getNode(allocator, message_qid)).?;
+        defer store.freeNode(allocator, node);
+        try std.testing.expect(try propertyEquals(allocator, node.properties_json, "sessionQid", first));
+        try indexes.append(allocator, (try readOptionalPropertyInt(allocator, node.properties_json, "messageIndex")).?);
+    }
+    std.mem.sort(i64, indexes.items, {}, std.sort.asc(i64));
+    try std.testing.expectEqualSlices(i64, &[_]i64{ 0, 1, 2, 3 }, indexes.items);
+
+    // The same id in another scope is another session, and a call with no
+    // id is a session of its own each time.
+    const other = try remember(&runtime, "ben", named, "I am planning a trip to Oslo.", "Nice.");
+    defer allocator.free(other);
+    try std.testing.expect(!std.mem.eql(u8, first, other));
+    const bare = try remember(&runtime, "ana", "", "A thought with no session.", "Okay.");
+    defer allocator.free(bare);
+    const bare_again = try remember(&runtime, "ana", "", "Another thought with no session.", "Okay.");
+    defer allocator.free(bare_again);
+    try std.testing.expect(!std.mem.eql(u8, bare, bare_again));
+    try std.testing.expect(!std.mem.eql(u8, bare, first));
+
+    // A forgotten session is not reopened: its id names a new session,
+    // which the calls after that join.
+    const forget = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"f\",\"method\":\"memory.forget\",\"params\":{{\"selector\":{{\"qids\":[\"{s}\"]}},\"mode\":\"hard_delete\",\"reason\":\"test\"}}}}",
+        .{first},
+    );
+    defer allocator.free(forget);
+    allocator.free(try runtime.dispatch(allocator, forget));
+    const reopened = try remember(&runtime, "ana", named, "I am planning a trip to Porto instead.", "Okay.");
+    defer allocator.free(reopened);
+    try std.testing.expect(!std.mem.eql(u8, first, reopened));
+    const joined = try remember(&runtime, "ana", named, "In June.", "Noted.");
+    defer allocator.free(joined);
+    try std.testing.expectEqualStrings(reopened, joined);
+    const gone = (try store.getNode(allocator, first)).?;
+    defer store.freeNode(allocator, gone);
+    try std.testing.expect(std.mem.indexOf(u8, gone.properties_json, "\"kind\":\"tombstone\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, gone.properties_json, "Lisbon") == null);
+}
+
 test "memory text cannot open or close any section of the context" {
     var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer writer.deinit();
@@ -12530,8 +12676,11 @@ test "runtime raw retrieve exposes message source metadata" {
     try std.testing.expectEqualStrings("assistant", source.role.?);
     try std.testing.expectEqualStrings("2026-02-01T10:00:00Z", source.created_at.?);
     try std.testing.expectEqualStrings("sess-a", source.session_id.?);
-    try std.testing.expectEqualStrings("q_sess_1", source.session_qid.?);
-    try std.testing.expectEqualStrings("q_turn_2", source.turn_qid.?);
+    // A session with an id has a qid made from its scope and that id.
+    const session_qid = try hashQid(std.testing.allocator, "sess", "\x1f\x1f\x1frepo:test\x1fsess-a");
+    defer std.testing.allocator.free(session_qid);
+    try std.testing.expectEqualStrings(session_qid, source.session_qid.?);
+    try std.testing.expectEqualStrings("q_turn_1", source.turn_qid.?);
     try std.testing.expectEqualStrings(items.items.items[0].qid, source.message_qid);
     try std.testing.expectEqual(@as(?i64, 1), source.message_index);
     try std.testing.expectEqual(@as(?i64, null), source.chunk_index);
@@ -12822,7 +12971,7 @@ fn rememberLongMessage(runtime: *Runtime, allocator: std.mem.Allocator, content:
     defer allocator.free(request);
     const response = try runtime.dispatch(allocator, request);
     defer allocator.free(response);
-    try std.testing.expect(std.mem.indexOf(u8, response, "\"messageQids\":[\"q_msg_4\",\"q_msg_6\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"messageQids\":[\"q_msg_3\",\"q_msg_5\"]") != null);
 }
 
 fn testChunkCount(store: storage.Adapter, allocator: std.mem.Allocator, message_qid: []const u8) !usize {
@@ -12896,38 +13045,38 @@ test "runtime chunks long messages and maps chunk hits to the parent message" {
     defer allocator.free(content);
     try rememberLongMessage(&runtime, allocator, content);
 
-    const message = (try store.getNode(allocator, "q_msg_4")) orelse return error.TestUnexpectedResult;
+    const message = (try store.getNode(allocator, "q_msg_3")) orelse return error.TestUnexpectedResult;
     defer store.freeNode(allocator, message);
     try std.testing.expect(try propertyIsFalse(allocator, message.properties_json, "searchable"));
     try std.testing.expect(try propertyEquals(allocator, message.properties_json, "sessionId", "sess-long"));
     try std.testing.expectEqual(@as(?i64, 0), try readOptionalPropertyInt(allocator, message.properties_json, "messageIndex"));
-    const short = (try store.getNode(allocator, "q_msg_6")) orelse return error.TestUnexpectedResult;
+    const short = (try store.getNode(allocator, "q_msg_5")) orelse return error.TestUnexpectedResult;
     defer store.freeNode(allocator, short);
     try std.testing.expect(!try propertyIsFalse(allocator, short.properties_json, "searchable"));
     try std.testing.expectEqual(@as(?i64, 1), try readOptionalPropertyInt(allocator, short.properties_json, "messageIndex"));
 
     // Chunks hold the full raw text, linked both ways to the message.
-    const chunk_count = try testChunkCount(store, allocator, "q_msg_4");
+    const chunk_count = try testChunkCount(store, allocator, "q_msg_3");
     try std.testing.expectEqual(@as(usize, 3), chunk_count);
     var rebuilt = std.ArrayList(u8).empty;
     defer rebuilt.deinit(allocator);
     for (0..chunk_count) |index| {
-        const qid = try chunkQid(allocator, "q_msg_4", index);
+        const qid = try chunkQid(allocator, "q_msg_3", index);
         defer allocator.free(qid);
         const chunk = (try store.getNode(allocator, qid)) orelse return error.TestUnexpectedResult;
         defer store.freeNode(allocator, chunk);
         try std.testing.expectEqualStrings("Chunk", chunk.label);
-        try std.testing.expect(try propertyEquals(allocator, chunk.properties_json, "messageQid", "q_msg_4"));
-        try std.testing.expect(try propertyEquals(allocator, chunk.properties_json, "turnQid", "q_turn_2"));
+        try std.testing.expect(try propertyEquals(allocator, chunk.properties_json, "messageQid", "q_msg_3"));
+        try std.testing.expect(try propertyEquals(allocator, chunk.properties_json, "turnQid", "q_turn_1"));
         const text = try readPropertyString(allocator, chunk.properties_json, "content");
         defer allocator.free(text);
         try rebuilt.appendSlice(allocator, text);
     }
     try std.testing.expectEqualStrings(content, rebuilt.items);
-    const has_chunk = try store.findEdges(allocator, .{ .from_qid = "q_msg_4", .edge_type = "HAS_CHUNK" });
+    const has_chunk = try store.findEdges(allocator, .{ .from_qid = "q_msg_3", .edge_type = "HAS_CHUNK" });
     defer store.freeEdges(allocator, has_chunk);
     try std.testing.expectEqual(chunk_count, has_chunk.len);
-    const evidenced_by = try store.findEdges(allocator, .{ .to_qid = "q_msg_4", .edge_type = "EVIDENCED_BY" });
+    const evidenced_by = try store.findEdges(allocator, .{ .to_qid = "q_msg_3", .edge_type = "EVIDENCED_BY" });
     defer store.freeEdges(allocator, evidenced_by);
     try std.testing.expectEqual(chunk_count, evidenced_by.len);
 
@@ -12937,15 +13086,15 @@ test "runtime chunks long messages and maps chunk hits to the parent message" {
         "{\"jsonrpc\":\"2.0\",\"id\":\"s1\",\"method\":\"memory.search\",\"params\":{\"query\":\"zanzibar ferry\",\"scope\":{\"projectId\":\"repo:test\"}}}",
     );
     defer allocator.free(search);
-    try std.testing.expect(std.mem.indexOf(u8, search, "\"qid\":\"q_chunk_4_2\",\"type\":\"message\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, search, "\"evidence\":[{\"qid\":\"q_msg_4\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, search, "\"qid\":\"q_msg_4\",\"type\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, search, "\"qid\":\"q_chunk_3_2\",\"type\":\"message\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, search, "\"evidence\":[{\"qid\":\"q_msg_3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, search, "\"qid\":\"q_msg_3\",\"type\"") == null);
 
     var items = try runtime.collectItems(allocator, "zanzibar ferry", .fts, 10, .{ .project_id = "repo:test" }, false, null, null, .{}, true, false);
     defer items.deinit();
     try std.testing.expectEqual(@as(usize, 1), items.items.items.len);
     const source = items.items.items[0].raw_source orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("q_msg_4", source.message_qid);
+    try std.testing.expectEqualStrings("q_msg_3", source.message_qid);
     try std.testing.expectEqual(@as(?i64, 2), source.chunk_index);
     try std.testing.expectEqual(@as(?i64, 3), source.chunk_count);
     try std.testing.expectEqual(@as(?i64, 0), source.message_index);
@@ -12958,20 +13107,20 @@ test "runtime chunks long messages and maps chunk hits to the parent message" {
         "{\"jsonrpc\":\"2.0\",\"id\":\"q1\",\"method\":\"memory.retrieve\",\"params\":{\"query\":\"quokka sanctuary short reply\",\"scope\":{\"projectId\":\"repo:test\"},\"options\":{\"logRetrieval\":false,\"logAudit\":false}}}",
     );
     defer allocator.free(retrieve);
-    try std.testing.expect(std.mem.indexOf(u8, retrieve, "\"qid\":\"q_chunk_4_0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retrieve, "\"qid\":\"q_chunk_3_0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, retrieve, "Noted the short reply.") != null);
     try std.testing.expect(std.mem.indexOf(u8, retrieve, "\"text\":\"Session\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, retrieve, "\"text\":\"Turn\"") == null);
 
     // Graph expansion through an entity mentioned by a chunked message lands on its chunks.
     const entity = providers.ResolvedEntity{ .name = "Quokka Sanctuary", .entity_type = "place", .aliases = &.{} };
-    try runtime.writeEntityMentions(allocator, .{ .project_id = "repo:test" }, "q_msg_4", &[_]providers.ResolvedEntity{entity});
+    try runtime.writeEntityMentions(allocator, .{ .project_id = "repo:test" }, "q_msg_3", &[_]providers.ResolvedEntity{entity});
     var graph_items = try runtime.collectItems(allocator, "Quokka Sanctuary", .graph, 10, .{ .project_id = "repo:test" }, false, null, null, .{}, true, false);
     defer graph_items.deinit();
     var graph_chunks: usize = 0;
     for (graph_items.items.items) |item| {
-        try std.testing.expect(!std.mem.eql(u8, item.qid, "q_msg_4"));
-        if (std.mem.startsWith(u8, item.qid, "q_chunk_4_")) graph_chunks += 1;
+        try std.testing.expect(!std.mem.eql(u8, item.qid, "q_msg_3"));
+        if (std.mem.startsWith(u8, item.qid, "q_chunk_3_")) graph_chunks += 1;
     }
     try std.testing.expectEqual(chunk_count, graph_chunks);
 }
@@ -13069,14 +13218,14 @@ const forgotten_sentence = "We finally booked the zanzibar ferry for June.";
 
 fn expectLongMessageForgotten(runtime: *Runtime, store: storage.Adapter, allocator: std.mem.Allocator, chunk_count: usize) !void {
     for (0..chunk_count) |index| {
-        const qid = try chunkQid(allocator, "q_msg_4", index);
+        const qid = try chunkQid(allocator, "q_msg_3", index);
         defer allocator.free(qid);
         const chunk = (try store.getNode(allocator, qid)) orelse return error.TestUnexpectedResult;
         defer store.freeNode(allocator, chunk);
         try std.testing.expect(try propertyBool(allocator, chunk.properties_json, "deleted"));
         try std.testing.expect(std.mem.indexOf(u8, chunk.properties_json, "content") == null);
     }
-    const message = (try store.getNode(allocator, "q_msg_4")) orelse return error.TestUnexpectedResult;
+    const message = (try store.getNode(allocator, "q_msg_3")) orelse return error.TestUnexpectedResult;
     defer store.freeNode(allocator, message);
     try std.testing.expect(try propertyBool(allocator, message.properties_json, "deleted"));
 
@@ -13107,23 +13256,23 @@ test "runtime forgetting a message by qid forgets all of its chunks" {
     const content = try testLongContent(allocator);
     defer allocator.free(content);
     try rememberLongMessage(&runtime, allocator, content);
-    const chunk_count = try testChunkCount(store, allocator, "q_msg_4");
+    const chunk_count = try testChunkCount(store, allocator, "q_msg_3");
 
     const dry_run = try runtime.dispatch(
         allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":\"f0\",\"method\":\"memory.forget\",\"params\":{\"mode\":\"hard_delete\",\"selector\":{\"qids\":[\"q_msg_4\"]},\"dryRun\":true,\"reason\":\"test\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"f0\",\"method\":\"memory.forget\",\"params\":{\"mode\":\"hard_delete\",\"selector\":{\"qids\":[\"q_msg_3\"]},\"dryRun\":true,\"reason\":\"test\"}}",
     );
     defer allocator.free(dry_run);
-    try std.testing.expect(std.mem.indexOf(u8, dry_run, "{\"qid\":\"q_chunk_4_2\",\"type\":\"chunk\",\"action\":\"would_delete\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dry_run, "{\"qid\":\"q_chunk_3_2\",\"type\":\"chunk\",\"action\":\"would_delete\"}") != null);
 
     const forget = try runtime.dispatch(
         allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":\"f1\",\"method\":\"memory.forget\",\"params\":{\"mode\":\"hard_delete\",\"selector\":{\"qids\":[\"q_msg_4\"]},\"dryRun\":false,\"reason\":\"test\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"f1\",\"method\":\"memory.forget\",\"params\":{\"mode\":\"hard_delete\",\"selector\":{\"qids\":[\"q_msg_3\"]},\"dryRun\":false,\"reason\":\"test\"}}",
     );
     defer allocator.free(forget);
     try std.testing.expect(std.mem.indexOf(u8, forget, "\"rootsMatched\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, forget, "\"nodesDeleted\":4") != null);
-    try std.testing.expect(std.mem.indexOf(u8, forget, "{\"qid\":\"q_chunk_4_0\",\"type\":\"chunk\",\"action\":\"deleted\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forget, "{\"qid\":\"q_chunk_3_0\",\"type\":\"chunk\",\"action\":\"deleted\"}") != null);
     try expectLongMessageForgotten(&runtime, store, allocator, chunk_count);
 
     // The sibling message in the same turn is untouched.
@@ -13150,7 +13299,7 @@ test "runtime forget query hitting a chunk forgets the whole parent message" {
     const content = try testLongContent(allocator);
     defer allocator.free(content);
     try rememberLongMessage(&runtime, allocator, content);
-    const chunk_count = try testChunkCount(store, allocator, "q_msg_4");
+    const chunk_count = try testChunkCount(store, allocator, "q_msg_3");
 
     const forget = try runtime.dispatch(
         allocator,
@@ -13159,7 +13308,7 @@ test "runtime forget query hitting a chunk forgets the whole parent message" {
     defer allocator.free(forget);
     try std.testing.expect(std.mem.indexOf(u8, forget, "\"rootsMatched\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, forget, "\"nodesRedacted\":4") != null);
-    try std.testing.expect(std.mem.indexOf(u8, forget, "{\"qid\":\"q_msg_4\",\"type\":\"message\",\"action\":\"redacted\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forget, "{\"qid\":\"q_msg_3\",\"type\":\"message\",\"action\":\"redacted\"}") != null);
     try expectLongMessageForgotten(&runtime, store, allocator, chunk_count);
 }
 
@@ -13174,12 +13323,17 @@ test "runtime forgetting a session forgets its messages and their chunks" {
     const content = try testLongContent(allocator);
     defer allocator.free(content);
     try rememberLongMessage(&runtime, allocator, content);
-    const chunk_count = try testChunkCount(store, allocator, "q_msg_4");
+    const chunk_count = try testChunkCount(store, allocator, "q_msg_3");
 
-    const forget = try runtime.dispatch(
+    const session_qid = try hashQid(allocator, "sess", "\x1f\x1f\x1frepo:test\x1fsess-long");
+    defer allocator.free(session_qid);
+    const forget_request = try std.fmt.allocPrint(
         allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":\"f1\",\"method\":\"memory.forget\",\"params\":{\"mode\":\"hard_delete\",\"selector\":{\"qids\":[\"q_sess_1\"]},\"dryRun\":false,\"reason\":\"test\"}}",
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"f1\",\"method\":\"memory.forget\",\"params\":{{\"mode\":\"hard_delete\",\"selector\":{{\"qids\":[\"{s}\"]}},\"dryRun\":false,\"reason\":\"test\"}}}}",
+        .{session_qid},
     );
+    defer allocator.free(forget_request);
+    const forget = try runtime.dispatch(allocator, forget_request);
     defer allocator.free(forget);
     try std.testing.expect(std.mem.indexOf(u8, forget, "\"rootsMatched\":3") != null);
     try expectLongMessageForgotten(&runtime, store, allocator, chunk_count);
@@ -15314,6 +15468,37 @@ test "summary jobs write a summary per session and per topic and ask again only 
     try std.testing.expectEqualStrings(topic_qid, after[0].qid);
     try std.testing.expectEqual(@as(usize, 3), after[0].properties.value.object.get("members").?.array.items.len);
     try std.testing.expectEqualStrings("2023-05-12T19:00:00Z", after[0].string("lastSaid"));
+}
+
+test "a session's summary covers every call that named it" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = SummaryTestModel{};
+    defer model.deinit();
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{ .extract_provider = model.endpoint() });
+    defer runtime.deinit();
+
+    // One conversation, remembered in two calls.
+    allocator.free(try rememberStarterDay(&runtime, 8, "I keep a sourdough starter named Bubbles."));
+    _ = try runtime.runExtractJobs(allocator, "test", 10, 1);
+    _ = try runtime.runSummaryJobs(allocator, "test", 100);
+    const before = try currentSummaries(runtime.store, "session");
+    defer freeSummaries(before);
+    try std.testing.expectEqual(@as(usize, 1), before.len);
+    const first_count = before[0].properties.value.object.get("sourceCount").?.integer;
+
+    allocator.free(try rememberStarterDay(&runtime, 8, "I feed Bubbles every morning."));
+    _ = try runtime.runExtractJobs(allocator, "test", 10, 1);
+    _ = try runtime.runSummaryJobs(allocator, "test", 100);
+    const after = try currentSummaries(runtime.store, "session");
+    defer freeSummaries(after);
+
+    // Still one summary, on the same node, now resting on both calls.
+    try std.testing.expectEqual(@as(usize, 1), after.len);
+    try std.testing.expectEqualStrings(before[0].qid, after[0].qid);
+    try std.testing.expectEqual(first_count * 2, after[0].properties.value.object.get("sourceCount").?.integer);
 }
 
 test "forgetting a message removes the summaries that rest on it and rebuilds them from the rest" {

@@ -26,15 +26,15 @@ places.
 
 - **Runtime ids.** `Runtime.nextQid(prefix)` returns `q_<prefix>_<n>`, where
   `n` is the counter `next_id`, which goes up by one on every call. Prefixes:
-  `sess`, `turn`, `msg`, `tool`, `obs`, `fact`, `pref`, `proc`, `core`, `fb`,
+  `sess` (a session with no `sessionId`), `turn`, `msg`, `tool`, `obs`, `fact`, `pref`, `proc`, `core`, `fb`,
   `pat`, `sum` and `edge`. The ids `q_retr_<n>` (retrieval ids) and
   `q_del_<n>` (forget requests) use the same counter but name no node; they
   appear only in responses and stream events.
 - **Hashes.** `hashQid(prefix, key)` returns `q_<prefix>_<hex>`, the Wyhash
   (seed 2) of a key built from what the node is made from. Writing the same
   thing again yields the same qid, so a job that runs twice rewrites its nodes
-  instead of adding copies. Prefixes: `card`, `ep`, `ent`, `asrt`, `upd` and
-  `edge`. `Job` qids are hashed the same way with seed 0 (`jobs.jobQid`).
+  instead of adding copies. Prefixes: `sess` (a session with a `sessionId`),
+  `card`, `ep`, `ent`, `asrt`, `upd` and `edge`. `Job` qids are hashed the same way with seed 0 (`jobs.jobQid`).
 - **Names.** Chunk, sentence index, idempotency, schema and migration qids are
   built from another qid or a fixed name; each label below gives its form.
 
@@ -74,7 +74,7 @@ the in-memory one.
 
 | Label | qid | Written by | Search | Vector | Hidden |
 | --- | --- | --- | --- | --- | --- |
-| `Session` | `q_sess_<n>` | `memory.remember` | no | no | always (no item text) |
+| `Session` | `q_sess_<hex>` or `q_sess_<n>` | `memory.remember` | no | no | always (no item text) |
 | `Turn` | `q_turn_<n>` | `memory.remember` | no | no | always (no item text) |
 | `Message` | `q_msg_<n>` | `memory.remember` | unless chunked | unless chunked | when chunked |
 | `Chunk` | `q_chunk_<m>_<i>` | `memory.remember` | yes | yes | no |
@@ -120,11 +120,19 @@ These labels hold what the caller sent. `memory.remember` writes them in this
 order: the `Session`, the `Turn`, each `Message` with its chunks, then tool
 calls and observations. They are written whether or not extraction is on.
 
-**`Session`.** One per `memory.remember` call. Each call writes a new
-`Session` node, even when it passes the same `sessionId` as an earlier call.
+**`Session`.** One conversation. A call with a `sessionId` writes into the
+session of that id in its scope: the qid is `hashQid("sess", "<scope
+fields>\x1f<sessionId>")`, so the first call creates the node and later
+calls find it and add a turn (`openSession`). When that node has been
+forgotten the key gains a counter (`...\x1f1`, `...\x1f2`), so the id names
+a new session and the tombstone stays. A call with no `sessionId` gets a
+session of its own, `q_sess_<n>`. A store written before sessions were
+joined has one `q_sess_<n>` node per call.
 
 - `kind`: `"session"`.
 - `sessionId`: the caller's `sessionId`, or null.
+- `messageCount`: the messages written into the session so far; the next
+  call's `messageIndex` values start here.
 - Scope fields, `deleted`.
 
 **`Turn`.** One per `memory.remember` call, linked from its session by
@@ -144,7 +152,7 @@ calls and observations. They are written whether or not extraction is on.
   `…` (`clampPropertyText`).
 - `createdAt`: the message's `createdAt`, or null.
 - `sessionQid`, `sessionId`, `turnQid`: where it was said.
-- `messageIndex`: its 0-based position in the call.
+- `messageIndex`: its 0-based position in the session, counted across calls.
 - `searchable`: false when the message is chunked.
 - `chunkCount`: the number of chunks, or 0 when it is not chunked.
 - `privacyClass`: the request's `privacyClass`, default `"normal"`.
@@ -442,8 +450,8 @@ It has an `EVIDENCED_BY` edge to every message of every occasion.
 **`Summary`.** A title and summary of one session or of one topic, a group of
 claims about the same thing (`writeSummaryNode`; see
 [algorithms.md](algorithms.md#summary-nodes)). A session summary covers the
-messages whose `sessionQid` is that `Session`, all roles, which are the
-messages of one `memory.remember` call. A node keeps its qid when it is
+messages whose `sessionQid` is that `Session`, all roles and all turns, and
+is written again when a call adds to the session. A node keeps its qid when it is
 written again; a node nothing stands behind any more is marked `superseded`
 (`retireSummary`).
 

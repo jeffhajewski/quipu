@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `memory.remember` calls that pass the same `sessionId` in the same scope
+  are stored as turns of one session. Every call used to start a new
+  `Session` node, so a conversation remembered turn by turn got a session
+  summary per call, counted as several conversations to consolidation, and
+  could count as several occasions to a pattern. `sessionQid` in the
+  response is now the same for those calls, and `messageIndex` runs across
+  them. A call with no `sessionId` is still a session of its own, and
+  sessions already stored one per call are left as they are.
 - A question can name a holiday or a calendar day. "On Valentine's Day",
   "on Black Friday", "for Christmas", "on February 14th" and "the 3rd of
   March" resolve like "last Saturday": the day goes on the `Time

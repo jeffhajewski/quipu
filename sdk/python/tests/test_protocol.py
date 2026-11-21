@@ -288,7 +288,7 @@ class ProtocolFixtureTests(unittest.TestCase):
         # The threads come before the conversations they were built from.
         self.assertLess(prompt.index("<threads>\n"), prompt.index("<sessions>\n"))
         self.assertIn("\n## Sourdough starter Bubbles: The user keeps a starter named Bubbles and looks after it.\n", prompt)
-        self.assertIn("[q_msg_25] 2023-05-12 (Fri), 18 days ago: The user gave half of the sourdough starter named Bubbles away.\n", prompt)
+        self.assertIn("[q_msg_21] 2023-05-12 (Fri), 18 days ago: The user gave half of the sourdough starter named Bubbles away.\n", prompt)
         # Each session opened is headed by its summary.
         self.assertIn("## session day-12 2023-05-12 (Fri) | Looking after Bubbles: The user talked about the sourdough starter Bubbles.\n", prompt)
 
@@ -296,7 +296,7 @@ class ProtocolFixtureTests(unittest.TestCase):
         topic = result["context"]["threads"][0]
         self.assertEqual(topic["type"], "summary")
         # Every fact shown under the topic is evidence: its message, quoting the fact.
-        self.assertEqual([evidence["qid"] for evidence in topic["evidence"]], ["q_msg_4", "q_msg_11", "q_msg_25"])
+        self.assertEqual([evidence["qid"] for evidence in topic["evidence"]], ["q_msg_3", "q_msg_9", "q_msg_21"])
         item_qids = {item["qid"] for item in result["items"]}
         for evidence in topic["evidence"]:
             self.assertIn("Bubbles", evidence["quote"])
