@@ -468,7 +468,9 @@ time: a Debug `liblattice` ingests about 35 times slower.
   core runner, graders, external smoke fixtures, real LoCoMo normalizer, run
   manifests, readiness gates, trace artifacts, and tests.
 - `docs/`: implementation notes for API, algorithms, data model, evals,
-  architecture, security, and publication.
+  architecture, security, and publication. Start with
+  [docs/how-it-works.md](./docs/how-it-works.md), which follows one message
+  from `memory.remember` through the background jobs to a rendered context.
 - `examples/`: planned integration examples.
 
 ## Protocol

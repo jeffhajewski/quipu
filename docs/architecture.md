@@ -1,6 +1,9 @@
 # Architecture
 
 See [../SPEC.md](../SPEC.md) for the full design. This file tracks implementation notes as the runtime lands.
+For one message followed from `memory.remember` through the background jobs
+to a rendered context, with the jobs, streams and token budget in one place,
+see [how-it-works.md](how-it-works.md).
 
 ## Storage Adapters
 
@@ -67,9 +70,10 @@ quipu --db /tmp/quipu.lattice jobs materialize quipu.retrieval.logged
 quipu --db /tmp/quipu.lattice jobs materialize --after 100 --limit 500 quipu.audit
 ```
 
-This gives the current single-process prototype the same durable stream-to-job
-boundary that later consolidation, forgetting, and feedback workers will use.
-The extractor already uses it: `quipu serve --background on` leases `extract`
+This gives the current single-process prototype a durable stream-to-job
+boundary. Extraction, consolidation, summaries and patterns use it; nothing
+is queued for forgetting or feedback, which run inside their requests.
+The extractor, for one: `quipu serve --background on` leases `extract`
 jobs between requests, makes the model calls on other threads, and writes the
 results back on the request thread (see
 [algorithms.md](algorithms.md#background-worker)). Job leases carry wall-clock

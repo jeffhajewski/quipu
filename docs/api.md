@@ -123,7 +123,7 @@ up to four, lead the topics in the order they happened, each an item of type
 evidence then comes only from the sessions the summaries and those facts
 point at, and from sessions not summarised yet, and each session header
 carries the session's title and, while the summaries fit in 15% of the
-budget, its summary. The section uses at most 45% of the token budget left
+budget left after the facts and patterns sections, its summary. The section uses at most 45% of the token budget left
 after the facts and patterns sections. A scope with no summaries has an empty
 `context.threads` and the context it would have had. The trace gains a
 `threads` block when summaries were read. See

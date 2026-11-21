@@ -1039,9 +1039,9 @@ leaves out `current_facts`.
    fact leads to. They are packed into what the budget has left after the
    sections above. Each session header is followed by that session's title
    and summary, charged to the first item kept from the session. The
-   summaries on headers may take 15% of the budget between them, in the
-   order the evidence ranks; a session reached after that is headed by its
-   title alone.
+   summaries on headers may take 15% of the budget left after the facts and
+   patterns sections between them, in the order the evidence ranks; a
+   session reached after that is headed by its title alone.
 
 ```text
 <threads>
@@ -1114,7 +1114,9 @@ There is no switch. Every finished `extract` job publishes
 that can embed text. The jobs run after extraction, consolidation and the
 summary jobs have caught up: in the background worker, or on request with
 `quipu jobs run patterns` and the operational RPC `memory.patterns.run`. They
-use the extract provider. Jobs for the same scope are settled by one pass.
+use the pattern provider (`--pattern-provider`, `--pattern-url`,
+`--pattern-model`), which is the extract provider when none is set. Jobs for
+the same scope are settled by one pass.
 
 One pass rebuilds the pattern nodes of one scope:
 
