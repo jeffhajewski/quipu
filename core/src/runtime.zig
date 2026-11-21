@@ -2146,8 +2146,16 @@ pub const Runtime = struct {
                 }
             }
         }
-        for (pattern_scopes.values()) |pattern_scope| try self.queuePatternJob(allocator, pattern_scope);
-        for (summary_scopes.values()) |summary_scope| try self.queueSummaryJob(allocator, summary_scope);
+        // The jobs that rebuild what the forgotten nodes stood behind.
+        var queued_jobs = std.ArrayList([]const u8).empty;
+        for (pattern_scopes.values()) |pattern_scope| {
+            const sequence = try self.queuePatternJob(allocator, pattern_scope) orelse continue;
+            try queued_jobs.append(pattern_arena, try jobs.jobQid(pattern_arena, streams.pattern_requested, sequence, streams.workerKindForStream(streams.pattern_requested)));
+        }
+        for (summary_scopes.values()) |summary_scope| {
+            const sequence = try self.queueSummaryJob(allocator, summary_scope) orelse continue;
+            try queued_jobs.append(pattern_arena, try jobs.jobQid(pattern_arena, streams.summary_requested, sequence, streams.workerKindForStream(streams.summary_requested)));
+        }
         summaries_contaminated = contaminated_core_qids.items.items.len;
         if (!dry_run and propagate) {
             for (contaminated_core_qids.items.items) |core_qid| {
@@ -2187,7 +2195,7 @@ pub const Runtime = struct {
                 .nodesRedacted = nodes_redacted,
                 .factsInvalidated = facts_invalidated,
                 .summariesContaminated = summaries_contaminated,
-                .jobsQueued = &[_][]const u8{},
+                .jobsQueued = queued_jobs.items,
                 .report = report.items.items,
             },
         };
@@ -4809,10 +4817,10 @@ pub const Runtime = struct {
         }
         // Pattern nodes are built from what was written, not from the claims
         // drawn from it, so new messages are reason enough.
-        if (task.sources.items.len > 0) try self.queuePatternJob(allocator, task.scope);
+        if (task.sources.items.len > 0) _ = try self.queuePatternJob(allocator, task.scope);
         // Summaries rest on the claims and on the messages themselves: a
         // session with nothing to extract still has something to say.
-        if (task.sources.items.len > 0) try self.queueSummaryJob(allocator, task.scope);
+        if (task.sources.items.len > 0) _ = try self.queueSummaryJob(allocator, task.scope);
         return written;
     }
 
@@ -5233,8 +5241,10 @@ pub const Runtime = struct {
     /// scope are settled together, and a rebuild that finds nothing new
     /// makes no provider call. Nothing is queued on a store without
     /// embeddings, which cannot compare sentences.
-    fn queuePatternJob(self: *Runtime, allocator: std.mem.Allocator, scope: Scope) !void {
-        if (!self.store.capabilities().vector) return;
+    /// Queues a `pattern` job for the scope and returns the sequence of its
+    /// stream entry, or null on a store that cannot embed text.
+    fn queuePatternJob(self: *Runtime, allocator: std.mem.Allocator, scope: Scope) !?u64 {
+        if (!self.store.capabilities().vector) return null;
         const payload = try stringifyAlloc(allocator, .{
             .method = "memory.pattern.requested",
             .scope = scope.json(),
@@ -5246,6 +5256,7 @@ pub const Runtime = struct {
             .limit = 1,
         });
         self.background_dirty = true;
+        return event.sequence;
     }
 
     /// Runs pending `pattern` jobs. Each rebuilds the pattern nodes of one
@@ -5627,7 +5638,7 @@ pub const Runtime = struct {
             }
             // The rest of a backlog is indexed by the next pass.
             if (failure == null and task.unindexed > 0) {
-                try self.queuePatternJob(allocator, task.scope);
+                _ = try self.queuePatternJob(allocator, task.scope);
                 result.continued = true;
             }
             const event_payload = try stringifyAlloc(arena, .{
@@ -5772,8 +5783,10 @@ pub const Runtime = struct {
     /// one scope are settled together, and a rebuild that finds every summary
     /// up to date makes no provider call. Nothing is queued on a store
     /// without embeddings, which cannot compare claims.
-    fn queueSummaryJob(self: *Runtime, allocator: std.mem.Allocator, scope: Scope) !void {
-        if (!self.store.capabilities().vector) return;
+    /// Queues a `summary` job for the scope and returns the sequence of its
+    /// stream entry, or null on a store that cannot embed text.
+    fn queueSummaryJob(self: *Runtime, allocator: std.mem.Allocator, scope: Scope) !?u64 {
+        if (!self.store.capabilities().vector) return null;
         const payload = try stringifyAlloc(allocator, .{
             .method = "memory.summary.requested",
             .scope = scope.json(),
@@ -5785,6 +5798,7 @@ pub const Runtime = struct {
             .limit = 1,
         });
         self.background_dirty = true;
+        return event.sequence;
     }
 
     /// Runs pending `summary` jobs. Each brings the `Summary` nodes of one
@@ -6240,7 +6254,7 @@ pub const Runtime = struct {
             }
             // The rest of a backlog of claims is embedded by the next pass.
             if (failure == null and task.unindexed > 0) {
-                try self.queueSummaryJob(allocator, task.scope);
+                _ = try self.queueSummaryJob(allocator, task.scope);
                 result.continued = true;
             }
             const event_payload = try stringifyAlloc(arena, .{
@@ -15234,7 +15248,7 @@ test "summary jobs write a summary per session and per topic and ask again only 
     try std.testing.expectEqual(false, topics[0].properties.value.object.get("searchable").?.bool);
 
     // Nothing changed: a pass asks nothing and writes nothing.
-    try runtime.queueSummaryJob(allocator, .{ .user_id = "baker" });
+    _ = try runtime.queueSummaryJob(allocator, .{ .user_id = "baker" });
     const idle = try runtime.runSummaryJobs(allocator, "test", 100);
     try std.testing.expectEqual(@as(usize, 0), idle.calls);
     try std.testing.expectEqual(@as(usize, 4), idle.counts.unchanged);
@@ -15289,6 +15303,15 @@ test "forgetting a message removes the summaries that rest on it and rebuilds th
     defer allocator.free(forgotten);
     try std.testing.expect(std.mem.indexOf(u8, forgotten, before[0].qid) != null);
 
+    // The response names the job that rebuilds the scope's summaries, and
+    // that job is waiting to run.
+    const rebuild_qid = try resultArrayFirst(allocator, forgotten, "jobsQueued");
+    defer allocator.free(rebuild_qid);
+    const rebuild = (try runtime.store.getNode(allocator, rebuild_qid)).?;
+    defer runtime.store.freeNode(allocator, rebuild);
+    try std.testing.expectEqualStrings("Job", rebuild.label);
+    try std.testing.expect(std.mem.indexOf(u8, rebuild.properties_json, "\"status\":\"pending\"") != null);
+
     // The topic and the session's summary went with the message, and
     // nothing of them can be read back.
     const gone = (try runtime.store.getNode(allocator, before[0].qid)).?;
@@ -15342,7 +15365,7 @@ test "a group the model declines is remembered and not asked about again" {
     try std.testing.expectEqualStrings("", topics[0].string("text"));
     try std.testing.expectEqualStrings("", topics[0].string("vector"));
 
-    try runtime.queueSummaryJob(allocator, .{ .user_id = "baker" });
+    _ = try runtime.queueSummaryJob(allocator, .{ .user_id = "baker" });
     const second = try runtime.runSummaryJobs(allocator, "test", 100);
     try std.testing.expectEqual(@as(usize, 0), second.calls);
     try std.testing.expectEqual(@as(usize, 1), model.topic_calls);

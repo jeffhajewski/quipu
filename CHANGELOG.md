@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `memory.forget` lists the rebuild jobs it queues in `jobsQueued`. The
+  field was always empty, though a forget that removes a summary or a
+  pattern node queues a job to rebuild the scope's from what remains.
 - Stored text can no longer close or forge the `<threads>` and `<patterns>`
   sections of a context. Those two tags were missing from the list that is
   defanged when memory text is rendered (`</threads>` becomes `[/threads]`),

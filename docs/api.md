@@ -192,3 +192,16 @@ result reports matched roots, deleted or redacted roots, invalidated fact-like
 memories, contaminated summaries, and per-node actions in `report`. The
 closure follows edges, so it is complete at any store size. See
 [algorithms.md](algorithms.md#forgetting-v0).
+
+`mode` is `hard_delete`, `redact` or `expire`. In every mode the node's
+properties are replaced by a tombstone that keeps its qid, label and edges
+and none of its text, and the node leaves the full-text and vector indexes.
+The modes differ in what the tombstone records: `redact` leaves `state:
+"redacted"` and is counted in `nodesRedacted`; `hard_delete` and `expire`
+leave `state: "deleted"` and are counted in `nodesDeleted`. Nodes reached
+through propagation are always tombstoned as `hard_delete`.
+
+`jobsQueued` lists the jobs the call queued: one `summary` job and one
+`pattern` job for each scope that lost a summary or a pattern node, which
+rebuild that scope's nodes from what remains. It is empty for a dry run and
+when nothing derived by those jobs was forgotten.

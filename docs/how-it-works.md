@@ -493,8 +493,8 @@ clears its `searchText` and removes its vector, and the in-memory adapter
 indexes nothing for it. Edges stay, so the closure can still be walked.
 
 For each scope that lost a `Pattern` or a `Summary`, one `pattern` or
-`summary` job is queued to rebuild from what remains (the response's
-`jobsQueued` is always empty). The call appends `quipu.forget.completed` and
+`summary` job is queued to rebuild from what remains, and the response lists
+their qids in `jobsQueued`. The call appends `quipu.forget.completed` and
 `quipu.audit`. A dry run writes no tombstone and queues nothing, but still
 appends both events with `status: "planned"`. An extract job whose calls
 were in flight does not write a claim whose message is now forgotten.
