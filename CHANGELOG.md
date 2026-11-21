@@ -8,6 +8,9 @@
   references` line, what was said then is brought in, and sessions from
   then are marked. Only holidays on the same day everywhere are known;
   Thanksgiving, Easter and Mother's Day are not.
+- A claim the model left undated is also dated by a day written as
+  `2023-03-04` in its text and by a holiday something happened on ("on
+  Black Friday").
 - `memory.forget` lists the rebuild jobs it queues in `jobsQueued`. The
   field was always empty, though a forget that removes a summary or a
   pattern node queues a job to rebuild the scope's from what remains.

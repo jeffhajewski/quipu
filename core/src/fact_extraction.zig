@@ -408,7 +408,7 @@ pub fn ground(allocator: std.mem.Allocator, payload: std.json.Value, messages: [
             // day the model's own wording names outright, or "just" for the
             // day it was said.
             if (temporal.parseIsoDate(messages[located].created_at orelse "") catch null) |said| {
-                const day: ?temporal.CivilDate = temporal.explicitDay(text, said) orelse if (temporal.saysJust(text)) said else null;
+                const day: ?temporal.CivilDate = temporal.explicitDay(text, said) orelse temporal.holidayDay(text, said) orelse if (temporal.saysJust(text)) said else null;
                 if (day) |date| {
                     span = .{ .start = date, .end = date };
                     event_date = try ownDate(allocator, &owned, date);

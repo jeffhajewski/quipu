@@ -620,9 +620,15 @@ Either way a job is processed like this:
 
    A claim left with no span, where the model gave no date and no relative
    time was resolved, is dated by its own wording when that is plain. If it
-   names exactly one calendar day ("on February 20th", "March 3, 2023"), that
+   names exactly one calendar day ("on February 20th", "March 3, 2023", "on
+   2023-03-04"), that
    day is its `eventDate` and span, in the year that puts it nearest the day
-   said when it gives none. Otherwise, if it reports something as having
+   said when it gives none. Otherwise, if it says something happened on a
+   holiday that is the same day everywhere ("on Black Friday", "on
+   Valentine's Day"; the list is under [Temporal hints](#temporal-hints)),
+   it is dated that holiday, the occurrence nearest the day said. Only
+   after "on": "a Halloween costume" and "a gift for Christmas" do not say
+   when anything happened. Otherwise, if it reports something as having
    only now happened, "just" before a verb in the past ("just launched",
    "just got back"), it is dated the day it was said. A date of the model's
    that step 5 refused is not brought back this way. On 20,678 claims from

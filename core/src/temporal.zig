@@ -649,13 +649,32 @@ fn saidFor(tokens: []const []const u8, first: usize) bool {
     return i > 0 and wordAt(tokens, i - 1, "for");
 }
 
+/// `YYYY-MM-DD` standing alone at `index`, as a model sometimes writes a
+/// day into a claim.
+fn isoDayAt(text: []const u8, index: usize) ?CivilDate {
+    if (index + 10 > text.len) return null;
+    if (index > 0 and (std.ascii.isAlphanumeric(text[index - 1]) or text[index - 1] == '-')) return null;
+    if (index + 10 < text.len and (std.ascii.isAlphanumeric(text[index + 10]) or text[index + 10] == '-')) return null;
+    const date = parseIsoDate(text[index .. index + 10]) catch return null;
+    return if (writable(date)) date else null;
+}
+
 /// The one calendar day a statement names outright ("on February 20th",
-/// "March 3, 2023"), or null when it names none or more than one. A day
-/// with no year is taken in the year that puts it nearest `said`.
+/// "March 3, 2023", "on 2023-03-04"), or null when it names none or more
+/// than one. A day with no year is taken in the year that puts it nearest
+/// `said`.
 pub fn explicitDay(text: []const u8, said: CivilDate) ?CivilDate {
     var found: ?CivilDate = null;
     var index: usize = 0;
     while (index < text.len) {
+        if (isoDayAt(text, index)) |date| {
+            if (found) |other| {
+                if (!other.eql(date)) return null;
+            }
+            found = date;
+            index += 10;
+            continue;
+        }
         if (!std.ascii.isAlphabetic(text[index]) or (index > 0 and std.ascii.isAlphanumeric(text[index - 1]))) {
             index += 1;
             continue;
@@ -1380,6 +1399,43 @@ fn matchHoliday(tokens: []const []const u8, i: usize, current: CivilDate) ?Match
     return .{ .len = found.len, .value = if (exact) .{ .day = date } else .{ .around = date } };
 }
 
+/// The one holiday a statement says something happened on ("on Black
+/// Friday", "on Valentine's Day"), as the occurrence nearest `said`, or null
+/// when it names none or more than one. Only after "on": "a Halloween
+/// costume" and "a gift for Christmas" do not say when anything happened.
+pub fn holidayDay(text: []const u8, said: CivilDate) ?CivilDate {
+    var buffer: [256][]const u8 = undefined;
+    var count: usize = 0;
+    var cursor: usize = 0;
+    while (cursor < text.len and count < buffer.len) {
+        while (cursor < text.len and !std.ascii.isAlphanumeric(text[cursor])) : (cursor += 1) {}
+        const start = cursor;
+        while (cursor < text.len and std.ascii.isAlphanumeric(text[cursor])) : (cursor += 1) {}
+        if (cursor > start) {
+            buffer[count] = text[start..cursor];
+            count += 1;
+        }
+    }
+    const tokens = buffer[0..count];
+    var found: ?CivilDate = null;
+    for (tokens, 0..) |_, index| {
+        if (!wordAt(tokens, index, "on")) continue;
+        const name = holidayAt(tokens, index + 1) orelse continue;
+        var best: ?CivilDate = null;
+        for ([_]i32{ said.year - 1, said.year, said.year + 1 }) |year| {
+            const candidate = name.holiday.in(year);
+            if (best == null or @abs(daysFromCivil(candidate) - daysFromCivil(said)) < @abs(daysFromCivil(best.?) - daysFromCivil(said))) best = candidate;
+        }
+        const date = best.?;
+        if (!writable(date)) continue;
+        if (found) |other| {
+            if (!other.eql(date)) return null;
+        }
+        found = date;
+    }
+    return found;
+}
+
 fn testDate(text: []const u8) CivilDate {
     return parseIsoDate(text) catch unreachable;
 }
@@ -1510,6 +1566,23 @@ test "time references resolve calendar days and holidays" {
     try expectWindows("What did I get for Christmas?", "2023-03-02", &.{.{ "2022-12-16", "2023-01-03" }});
 }
 
+test "the one holiday a statement says something happened on" {
+    const expect = struct {
+        fn day(text: []const u8, on: []const u8, want: ?[]const u8) !void {
+            const got = holidayDay(text, testDate(on));
+            if (want) |date| try std.testing.expect(testDate(date).eql(got.?)) else try std.testing.expectEqual(@as(?CivilDate, null), got);
+        }
+    }.day;
+    // The occurrence nearest the day it was said, behind or ahead.
+    try expect("The user bought a new coffee maker on Black Friday.", "2023-12-10", "2023-11-24");
+    try expect("The user is hosting dinner on Christmas Eve.", "2023-12-10", "2023-12-24");
+    try expect("The user flew to Denver on Valentine's Day.", "2023-03-02", "2023-02-14");
+    // A holiday that is not when something happened, and two of them.
+    try expect("The user bought a Halloween costume.", "2023-10-20", null);
+    try expect("The user got a bike for Christmas.", "2023-01-05", null);
+    try expect("The user worked on Christmas Eve and on New Year's Eve.", "2023-01-05", null);
+}
+
 test "time references skip non-temporal wording and repeats" {
     try expectReferences("How many days ago did I buy the lamp?", "2023-05-30", null);
     try expectReferences("What was the last thing I may have said?", "2023-05-30", null);
@@ -1631,6 +1704,10 @@ test "the one day a statement names outright" {
     }.day;
     try expect("The user got a new pair of Adidas running shoes on January 10th.", said, "2023-01-10");
     try expect("The user saw the dentist on Sept. 3, 2021.", said, "2021-09-03");
+    try expect("The user got a crystal chandelier from their aunt on 2023-01-28.", said, "2023-01-28");
+    try expect("The user filed form 2023-01-281 and paid 12023-01-28.", said, null);
+    try expect("The user was away from 2023-01-20 to 2023-01-28.", said, null);
+    try expect("The user left on 2023-02-30.", said, null);
     try expect("The user said so on March 3 and again on March 3rd.", said, "2023-03-03");
     // The year that puts it nearest the day it was said.
     try expect("The user flew home on December 28.", said, "2022-12-28");
