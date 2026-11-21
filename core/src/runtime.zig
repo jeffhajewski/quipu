@@ -3658,7 +3658,11 @@ pub const Runtime = struct {
         var blocks = std.ArrayList(ThreadBlockPlan).empty;
 
         // Facts from a time the question names, nearest the question first,
-        // in at most their share of the section.
+        // in at most their share of the section. What happened then stands
+        // apart from what was only said then: "I just saw Queen live" on
+        // the Saturday asked about is the event, and "I went to a festival
+        // recently", said the same day, is not. A day's talk covers many
+        // subjects, so a fact far from the question is left out.
         for (named, 0..) |time, time_index| {
             const window = time.window orelse continue;
             var dated = std.ArrayList(u32).empty;
@@ -3667,19 +3671,35 @@ pub const Runtime = struct {
             }
             if (dated.items.len == 0) continue;
             std.mem.sort(u32, dated.items, claims.items, ShownClaim.nearerQuestion);
-            const heading = try namedTimeHeading(arena, time, window);
-            var cost = estimatePromptTokens(heading) + 2;
-            var kept = std.ArrayList(u32).empty;
-            for (dated.items) |index| {
-                const tokens = try claims.items[index].lineTokens(arena, current);
-                if (used + cost + tokens > limit * summaries.named_time_percent / 100) break;
-                try kept.append(arena, index);
-                cost += tokens;
+            const nearest_named = claims.items[dated.items[0]].score;
+            const headings = [2][]const u8{ try namedTimeHeading(arena, time, window, true), try namedTimeHeading(arena, time, window, false) };
+            var groups = [2]std.ArrayList(u32){ .empty, .empty };
+            var cost: usize = 0;
+            // What happened then is taken before what was said then: it is
+            // what the question asks about, and there is less of it.
+            for (&groups, headings, 0..) |*group, heading, which| {
+                const floor: f32 = if (which == 0) summaries.relevance_floor else summaries.named_floor;
+                for (dated.items) |index| {
+                    const claim = &claims.items[index];
+                    if ((claim.event != null) != (which == 0)) continue;
+                    if (claim.score < nearest_named * floor) break;
+                    var tokens = try claim.lineTokens(arena, current);
+                    if (group.items.len == 0) tokens += estimatePromptTokens(heading) + 2;
+                    if (used + cost + tokens > limit * summaries.named_time_percent / 100) break;
+                    try group.append(arena, index);
+                    cost += tokens;
+                }
             }
-            if (kept.items.len == 0) continue;
-            std.mem.sort(u32, kept.items, claims.items, ShownClaim.saidBefore);
-            for (kept.items) |index| claims.items[index].shown = true;
-            try blocks.append(arena, .{ .heading = heading, .members = kept.items });
+            for (&groups, headings, 0..) |*group, heading, which| {
+                if (group.items.len == 0) continue;
+                if (which == 0) {
+                    std.mem.sort(u32, group.items, claims.items, ShownClaim.happenedBefore);
+                } else {
+                    std.mem.sort(u32, group.items, claims.items, ShownClaim.saidBefore);
+                }
+                for (group.items) |index| claims.items[index].shown = true;
+                try blocks.append(arena, .{ .heading = heading, .members = group.items });
+            }
             used += cost;
         }
 
@@ -8642,11 +8662,16 @@ fn parseShownClaim(arena: std.mem.Allocator, node: storage.Node) !?ShownClaim {
 }
 
 /// The heading over the facts dated inside a time the question names:
-/// `Said on or about 2023-05-20 (Sat): the question's "last Saturday"`.
-fn namedTimeHeading(arena: std.mem.Allocator, time: temporal.NamedTime, window: temporal.Window) ![]const u8 {
+/// `Happened on or about 2023-05-20 (Sat): the question's "last Saturday"`
+/// over the facts whose event was then, and `Said on or about 2023-05-20
+/// (Sat): the question's "last Saturday"` over the facts that were said
+/// then and have no event day. The second says nothing about when its facts
+/// happened: told they had no date, a reader would not answer from one that
+/// did hold the answer.
+fn namedTimeHeading(arena: std.mem.Allocator, time: temporal.NamedTime, window: temporal.Window, happened: bool) ![]const u8 {
     var writer: std.Io.Writer.Allocating = .init(arena);
     const out = &writer.writer;
-    try out.writeAll("Said on or about ");
+    try out.writeAll(if (happened) "Happened on or about " else "Said on or about ");
     try summaries.writeDay(out, window.start, null);
     if (!window.start.eql(window.end)) {
         try out.writeAll(" to ");
@@ -9538,17 +9563,26 @@ fn itemAllowedByNeeds(item: MessageResult, needs_value: ?Value) bool {
 /// has them and otherwise the day it was said. An event span counts when it
 /// overlaps the window and is no longer than the window or a week, whichever
 /// is longer: "in April 2023" says too little to answer "two weeks ago" by.
-/// A claim written before spans were stored is matched by its event date
-/// (`YYYY-MM-DD` only).
+/// A span ends no later than the day the claim was said, since what has
+/// happened had happened by then: "a lecture this month", said on the 11th,
+/// was on the 1st to the 11th. A claim written before spans were stored is
+/// matched by its event date (`YYYY-MM-DD` only).
 fn nodeDatedWithin(allocator: std.mem.Allocator, node: storage.Node, window: temporal.Window, is_claim: bool) !bool {
     if (is_claim) {
         if (try readEventSpan(allocator, node.properties_json)) |span| {
             if (try propertyBool(allocator, node.properties_json, "planned")) return false;
+            const first = temporal.daysFromCivil(span.start);
+            var last = temporal.daysFromCivil(span.end);
+            if (try readOptionalPropertyString(allocator, node.properties_json, "createdAt")) |created_at| {
+                defer allocator.free(created_at);
+                if (parseIsoDate(created_at)) |said| {
+                    const said_day = temporal.daysFromCivil(said);
+                    if (said_day >= first) last = @min(last, said_day);
+                } else |_| {}
+            }
             const window_days = temporal.daysFromCivil(window.end) - temporal.daysFromCivil(window.start) + 1;
-            const span_days = temporal.daysFromCivil(span.end) - temporal.daysFromCivil(span.start) + 1;
-            if (span_days > @max(window_days, 7)) return false;
-            return temporal.daysFromCivil(span.start) <= temporal.daysFromCivil(window.end) and
-                temporal.daysFromCivil(span.end) >= temporal.daysFromCivil(window.start);
+            if (last - first + 1 > @max(window_days, 7)) return false;
+            return first <= temporal.daysFromCivil(window.end) and last >= temporal.daysFromCivil(window.start);
         }
         if (try readOptionalPropertyString(allocator, node.properties_json, "eventDate")) |event_date| {
             defer allocator.free(event_date);
@@ -13497,6 +13531,12 @@ test "a claim is from a time the question names when its event span overlaps it"
     const month = "{\"createdAt\":\"2023-05-09T10:00:00Z\",\"eventDate\":\"2023-04\",\"eventStart\":\"2023-04-01\",\"eventEnd\":\"2023-04-30\",\"planned\":false}";
     try std.testing.expect(!try claim(month, "2023-04-10", "2023-04-10"));
     try std.testing.expect(try claim(month, "2023-04-01", "2023-04-30"));
+    // "This month", said on the 11th, is the 1st to the 11th: short enough
+    // for a window of seventeen days, and over before a later one begins.
+    const this_month = "{\"createdAt\":\"2023-01-11T10:00:00Z\",\"eventDate\":\"2023-01\",\"eventStart\":\"2023-01-01\",\"eventEnd\":\"2023-01-31\",\"planned\":false}";
+    try std.testing.expect(try claim(this_month, "2023-01-03", "2023-01-19"));
+    try std.testing.expect(!try claim(this_month, "2023-01-12", "2023-01-28"));
+    try std.testing.expect(!try claim(this_month, "2023-01-09", "2023-01-10"));
     // A plan has not happened.
     const plan = "{\"createdAt\":\"2023-05-09T10:00:00Z\",\"eventStart\":\"2023-05-13\",\"eventEnd\":\"2023-05-14\",\"planned\":true}";
     try std.testing.expect(!try claim(plan, "2023-05-13", "2023-05-13"));
@@ -15079,6 +15119,10 @@ const SummaryTestModel = struct {
         .{ "I took a baking class", "{\"assertions\":[{\"text\":\"The user took a baking class at the culinary school yesterday.\",\"messageIndex\":0,\"quote\":\"I took a baking class\"}]}" },
         .{ "I baked a birthday cake", "{\"assertions\":[{\"text\":\"The user baked a birthday cake for a friend today.\",\"messageIndex\":0,\"quote\":\"I baked a birthday cake\"}]}" },
         .{ "I love the baking class", "{\"assertions\":[{\"text\":\"The user loves the baking class and the birthday cake.\",\"messageIndex\":0,\"quote\":\"I love the baking class\"}]}" },
+        .{ "I just saw the Harbour", "{\"assertions\":[{\"text\":\"The user just saw the Harbour Lights concert with their parents.\",\"messageIndex\":0,\"quote\":\"I just saw the Harbour Lights concert with my parents\"}]}" },
+        .{ "I went to a concert with friends", "{\"assertions\":[{\"text\":\"The user went to a concert with friends recently.\",\"messageIndex\":0,\"quote\":\"I went to a concert with friends recently\"}]}" },
+        .{ "My neighbour", "{\"assertions\":[{\"text\":\"The user's neighbour is repainting the fence.\",\"messageIndex\":0,\"quote\":\"My neighbour is repainting the fence\"}]}" },
+        .{ "I just saw a concert in the park", "{\"assertions\":[{\"text\":\"The user just saw a concert in the park with their sister.\",\"messageIndex\":0,\"quote\":\"I just saw a concert in the park with my sister\"}]}" },
     };
 
     fn endpoint(self: *SummaryTestModel) providers.ProviderEndpoint {
@@ -15444,6 +15488,53 @@ test "retrieval sets the dated facts nearest the question in order and counts th
     const one = try threadRetrieve(&runtime, "Where was the baking class I took at the culinary school?", 2000);
     defer allocator.free(one);
     try std.testing.expect(std.mem.indexOf(u8, one, summaries.timeline_heading) == null);
+}
+
+test "retrieval sets what happened in a time the question names apart from what was said then" {
+    const allocator = std.testing.allocator;
+    var harness = try RuntimeTestHarness.init(allocator);
+    defer harness.deinit();
+    var store = PatternTestStore.init(harness.adapter());
+    var model = SummaryTestModel{};
+    defer model.deinit();
+    var runtime = Runtime.initWithOptions(store.adapter(), harness.health(), .{ .extract_provider = model.endpoint() });
+    defer runtime.deinit();
+
+    // 2023-05-27 is the Saturday before the question. Three things were said
+    // that day: a concert seen that day, a concert some time before, and
+    // something about a fence. A week earlier there was another concert.
+    const earlier = try rememberStarterDay(&runtime, 20, "I just saw a concert in the park with my sister.");
+    defer allocator.free(earlier);
+    const concert = try rememberStarterDay(&runtime, 27, "I just saw the Harbour Lights concert with my parents.");
+    defer allocator.free(concert);
+    const recent = try rememberStarterDay(&runtime, 27, "I went to a concert with friends recently.");
+    defer allocator.free(recent);
+    allocator.free(try rememberStarterDay(&runtime, 27, "My neighbour is repainting the fence."));
+    _ = try runtime.runExtractJobs(allocator, "test", 20, 1);
+    _ = try runtime.runSummaryJobs(allocator, "test", 100);
+
+    const response = try threadRetrieve(&runtime, "Who did I go with to the concert last Saturday?", 2000);
+    defer allocator.free(response);
+    const prompt = try resultStringField(allocator, response, "prompt");
+    defer allocator.free(prompt);
+    const threads = prompt[std.mem.indexOf(u8, prompt, "<threads>").?..std.mem.indexOf(u8, prompt, "</threads>").?];
+    // The concert of that day leads, under a heading that says it happened
+    // then. What was only said that day follows under its own heading.
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "## Happened on or about 2023-05-27 (Sat): the question's \"last Saturday\"\n" ++
+            "[{s}] 2023-05-27 (Sat), 3 days ago: The user just saw the Harbour Lights concert with their parents.\n" ++
+            "## Said on or about 2023-05-27 (Sat): the question's \"last Saturday\"\n" ++
+            "[{s}] 2023-05-27 (Sat), 3 days ago: The user went to a concert with friends recently (said on May 27, 2023).\n",
+        .{ concert, recent },
+    );
+    defer allocator.free(expected);
+    try std.testing.expect(std.mem.indexOf(u8, threads, expected) != null);
+    // The fence was said that day too and has nothing to do with the
+    // question; the concert a week before is not from that day.
+    try std.testing.expect(std.mem.indexOf(u8, threads, "fence") == null);
+    const before = std.mem.indexOf(u8, threads, "concert in the park").?;
+    try std.testing.expect(before > std.mem.indexOf(u8, threads, "(said on May 27, 2023)").?);
 }
 
 test "retrieval shows the topics nearest the question and opens sessions through the summaries" {

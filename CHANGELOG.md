@@ -8,6 +8,11 @@
   references` line, what was said then is brought in, and sessions from
   then are marked. Only holidays on the same day everywhere are known;
   Thanksgiving, Easter and Mother's Day are not.
+- The threads section sets what happened in a time the question names apart
+  from what was only said then, under `## Happened on or about ...` and `##
+  Said on or about ...`, and leaves out facts said then that are far from
+  the question. It listed everything said in the window before, 22 facts on
+  average.
 - A claim the model left undated is also dated by a day written as
   `2023-03-04` in its text and by a holiday something happened on ("on
   Black Friday").

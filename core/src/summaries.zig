@@ -339,6 +339,14 @@ pub const relevance_floor: f32 = 0.5;
 /// LongMemEval questions 190 of the 194 threads shown that held an answer
 /// scored higher, and 523 of the 847 that held none.
 pub const relevance_min: f32 = 0.3;
+/// A fact said inside a time the question names, with no day of its own, is
+/// left out when it is less than this near the question, as a share of the
+/// nearest fact from that time. Everything said on a day is a long list: on
+/// 13 LongMemEval questions that name a time, 22 facts on average. At this
+/// share 67 of the 288 are left, with every fact an answer was in, which
+/// scored 0.89 or more. A fact that happened inside the time is rarer and is
+/// held to `relevance_floor` only.
+pub const named_floor: f32 = 0.7;
 /// Share of the evidence budget the summaries on session headers may take.
 /// Sessions past it are headed by their title alone.
 pub const session_summary_percent = 15;

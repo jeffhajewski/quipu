@@ -827,7 +827,8 @@ no option; a question that names no time, or a request without a parseable
   `options.factKeys`, a claim whose event span overlaps the window (the
   message said "yesterday" or "last weekend") brings in its source message.
   A planned event does not, and neither does a span longer than both the
-  window and a week: "in April 2023" does not answer "two weeks ago". Only
+  window and a week: "in April 2023" does not answer "two weeks ago". A span
+  is taken to end no later than the day the claim was said. Only
   what a speaker said is anchored: the
   assistant's replies of that day are long and do not say what the person
   did. The anchored items are placed ahead of every other candidate, most
@@ -1019,9 +1020,22 @@ leaves out `current_facts`.
    then no thread is shown.
 3. **Fill the section.** The threads section may take 45% of the budget left
    after the facts and patterns sections. First, for each time the question
-   names (see [Time anchors](#time-anchors)), the claims said or dated inside
-   that window, nearest the question first, in at most half the section,
-   under a heading that gives the window. Then the topics in rank order, each
+   names (see [Time anchors](#time-anchors)), the claims from that window, in
+   at most half the section, in two groups. A claim whose event span
+   overlaps the window comes under `## Happened on or about <window>: the
+   question's "<phrase>"`; a planned event does not count, and neither does
+   a span longer than both the window and a week. The span is taken to end
+   no later than the day the claim was said: "a lecture this month", said
+   on the 11th, happened on the 1st to the 11th. A claim with no event
+   span that was said inside the window comes under `## Said on or about
+   <window>: the question's "<phrase>"`. What happened then is what the
+   question asks about and there is little of it, so it is taken first:
+   every such claim at least half as near the question as the nearest
+   claim from the window. What was said then is everything the person
+   talked about that day, 22 claims on average on the questions measured,
+   so only the claims at least 0.7 as near as the nearest are taken. On 13
+   questions that keeps 67 of 288 lines and every claim an answer was in,
+   which scored 0.89 or more. Then the topics in rank order, each
    under its title and summary with its claims in the order they happened. A
    topic that does not fit whole is shown with the claims nearest the
    question that do, and its heading says how many of its facts those are.
@@ -1067,8 +1081,10 @@ leaves out `current_facts`.
 ```text
 <threads>
 (Background jobs grouped facts the user stated into threads by subject, ...)
+## Happened on or about 2023-05-20 (Sat): the question's "last Saturday"
+[q_msg_41] 2023-05-20 (Sat), 10 days ago: The user just picked up the road bike from the shop.
 ## Said on or about 2023-05-20 (Sat): the question's "last Saturday"
-[q_msg_41] 2023-05-20 (Sat), 10 days ago: The user picked up the road bike from the shop.
+[q_msg_43] 2023-05-20 (Sat), 10 days ago: The user had the bike's brakes looked at recently (said on May 20, 2023).
 ## Nearest the question, in the order they happened
 [q_msg_30] 2023-05-16 (Tue), 14 days ago: The user dropped the road bike at the shop on Monday, May 15, 2023. (happened 2023-05-15 (Mon), 15 days ago)
 [q_msg_47] 2023-05-22 (Mon), 8 days ago: The user changed the pedals on Monday, May 22, 2023.
