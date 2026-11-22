@@ -1,5 +1,9 @@
 # SOTA sprint results — October 1, 2026
 
+For where Quipu stands against published systems today, by question type,
+see [sota-comparison.md](sota-comparison.md). This page is the record of how
+it got there.
+
 ## Decision
 
 The daemon now matches the E1 Python prototype on a frozen LongMemEval-S
