@@ -10,6 +10,42 @@ forget. It stores raw evidence, extracts scoped facts and preferences from that
 evidence, retrieves the right memories for a task, and keeps enough provenance
 that you can ask why a memory exists or remove it later.
 
+## Where It Stands
+
+LongMemEval-S with a GPT-4o reader and the benchmark's GPT-4o judge, next to
+the published systems that report the same reader. Quipu's column is
+`correct / questions run`: it has not been run on all 500 questions, and
+only the temporal row covers a whole question type.
+
+| Question type | Quipu | Zep | Mastra OM | Emergence Simple | Chronos Low | Full context | In benchmark |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Temporal reasoning | **118/133 (88.7%)** | 62.4% | 85.7% | 81.2% | 90.2% | 45.1% | 133 |
+| Multi-session | 18/26 (69.2%) | 57.9% | 79.7% | 73.7% | 91.7% | 44.3% | 133 |
+| Knowledge update | 18/23 (78.3%) | 83.3% | 85.9% | 79.5% | 96.2% | 78.2% | 78 |
+| Single-session user | 22/22 (100%) | 92.9% | 98.6% | 95.7% | 94.3% | 81.4% | 70 |
+| Single-session assistant | 18/19 (94.7%) | 80.4% | 82.1% | 100% | 100% | 94.6% | 56 |
+| Single-session preference | 14/19 (73.7%) | 56.7% | 73.3% | 70.0% | 80.0% | 20.0% | 30 |
+| **All 500** | not run (est. 83%) | 71.2% | 84.8% | 82.4% | 92.6% | 60.2% | 500 |
+| Context given to the reader | 3,800 tokens | 1,600 tokens | about 30,000 tokens | whole sessions | 15 turns and neighbours, then its own searches | 115,000 tokens | |
+| Model calls per question | 1 | not stated | not stated | not stated | 1 to plan, then an agent loop | 1 | |
+| Time to answer | 1.1 s | 2.6 s | 4.1 s | 7.1 s | not reported | 28.9 s | |
+
+- **Level with the best on temporal reasoning**, with an eighth of the
+  context of the one result someone else has reproduced (Mastra). At 1,024
+  tokens Quipu still scores 85.0% there. This category was tuned on.
+- **Behind on multi-session questions**, by 10 to 22 points on a sample of
+  26. They are counts and sums across conversations, and it is the largest
+  gap: 14 to 30 questions of the 500.
+- **Not a benchmark score.** Four rows rest on samples of 19 to 26
+  questions, and the 83% is an estimate from them. Every other column is
+  self-reported, except Mastra's, and measured on its authors' own
+  machines.
+
+Sources, conditions, the smaller reader and what has not been measured are
+in [docs/sota-comparison.md](./docs/sota-comparison.md).
+
+## Install
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jeffhajewski/quipu/main/scripts/install.sh | bash
 export PATH="$HOME/.quipu/bin:$PATH"
@@ -142,10 +178,10 @@ Current external benchmark status:
   85.9% and 88.5% with background extraction, consolidation and
   `options.facts`. One category, not a benchmark score; same document.
 - LongMemEval-S temporal-reasoning category (all 133 questions, official
-  judge, GPT-4o reader, 4,096 tokens): 78.9% with background extraction,
-  consolidation, `options.factKeys` and `options.facts`, now that a time the
-  question names is resolved for the reader; 69.9% without the background
-  jobs before that change. With a GPT-4o-mini reader the default was 68.4%
+  judge, GPT-4o reader, 4,096 tokens): 88.7% with background extraction,
+  consolidation, `options.factKeys` and `options.facts`, reading the
+  summaries the background jobs build before the raw text; 69.9% without
+  the background jobs. With a GPT-4o-mini reader the default was 68.4%
   and the background jobs cost answers. One category, not a benchmark score;
   same document.
 - Pattern questions on eight hand-written journals (24 questions, GPT-4o for
