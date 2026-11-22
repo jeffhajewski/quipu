@@ -94,6 +94,110 @@ out of 500 so the types can be compared.
 - **Behind on knowledge update with this reader, as far as a sample of 23
   shows.** All five misses had a fact from every gold turn in context.
 
+## Latency, tokens and cost
+
+What each source reports. Every figure is measured by a different party on
+its own machines, so read the column for order of magnitude.
+
+| System | Context given to the reader | Model calls per question | Time to answer | Cost | Source of the figures |
+| --- | --- | --- | --- | --- | --- |
+| Quipu, 1,024 budget | about 980 tokens (1,330 with prompt and question) | 1 | median 1.05 s, p95 1.5 s | background jobs about $0.03 per history (GPT-4o-mini); reader $0.004 per question | this repository's runs |
+| Quipu, 4,096 budget | about 3,800 tokens (4,130) | 1 | median 1.1 s, p95 1.6 to 1.9 s | reader $0.011 per question | same |
+| Zep | 1,600 tokens | not stated | 2.58 s | not reported | Zep's paper |
+| Mastra Observational Memory | about 30,000 tokens | not stated | 4.12 s | $0.365 per session; 188 s to ingest an example | time and cost from Redis's rerun |
+| Emergence Simple | whole sessions | not stated; the prompt asks for a chain of thought | 7.12 s median | $0.249 per session (Redis's rerun of its fast variant) | Emergence's post |
+| Chronos Low | 15 reranked turns with a neighbour each side, then whatever its searches return | 1 to write guidance, then an agent loop of unstated length | not reported | not reported | the paper |
+| Redis Remis + Instruct | not reported | not stated | 1.78 s | $0.070 per session; 248 s to ingest an example | Redis's report |
+| Full context | about 115,000 tokens | 1 | 28.9 s (Zep's run), 10.4 s (Emergence's) | not reported | Zep's paper, Emergence's post |
+
+About Quipu's row:
+
+- The time is `memory.answer` end to end with GPT-4o, over the 190 reader
+  calls of two runs that were not served from the cache. All but about 20
+  milliseconds of it (p95 about 60) is the reader call: retrieval and
+  rendering are local.
+- It flatters Quipu in two ways. The question's embedding came from the
+  cache, so one embedding call is missing from the time, and each question
+  has its own store of about 500 messages, which is small.
+- The background jobs' time has not been measured: their model calls came
+  from the cache in these runs. Ingest without them took 2 to 4 seconds per
+  history, also with cached embeddings.
+- Redis's cost per session counts answer tokens only, at list price, for
+  about five questions per session; it is not comparable to a cost per
+  history.
+
+No source reports tokens per question for Mastra's reader beyond the
+average context, and Chronos reports neither time, tokens nor cost.
+
+## How Chronos gets its number
+
+Chronos (PwC, [arXiv 2603.16862](https://arxiv.org/html/2603.16862v1)) has
+the highest GPT-4o result found, and the largest lead over Quipu is on
+multi-session questions (91.7% against 69.2%).
+
+What it stores:
+
+- **Events with a range of dates.** A model extracts subject-verb-object
+  events, each with a first and last moment it could have happened, so
+  "last month" becomes a window. Quipu does the same (`eventStart`,
+  `eventEnd`).
+- **Two to four rewordings of each event**, so a search for "fitness
+  tracker" finds "bought a Fitbit".
+- **Two indexes**, one of events and one of raw turns. No graph, no
+  summaries, no topics.
+
+How it answers:
+
+1. One model call reads the question and writes one to five lines of
+   guidance on what to look for, which go into the reader's instructions.
+2. The 100 nearest turns are reranked by a cross-encoder to 15, each shown
+   with the turn before and after, grouped by session under a date.
+3. The reader is an agent. It can search turns or events by meaning, or
+   grep either by text, as many times as it chooses, before it answers.
+
+What its own ablation says (a 116-question sample, GPT-4o reader, baseline
+93.1%):
+
+| Removed | Accuracy | Change |
+| --- | ---: | ---: |
+| The events index | 58.6% | −34.5 |
+| The first retrieval, leaving the agent to search from nothing | 76.7% | −16.4 |
+| Search by meaning, leaving grep | 77.6% | −15.5 |
+| The question-specific guidance | 78.4% | −14.7 |
+| The date filter | 78.4% | −14.7 |
+| Grep, leaving search by meaning | 80.2% | −12.9 |
+| The reranker | 81.0% | −12.1 |
+
+- The guidance matters most for preference questions (85.7% to 42.9%
+  without it) and temporal ones (96.8% to 67.7%).
+- With a stronger reader (Claude Opus 4.6) most of these removals cost 0 to
+  3 points. Much of the machinery makes up for GPT-4o.
+- The authors name counting and abstention as GPT-4o's remaining errors.
+
+What Quipu does not do that Chronos does:
+
+- **Its reader cannot look again.** Quipu's reader gets one context and
+  answers in one call. A counting question needs every instance, and an
+  agent that can grep for "bought" finds the ones a single retrieval
+  missed. This is the likeliest source of the multi-session gap, and it is
+  work done while the question waits, which is the cost Chronos does not
+  report.
+- **Its instructions do not change with the question.** One fixed prompt
+  serves every question.
+- **It stores no rewordings** of a fact for search.
+
+What follows for Quipu, in the order of how well it fits a system whose
+work is done before the question arrives:
+
+1. Have the background jobs list a topic's distinct items and amounts, so a
+   count can be read off instead of searched for.
+2. Test question-specific guidance: it is one small call, and Chronos's
+   own numbers credit it with most of the preference and temporal gain.
+3. Measure Quipu the way it is meant to be used: an agent holding
+   `memory.search` and `memory.retrieve` as tools, free to call them again.
+   That is the like-for-like of Chronos's reader, and it needs no change to
+   the daemon.
+
 ## With the smaller reader
 
 Reader GPT-4o-mini. No published system has a clearly documented result
@@ -124,9 +228,8 @@ caveat as above. The overall figures are estimates.
   background jobs.
 - **LoCoMo with the background jobs.** The only LoCoMo run is of the
   October default configuration.
-- **Latency and cost per question** under the conditions the others report.
-  What is known: the background jobs cost about $0.03 of GPT-4o-mini per
-  115,000-token history (extraction, consolidation, summaries, patterns).
+- **Latency on a large store with nothing cached**, and the time the
+  background jobs take. See the table above for what is known.
 - **Whether "evidence in context" means what it says.** The harness counts
   a gold turn as present when any fact extracted from it is shown, even if
   the detail the question needs was dropped.
@@ -147,15 +250,18 @@ caveat as above. The overall figures are estimates.
 
 ## Sources
 
-Fetched November 22, 2026. The Mastra and Chronos rows were read on the
-pages directly; the rest come from a survey of the primary pages.
+Fetched November 22, 2026. The Mastra, Chronos and Emergence rows and
+Redis's table were read on the pages directly; the rest come from a survey
+of the primary pages.
 
 - LongMemEval: <https://arxiv.org/html/2410.10813v2>
 - Zep and the full-context baseline: <https://arxiv.org/html/2501.13956>
 - Mastra Observational Memory:
   <https://mastra.ai/research/observational-memory>
 - Redis's reproductions:
-  <https://redis.io/resources/agent-memory-benchmark-report>
+  <https://redis.io/resources/agent-memory-benchmark-report> (its
+  full table has two rows that repeat one number in every column; they are
+  not used here)
 - Emergence: <https://emergence.ai/blog/sota-on-longmemeval-with-rag>
 - Chronos: <https://arxiv.org/html/2603.16862v1>
 - LightMem (and its GPT-4o-mini baselines):
